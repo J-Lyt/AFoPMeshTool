@@ -2,8 +2,8 @@ bl_info = {
     "name": "Star Wars Outlaws Mesh Tool",
     "author": "AlexPo",
     "location": "Scene Properties > Star Wars: Outlaws Mesh Tool Panel",
-    "version": (0, 0, 3),
-    "blender": (4, 2, 0),
+    "version": (0, 0, 4),
+    "blender": (5, 0, 0),
     "description": "This addon imports/exports skeletal meshes\n from Star Wars Outlaws's .mmb files",
     "category": "Import-Export"
     }
@@ -187,7 +187,7 @@ class BytePacker:
     def uint8(v):
         return pack('<B', v)
     @staticmethod
-    def uint8Norm(v):
+    def uint8_norm(v):
         if 0.0 <= v <= 1.0:
             i = int(v * ((2 ** 8)-1))
         else:
@@ -202,17 +202,19 @@ class BytePacker:
     def uint16(v):
         return pack('<H', v)
     @staticmethod
-    def int16Norm(v):
+    def int16_norm(v):
+        # print(v)
         if -1.0 < v < 1.0:
-            if v >= 0:
-                v = int(abs(v) * (2 ** 15))
-            else:
-                v = 2 ** 16 - int(abs(v) * (2 ** 15))
+            # if v >= 0:
+            #     v = int(abs(v) * (2 ** 15))
+            # else:
+            #     v = 2 ** 16 - int(abs(v) * (2 ** 15))
+            v = int(v * (2 ** 15))
         else:
             raise Exception("Couldn't normalize value as int16Norm, it wasn't between -1.0 and 1.0. Unknown max value.")
-        return pack('<H', v)
+        return pack('<h', v)
     @staticmethod
-    def uint16Norm(v):
+    def uint16_norm(v):
         if 0.0 < v < 1.0:
             i = v * (2 ** 16) - 1
         else:
@@ -474,6 +476,30 @@ class SkeletalMeshAsset(Asset):
                     colors.append((r,g,b,a))
                 return colors
 
+            def write_vertex_position(self,file,pos=(0.0,0.0,0.0),scale=2):
+                """
+                Writes a single vertex position into file at the current position and skips to the end of stride.
+                :param file: file to write on
+                :param pos: (x,y,z)
+                :return:
+                """
+                f = file
+                x = pos[0]
+                y = pos[1]
+                z = pos[2]
+                stride = self.parent_mesh.vertex_stride
+                stride_start = f.tell()
+                if self.parent_mesh.position_type == 0:
+                    f.write(bp.int16_norm(x / scale))
+                    f.write(bp.int16_norm(y / scale))
+                    f.write(bp.int16_norm(z / scale))
+                    f.write(bp.int16(scale))
+                elif self.parent_mesh.position_type == 1:
+                    f.write(bp.float(x))
+                    f.write(bp.float(y))
+                    f.write(bp.float(z))
+                f.seek(stride_start + stride)
+
         def __init__(self,parent_sk_mesh):
             self.parent_sk_mesh:SkeletalMeshAsset = parent_sk_mesh
             self.name = ""
@@ -543,7 +569,6 @@ class SkeletalMeshAsset(Asset):
         def extract_mesh_file(self,f):
             """
             Creates a file gathering the raw data of all Lods the Mesh.
-            This
             :param f: combined mmb file that contains the header and data.
             :return: Path to the extracted raw_mesh file.
             """
@@ -710,21 +735,54 @@ class BlenderMeshImporter:
         armature.matrix_world = mat
         bpy.ops.object.transform_apply(rotation=True)
 
-#testing
-# file_path = "W:\OutlawsModding\helix\\baked\\art\characters\characters\chr_body\chr_body_1_gold_kay\chr_body_1_gold_kay-combined.mmb_0"
-# file_path = Path(file_path)
-# with open(file_path, 'rb') as file:
-#     print(f"opened : {file_path}")
-#     sk_mesh = SkeletalMeshAsset()
-#     sk_mesh.parse(file)
-#     BMI = BlenderMeshImporter
-#     obj = BMI.import_mesh(file, sk_mesh, sk_mesh.meshes[0], 0)
-#     armature = BMI.import_skeleton(sk_mesh)
-#     BMI.parent_obj_to_armature(obj,armature)
-#     BMI.rotate_model(obj,armature)
+class BlenderMeshExporter:
+    @staticmethod
+    def find_object_by_name(name=""):
+        obj = None
+        try:
+            obj = bpy.data.objects[name]
+        except KeyError:
+            raise KeyError(f"{name} object was not found.") from None
+        return obj
+    @staticmethod
+    def copy_mmb_file():
+        """
+        Takes the merged mmb file and creates a copy of it.
+        :return: Path to the created file.
+        """
+        SWOMT = bpy.context.scene.SWOMT
+        file = SWOMT.AssetPath
+        print(f"file = {file}")
+        merged_file = get_merged_mmb(file)
+        print(f'merged file size = {merged_file.getbuffer().nbytes}')
+        mod_file = os.path.splitext(file)[0] + "_MOD.mmb"
+        print(f'mod file = {mod_file}')
+        if os.path.exists(mod_file):
+            return mod_file
+        else:
+            with open(mod_file, 'wb') as w:
+                CopyFile(merged_file, w, 0, merged_file.getbuffer().nbytes)
+        return mod_file
+    @staticmethod
+    def overwrite_vertex_positions(file, skeletal_mesh:SkeletalMeshAsset, mesh:SkeletalMeshAsset.Mesh, lod_index = 0):
+        obj = BME.find_object_by_name(mesh.name+f"_LOD{lod_index}")
+        lod:SkeletalMeshAsset.Mesh.LOD = mesh.lods[lod_index]
+        if obj:
+            data = obj.data
+            with open(file,'rb+') as f:
+                f.seek(lod.data_offset)
+                for v in range(lod.vertex_count):
+                    lod.write_vertex_position(f, pos=data.vertices[v].co * Vector((-1.0,1.0,1.0)), scale=2)
+    @staticmethod
+    def write_vertices(file, mesh:SkeletalMeshAsset.Mesh, lod_index = 0):
+        obj = BME.find_object_by_name(mesh.name+f"_LOD{lod_index}")
+        lod:SkeletalMeshAsset.Mesh.LOD = mesh.lods[lod_index]
+        if obj:
+            data = obj.data
 
 asset : SkeletalMeshAsset = None
 BMI = BlenderMeshImporter
+BME = BlenderMeshExporter
 
 class SWOMTSettings(bpy.types.PropertyGroup):
     AssetPath: bpy.props.StringProperty(name="Asset Path", subtype="FILE_PATH")
@@ -773,6 +831,25 @@ class ImportLOD(bpy.types.Operator):
         BMI.rotate_model(obj,armature)
         return {'FINISHED'}
 
+class ExportLOD(bpy.types.Operator):
+    """Exports the given LOD"""
+    bl_idname = 'object.export_lod'
+    bl_label = 'Export'
+
+    mesh_index: bpy.props.IntProperty()
+    lod_index: bpy.props.IntProperty()
+
+    @classmethod
+    def poll(cls,context):
+        return asset is not None
+
+    def execute(self,context):
+        mod_file = BME.copy_mmb_file()
+        BME.overwrite_vertex_positions(file=mod_file,
+                                       skeletal_mesh=asset,
+                                       mesh=asset.meshes[self.mesh_index],
+                                       lod_index=self.lod_index)
+        return {'FINISHED'}
 # PANELS #
 class SWOMTPanel(bpy.types.Panel):
     """Creates a Panel in the Scene Properties window"""
@@ -816,12 +893,16 @@ class MeshPanel(bpy.types.Panel):
                     lod_import_button = row.operator("object.import_lod")
                     lod_import_button.lod_index = li
                     lod_import_button.mesh_index = mi
+                    lod_export_button = row.operator("object.export_lod")
+                    lod_export_button.lod_index = li
+                    lod_export_button.mesh_index = mi
 
 classes=[SWOMTSettings,
          SWOMTPanel,
          MeshPanel,
          LoadMMB,
-         ImportLOD]
+         ImportLOD,
+         ExportLOD]
 
 def register():
     for c in classes:
