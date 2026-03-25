@@ -2,7 +2,7 @@ bl_info = {
     "name": "Star Wars Outlaws Mesh Tool",
     "author": "AlexPo",
     "location": "Scene Properties > Star Wars: Outlaws Mesh Tool Panel",
-    "version": (0, 0, 4),
+    "version": (0, 0, 5),
     "blender": (5, 0, 0),
     "description": "This addon imports/exports skeletal meshes\n from Star Wars Outlaws's .mmb files",
     "category": "Import-Export"
@@ -306,7 +306,9 @@ class Asset:
         self.magic = br.string(f,3)
         self.version = br.uint8(f)
         self.size = br.uint32(f)
-        f.seek(4,1)
+        # v13 has no 4-byte padding after size; v15/v16/v17 do.
+        if self.version >= 15:
+            f.seek(4,1)
 
 class SkeletalMeshAsset(Asset):
     class Mesh:
@@ -330,7 +332,9 @@ class SkeletalMeshAsset(Asset):
                 self.face_block_offset = br.uint32(f)
                 self.data_offset = br.uint32(f)
                 self.data_size = br.uint32(f)
-                lod_screen_size = br.float(f)  # not confirmed screen size
+                # v15 LOD struct has no screen_size float.
+                if self.parent_mesh.parent_sk_mesh.version != 15:
+                    lod_screen_size = br.float(f)
 
             def get_vertex_positions(self,raw_mesh_file):
                 vertices = []
@@ -362,27 +366,69 @@ class SkeletalMeshAsset(Asset):
                 f = raw_mesh_file
                 f.seek(self.vertex_data_offset_a)
                 for v in range(self.vertex_count):
-                    if stride == 24:
-                        pos_length = 8
-                    elif stride == 28:
-                        pos_length = 12
-                    else:
-                        pos_length = 8
-                    f.seek(pos_length,1)
-                    weight_count = int((stride - pos_length) / 2)
-                    weights = []
                     iw = {}
-                    for w in range(weight_count):
-                        weight = br.uint8_norm(f)
-                        if weight > 0.0:
-                            weights.append(weight)
-
-                    for i in range(weight_count):
-                        if i < len(weights):
-                            iw[br.uint8(f)] = weights[i]
+                    if stride == 20:
+                        f.seek(8, 1)
+                        weight_count = 4
+                        weights = [br.uint16(f) / 32767.0 for _ in range(weight_count)]
+                        indices = [br.uint8(f) for _ in range(weight_count)]
+                        for i in range(weight_count):
+                            if weights[i] > 0.0:
+                                iw[indices[i]] = weights[i]
+                    elif stride == 32:
+                        f.seek(8, 1)
+                        weights = [br.uint16(f) / 32767.0 for _ in range(8)]
+                        indices = [br.uint8(f) for _ in range(8)]
+                        for i in range(8):
+                            if weights[i] > 0.0:
+                                iw[indices[i]] = weights[i]
+                    elif stride == 36:
+                        f.seek(12, 1)
+                        weights = [br.uint16(f) / 32767.0 for _ in range(8)]
+                        indices = [br.uint8(f) for _ in range(8)]
+                        for i in range(8):
+                            if weights[i] > 0.0:
+                                iw[indices[i]] = weights[i]
+                    elif stride == 40:
+                        f.seek(8, 1)
+                        weights = [br.uint16(f) / 32767.0 for _ in range(8)]
+                        indices = [br.uint16(f) for _ in range(8)]
+                        for i in range(8):
+                            if weights[i] > 0.0:
+                                iw[indices[i]] = weights[i]
+                    elif stride == 44:
+                        f.seek(8, 1)
+                        weight_count = 12
+                        weights = []
+                        for w in range(weight_count):
+                            weight = br.uint8_norm(f)
+                            if weight > 0.0:
+                                weights.append(weight)
+                        for i in range(weight_count):
+                            if i < len(weights):
+                                iw[br.uint8(f)] = weights[i]
+                            else:
+                                f.seek(1, 1)
+                        f.seek(12, 1)
+                    else:
+                        if stride == 24:
+                            pos_length = 8
+                        elif stride == 28:
+                            pos_length = 12
                         else:
-                            f.seek(1,1)
-
+                            pos_length = 8
+                        f.seek(pos_length,1)
+                        weight_count = int((stride - pos_length) / 2)
+                        weights = []
+                        for w in range(weight_count):
+                            weight = br.uint8_norm(f)
+                            if weight > 0.0:
+                                weights.append(weight)
+                        for i in range(weight_count):
+                            if i < len(weights):
+                                iw[br.uint8(f)] = weights[i]
+                            else:
+                                f.seek(1,1)
                     bone_weights.append(iw)
                 return bone_weights
 
@@ -395,11 +441,25 @@ class SkeletalMeshAsset(Asset):
                 tris = []
                 f = raw_mesh_file
                 f.seek(self.face_block_offset)
+                use_uint32 = False
+                if self.index_count > 0:
+                    peek_bytes = f.read(16)
+                    f.seek(self.face_block_offset)
+                    if len(peek_bytes) >= 16:
+                        import struct as _struct
+                        hi_words = [_struct.unpack('<H', peek_bytes[i:i+2])[0]
+                                    for i in range(2, 16, 4)]
+                        use_uint32 = all(v == 0 for v in hi_words)
                 for i in range(int(self.index_count/3)):
+                    if use_uint32:
+                        f1 = br.uint32(f)
+                        f2 = br.uint32(f)
+                        f3 = br.uint32(f)
+                    else:
                         f1 = br.uint16(f)
                         f2 = br.uint16(f)
                         f3 = br.uint16(f)
-                        tris.append((f1,f2,f3))
+                    tris.append((f1,f2,f3))
                 return tris
 
             def get_normals_size(self):
@@ -476,11 +536,14 @@ class SkeletalMeshAsset(Asset):
                     colors.append((r,g,b,a))
                 return colors
 
-            def write_vertex_position(self,file,pos=(0.0,0.0,0.0),scale=2):
+            def write_vertex_position(self,file,pos=(0.0,0.0,0.0),scale=None):
                 """
                 Writes a single vertex position into file at the current position and skips to the end of stride.
                 :param file: file to write on
                 :param pos: (x,y,z)
+                :param scale: the per-vertex w (scale) value read from the original file.
+                              If None or 0, the vertex is a zero-displacement override vertex
+                              and is skipped (the original bytes are left intact).
                 :return:
                 """
                 f = file
@@ -490,6 +553,9 @@ class SkeletalMeshAsset(Asset):
                 stride = self.parent_mesh.vertex_stride
                 stride_start = f.tell()
                 if self.parent_mesh.position_type == 0:
+                    if scale is None or scale == 0:
+                        f.seek(stride_start + stride)
+                        return
                     f.write(bp.int16_norm(x / scale))
                     f.write(bp.int16_norm(y / scale))
                     f.write(bp.int16_norm(z / scale))
@@ -516,17 +582,19 @@ class SkeletalMeshAsset(Asset):
             self.name = br.name(f)
             f.seek(48, 1)  # some kind of matrix
             f.seek(1, 1)
-            x_count = br.uint16(f)
+            x_count = br.uint8(f)
             f.seek(1, 1)
             f.seek(4 * x_count, 1)
-            f.seek(1, 1)
             u_count = br.uint16(f)
             for b in range(u_count):
                 matrix = br.matrix_4x4(f)
                 bone_index = br.uint16(f)
                 self.mesh_bones[bone_index] = matrix
             f.seek(2, 1)
-            lod_info_type = br.uint16(f)
+            if self.parent_sk_mesh.version >= 15:
+                lod_info_type = br.uint8(f)
+            else:
+                lod_info_type = 0
             self.lod_count = br.uint8(f)
             f.seek(4, 1)
             for l in range(self.lod_count):
@@ -537,11 +605,15 @@ class SkeletalMeshAsset(Asset):
                            1)  # if lod_info_type = 2 there's more data, this should be handled by the LOD.parse function.
                 self.lods.append(lod)
 
-            #this section could be wrong
+            if self.parent_sk_mesh.version == 15:
+                f.seek(4, 1)
             self.uv_count = br.uint8(f)
             f.seek(4*self.uv_count,1)
-            self.color_count = br.uint8(f)
-            f.seek(4*self.color_count,1)
+            if self.parent_sk_mesh.version >= 16:
+                self.color_count = br.uint8(f)
+                f.seek(4*self.color_count,1)
+            else:
+                self.color_count = 0
             unk = br.uint32(f)
             count_c = br.uint8(f)
             f.seek(4*count_c,1)
@@ -556,16 +628,23 @@ class SkeletalMeshAsset(Asset):
                 self.normal_type = 0
 
             # guessing the type of vertex position data int16 or floats
-            if self.vertex_stride - 16 == 8 or self.vertex_stride - 8 == 8:
-                self.position_type = 0 #int16
-            elif self.vertex_stride - 16 == 12 or self.vertex_stride - 8 == 12:
-                self.position_type = 1 #float
+            if self.vertex_stride in (32, 40, 44):
+                self.position_type = 0  # int16
+            elif self.vertex_stride in (28, 36):
+                self.position_type = 1  # float
+            elif self.normals_stride == 32:
+                self.position_type = 1  # float
+            elif self.vertex_stride - 16 == 8 or self.vertex_stride - 8 == 8:
+                self.position_type = 0  # int16
+            else:
+                self.position_type = 0  # default to int16 for unknown
             print(f'\nName = {self.name}'
                   f'\nVertex Stride: {self.vertex_stride}'
                   f'\nNormals Stride: {self.normals_stride}'
                   f'\nUV Count: {self.uv_count}'
                   f'\nColor Count: {self.color_count}')
-            f.seek(20, 1)  # TODO figure out between strides and next mesh
+            tail_seek = 20 if self.parent_sk_mesh.version >= 17 else 16
+            f.seek(tail_seek, 1)
         def extract_mesh_file(self,f):
             """
             Creates a file gathering the raw data of all Lods the Mesh.
@@ -646,6 +725,9 @@ class BlenderMeshImporter:
             for v_index in tris:
                 tv = bm.verts[v_index]
                 face_vertices.append(tv)
+            # some meshes store intentional duplicate triangles; skip them.
+            if bm.faces.get(face_vertices) is not None:
+                continue
             bm_face = bm.faces.new(face_vertices)
             bm_face.normal_flip() #this is required because the *-1 on x vertex co flips the mesh normals
         bm.to_mesh(obj_data)
@@ -770,9 +852,20 @@ class BlenderMeshExporter:
         if obj:
             data = obj.data
             with open(file,'rb+') as f:
+                if mesh.position_type == 0:
+                    original_w = []
+                    f.seek(lod.data_offset)
+                    for v in range(lod.vertex_count):
+                        f.seek(6, 1)
+                        w = unpack('<h', f.read(2))[0]
+                        original_w.append(w)
+                        f.seek(mesh.vertex_stride - 8, 1)
+                else:
+                    original_w = [None] * lod.vertex_count
+
                 f.seek(lod.data_offset)
                 for v in range(lod.vertex_count):
-                    lod.write_vertex_position(f, pos=data.vertices[v].co * Vector((-1.0,1.0,1.0)), scale=2)
+                    lod.write_vertex_position(f, pos=data.vertices[v].co * Vector((-1.0,1.0,1.0)), scale=original_w[v])
     @staticmethod
     def write_vertices(file, mesh:SkeletalMeshAsset.Mesh, lod_index = 0):
         obj = BME.find_object_by_name(mesh.name+f"_LOD{lod_index}")
