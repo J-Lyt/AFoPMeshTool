@@ -2,7 +2,7 @@ bl_info = {
     "name": "Star Wars Outlaws Mesh Tool",
     "author": "AlexPo",
     "location": "Scene Properties > Star Wars: Outlaws Mesh Tool Panel",
-    "version": (0, 0, 5),
+    "version": (0, 0, 6),
     "blender": (5, 0, 0),
     "description": "This addon imports/exports skeletal meshes\n from Star Wars Outlaws's .mmb files",
     "category": "Import-Export"
@@ -732,6 +732,13 @@ class BlenderMeshImporter:
             bm_face.normal_flip() #this is required because the *-1 on x vertex co flips the mesh normals
         bm.to_mesh(obj_data)
         bm.free()
+
+        # Store original mmb vertex order as a custom attribute.
+        # This should allow the order to persist through mesh operators such as 'Mesh > Separate > By Loose Parts'
+        attr = obj_data.attributes.new(name='mmb_vertex_order', type='INT', domain='POINT')
+        for i in range(lod.vertex_count):
+            attr.data[i].value = i
+
         bm = bmesh.new()
         bm.from_mesh(obj_data)
         bm.faces.ensure_lookup_table()
@@ -851,21 +858,39 @@ class BlenderMeshExporter:
         lod:SkeletalMeshAsset.Mesh.LOD = mesh.lods[lod_index]
         if obj:
             data = obj.data
+            SWOMT = bpy.context.scene.SWOMT
+            original_file = get_merged_mmb(SWOMT.AssetPath)
+
             with open(file,'rb+') as f:
+                # Read original w values from the IMPORTED file.
                 if mesh.position_type == 0:
                     original_w = []
-                    f.seek(lod.data_offset)
+                    original_file.seek(lod.data_offset)
                     for v in range(lod.vertex_count):
-                        f.seek(6, 1)
-                        w = unpack('<h', f.read(2))[0]
+                        original_file.seek(6, 1)
+                        w = unpack('<h', original_file.read(2))[0]
                         original_w.append(w)
-                        f.seek(mesh.vertex_stride - 8, 1)
+                        original_file.seek(mesh.vertex_stride - 8, 1)
                 else:
                     original_w = [None] * lod.vertex_count
 
-                f.seek(lod.data_offset)
-                for v in range(lod.vertex_count):
-                    lod.write_vertex_position(f, pos=data.vertices[v].co * Vector((-1.0,1.0,1.0)), scale=original_w[v])
+                mmb_attr = data.attributes.get('mmb_vertex_order')
+                if mmb_attr is not None:
+                    blender_to_mmb = {bv_idx: mmb_attr.data[bv_idx].value for bv_idx in range(len(data.vertices))}
+                    is_valid = (len(blender_to_mmb) == lod.vertex_count and all(0 <= idx < lod.vertex_count for idx in blender_to_mmb.values()))
+                    use_mapping = is_valid
+                    print(f"[AFoPMT] Exported '{mesh.name}' LOD{lod_index}: "
+                          f"mmb_vertex_order attribute found, valid={is_valid}")
+                else:
+                    use_mapping = False
+                    print(f"[AFoPMT] Exported '{mesh.name}' LOD{lod_index}: "
+                          f"mmb_vertex_order attribute NOT found, using fallback. "
+                          f"Please re-import the mesh to get the correct vertex order")
+
+                for bv_idx, bv in enumerate(data.vertices):
+                    mmb_idx = blender_to_mmb.get(bv_idx, bv_idx) if use_mapping else bv_idx
+                    f.seek(lod.data_offset + mmb_idx * mesh.vertex_stride)
+                    lod.write_vertex_position(f, pos=(-bv.co.x, bv.co.y, bv.co.z), scale=original_w[mmb_idx])
     @staticmethod
     def write_vertices(file, mesh:SkeletalMeshAsset.Mesh, lod_index = 0):
         obj = BME.find_object_by_name(mesh.name+f"_LOD{lod_index}")
