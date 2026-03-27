@@ -8,10 +8,10 @@
 #   - All fixes are version-conditional (additive only — existing versions unchanged)
 
 bl_info = {
-    "name": "AFoP Mesh Tool | Version 0.1.7",
+    "name": "AFoP Mesh Tool | Version 0.1.11",
     "author": "AlexPo, JasperZebra, J-Lyt",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 7),
+    "version": (0, 1, 11),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from Avatar: Frontiers of Pandora .mmb files. Supports versions 12, 13, 15, 16, 17.",
     "category": "Import-Export"
@@ -1031,6 +1031,24 @@ class ExportLOD(bpy.types.Operator):
                                        mesh=mesh,
                                        lod_index=self.lod_index)
 
+        # Apply staged Hide Mesh — zero all LODs of this mesh in the _MOD file.
+        if mesh.zeroed_out_in_session:
+            with open(mod_file, 'rb+') as f:
+                for lod in mesh.lods:
+                    if mesh.position_type == 0:
+                        original_w = []
+                        f.seek(lod.data_offset)
+                        for v in range(lod.vertex_count):
+                            f.seek(6, 1)
+                            w = unpack('<h', f.read(2))[0]
+                            original_w.append(w)
+                            f.seek(mesh.vertex_stride - 8, 1)
+                    else:
+                        original_w = [1] * lod.vertex_count
+                    for v in range(lod.vertex_count):
+                        f.seek(lod.data_offset + v * mesh.vertex_stride)
+                        lod.write_vertex_position(f, pos=(0.0, 0.0, 0.0), scale=original_w[v] if mesh.position_type == 0 else None)
+
         # Apply staged mesh name rename to the _MOD copy.
         # Nulls go BEFORE the new name; length prefix stays unchanged.
         if mesh.pending_rename_new:
@@ -1131,29 +1149,18 @@ class ZeroOutMesh(bpy.types.Operator):
 
     def execute(self, context):
         mesh = asset.meshes[self.mesh_index]
-        SWOMT = context.scene.SWOMT
-        mod_file = BME.copy_mmb_file()
-
-        with open(mod_file, 'rb+') as f:
-            for lod in mesh.lods:
-                # Read original w values for int16 meshes so file size stays intact
-                if mesh.position_type == 0:
-                    original_w = []
-                    f.seek(lod.data_offset)
-                    for v in range(lod.vertex_count):
-                        f.seek(6, 1)
-                        w = unpack('<h', f.read(2))[0]
-                        original_w.append(w)
-                        f.seek(mesh.vertex_stride - 8, 1)
-                else:
-                    original_w = [1] * lod.vertex_count
-
-                for v in range(lod.vertex_count):
-                    f.seek(lod.data_offset + v * mesh.vertex_stride)
-                    lod.write_vertex_position(f, pos=(0.0, 0.0, 0.0), scale=original_w[v] if mesh.position_type == 0 else None)
-
         mesh.zeroed_out_in_session = True
-        self.report({'INFO'}, f"Zeroed out '{mesh.name}' ({len(mesh.lods)} LOD(s)) in {os.path.basename(mod_file)}")
+
+        # Update any already-imported Blender objects in the viewport
+        for li, lod in enumerate(mesh.lods):
+            obj_name = lod.blender_obj_name if lod.blender_obj_name else f"{mesh.name}_LOD{li}"
+            obj = bpy.data.objects.get(obj_name)
+            if obj is not None:
+                for vert in obj.data.vertices:
+                    vert.co = (0.0, 0.0, 0.0)
+                obj.data.update()
+
+        self.report({'INFO'}, f"'{mesh.name}' hidden in viewport — will be zeroed in _MOD on Export.")
         return {'FINISHED'}
 
 
@@ -1178,17 +1185,17 @@ class RevertMesh(bpy.types.Operator):
 
         SWOMT = context.scene.SWOMT
         original_file = get_merged_mmb(SWOMT.AssetPath)
-        mod_file = BME.copy_mmb_file()
-        pos_size = 12 if mesh.position_type == 1 else 8
 
-        with open(mod_file, 'rb+') as f:
-            for lod in mesh.lods:
-                for v in range(lod.vertex_count):
-                    offset = lod.data_offset + v * mesh.vertex_stride
-                    original_file.seek(offset)
-                    pos_bytes = original_file.read(pos_size)
-                    f.seek(offset)
-                    f.write(pos_bytes)
+        # Update any already-imported Blender objects in the viewport
+        raw_mesh_file = mesh.extract_mesh_file(original_file)
+        for li, lod in enumerate(mesh.lods):
+            obj_name = lod.blender_obj_name if lod.blender_obj_name else f"{mesh.name}_LOD{li}"
+            obj = bpy.data.objects.get(obj_name)
+            if obj is not None:
+                verts = lod.get_vertex_positions(raw_mesh_file)
+                for i, vert in enumerate(obj.data.vertices):
+                    vert.co = (-verts[i][0], verts[i][1], verts[i][2])
+                obj.data.update()
 
         mesh.zeroed_out_in_session = False
         self.report({'INFO'}, f"Reverted '{mesh.name}' ({len(mesh.lods)} LOD(s)) to original positions.")
@@ -1373,7 +1380,7 @@ class SelectMGraphObjectFilePatch(bpy.types.Operator):
 # PANELS #
 class SWOMTPanel(bpy.types.Panel):
     """Creates a Panel in the Scene Properties window"""
-    bl_label = "AFoP Mesh Tool | Version 0.1.7"
+    bl_label = "AFoP Mesh Tool | Version 0.1.11"
     bl_idname = "OBJECT_PT_swomtpanel"
     bl_space_type = "PROPERTIES"
     bl_region_type = "WINDOW"
