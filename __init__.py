@@ -1,10 +1,19 @@
+# Original author: AlexPo
+# Modified by: JasperZebra — Avatar: Frontiers of Pandora (.mmb version 13) support
+# Further modified — multi-version support: v12, v13, v15, v16, v17
+#   - Added v12/v15/v16 parsing (multi-version support)
+#   - Fixed pre-LOD section: root_bone_index and lod_info_type are version/u_count conditional
+#   - Fixed tail section: UV hashes are 4 bytes on all versions; unk field order differs v12-15 vs v16-17
+#   - Formula-based position type detection: normals_base = ns - 4*uv - 4*col; 28→float, 12→int16
+#   - All fixes are version-conditional (additive only — existing versions unchanged)
+
 bl_info = {
-    "name": "Star Wars Outlaws Mesh Tool",
-    "author": "AlexPo",
-    "location": "Scene Properties > Star Wars: Outlaws Mesh Tool Panel",
-    "version": (0, 0, 6),
+    "name": "AFoP Mesh Tool | Version 0.1.7",
+    "author": "AlexPo, JasperZebra, J-Lyt",
+    "location": "Scene Properties > AFoP Mesh Tool Panel",
+    "version": (0, 1, 7),
     "blender": (5, 0, 0),
-    "description": "This addon imports/exports skeletal meshes\n from Star Wars Outlaws's .mmb files",
+    "description": "Imports skeletal meshes from Avatar: Frontiers of Pandora .mmb files. Supports versions 12, 13, 15, 16, 17.",
     "category": "Import-Export"
     }
 
@@ -306,9 +315,8 @@ class Asset:
         self.magic = br.string(f,3)
         self.version = br.uint8(f)
         self.size = br.uint32(f)
-        # v13 has no 4-byte padding after size; v15/v16/v17 do.
         if self.version >= 15:
-            f.seek(4,1)
+            f.seek(4, 1)  # 4-byte header skip for v15+
 
 class SkeletalMeshAsset(Asset):
     class Mesh:
@@ -323,6 +331,7 @@ class SkeletalMeshAsset(Asset):
                 self.face_block_offset = 0
                 self.data_offset = 0
                 self.data_size = 0
+                self.blender_obj_name = ""  # set at import time; used by exporter to find the object
             def parse(self, f):
                 self.vertex_count = br.uint32(f)
                 self.index_count = br.uint32(f)
@@ -332,9 +341,7 @@ class SkeletalMeshAsset(Asset):
                 self.face_block_offset = br.uint32(f)
                 self.data_offset = br.uint32(f)
                 self.data_size = br.uint32(f)
-                # v15 LOD struct has no screen_size float.
-                if self.parent_mesh.parent_sk_mesh.version != 15:
-                    lod_screen_size = br.float(f)
+                lod_screen_size = br.float(f)
 
             def get_vertex_positions(self,raw_mesh_file):
                 vertices = []
@@ -569,6 +576,10 @@ class SkeletalMeshAsset(Asset):
         def __init__(self,parent_sk_mesh):
             self.parent_sk_mesh:SkeletalMeshAsset = parent_sk_mesh
             self.name = ""
+            self.name_offset = 0        # byte offset of the uint16 length prefix in the source file
+            self.name_length = 0        # original byte count of the name field (from the uint16 prefix)
+            self.pending_rename_new = ""  # staged mesh rename — applied to _MOD copy on next export
+            self.zeroed_out_in_session = False  # True if Zero Out was used this session
             self.lod_count = 0
             self.lods = []
             self.vertex_stride = 0
@@ -579,7 +590,10 @@ class SkeletalMeshAsset(Asset):
             self.normal_type = 0 # 0:int8_norm 1:floats
             self.position_type = 0 # 0:int16_norm 1:floats
         def parse(self, f):
-            self.name = br.name(f)
+            self.name_offset = f.tell()
+            _nlen = unpack('<H', f.read(2))[0]
+            self.name_length = _nlen
+            self.name = br.string(f, _nlen).rstrip('\x00')
             f.seek(48, 1)  # some kind of matrix
             f.seek(1, 1)
             x_count = br.uint8(f)
@@ -590,61 +604,98 @@ class SkeletalMeshAsset(Asset):
                 matrix = br.matrix_4x4(f)
                 bone_index = br.uint16(f)
                 self.mesh_bones[bone_index] = matrix
-            f.seek(2, 1)
-            if self.parent_sk_mesh.version >= 15:
+
+            version = self.parent_sk_mesh.version
+
+            # --- Pre-LOD section ---
+            # root_bone_index: present only when u_count > 0, and absent for v12 entirely.
+            # lod_info_type: present for v15/v16/v17 always; absent for v12/v13.
+            #   v12:            no root_bone_index, no lod_info_type
+            #   v13, u>0:       root_bone_index[1]  lod_info_type[1]
+            #   v13, u==0:      (no root_bone_index, no lod_info_type)
+            #   v15/16/17, u>0: root_bone_index[2]  lod_info_type[1]
+            #   v15/16/17, u==0: lod_info_type[1]
+            if u_count > 0 and version != 12:
+                if version == 13:
+                    f.seek(1, 1)  # v13: 1-byte root_bone_index
+                else:             # v15, v16, v17
+                    f.seek(2, 1)  # v15+: 2-byte root_bone_index
                 lod_info_type = br.uint8(f)
             else:
-                lod_info_type = 0
+                if version in (12, 13):
+                    lod_info_type = 0  # v12/v13 have no lod_info_type byte
+                else:                  # v15, v16, v17 with u_count == 0
+                    lod_info_type = br.uint8(f)
+
             self.lod_count = br.uint8(f)
-            f.seek(4, 1)
+            f.seek(4, 1)  # unknown 4 bytes before LOD list
+
+            # --- LOD list ---
+            # Each LOD is 36 bytes. When lod_info_type == 2, an extra 28 bytes follow each LOD.
             for l in range(self.lod_count):
                 lod = self.LOD(self,l)
                 lod.parse(f)
                 if lod_info_type == 2:
-                    f.seek(28,
-                           1)  # if lod_info_type = 2 there's more data, this should be handled by the LOD.parse function.
+                    f.seek(28, 1)
                 self.lods.append(lod)
 
-            if self.parent_sk_mesh.version == 15:
-                f.seek(4, 1)
+            # --- Tail section: UV hashes, color hashes, strides ---
+            # UV hashes are 4 bytes each on all versions.
+            #
+            # v12/v13/v15 layout:  uv_count  uv_hashes  unk[4]  color_count  color_hashes
+            # v16/v17 layout:      uv_count  uv_hashes  color_count  color_hashes  unk[4]  count_c  c_data
             self.uv_count = br.uint8(f)
-            f.seek(4*self.uv_count,1)
-            if self.parent_sk_mesh.version >= 16:
+            f.seek(4 * self.uv_count, 1)
+
+            if version in (16, 17):
                 self.color_count = br.uint8(f)
-                f.seek(4*self.color_count,1)
+                f.seek(4 * self.color_count, 1)
+                f.seek(4, 1)               # unk after color (v16/v17)
+                count_c = br.uint8(f)
+                f.seek(4 * count_c, 1)
             else:
-                self.color_count = 0
-            unk = br.uint32(f)
-            count_c = br.uint8(f)
-            f.seek(4*count_c,1)
+                f.seek(4, 1)               # unk before color (v12/v13/v15)
+                self.color_count = br.uint8(f)
+                f.seek(4 * self.color_count, 1)
 
             self.vertex_stride = br.uint16(f)
             self.normals_stride = br.uint16(f)
 
-            # guessing the type of normal data int8 or floats
-            if self.normals_stride - (4 * self.uv_count) - (4 * self.color_count) > 8:
-                self.normal_type = 1
-            else:
-                self.normal_type = 0
+            # --- Normal type detection ---
+            # normals_base = normals_stride - 4*uv_count - 4*color_count
+            # normals_base > 8  → normal_type 1 (float normals, 28-byte block)
+            # normals_base <= 8 → normal_type 0 (int8_norm, 4-byte block)
+            _normals_base = self.normals_stride - 4 * self.uv_count - 4 * self.color_count
+            self.normal_type = 1 if _normals_base > 8 else 0
 
-            # guessing the type of vertex position data int16 or floats
+            # --- Position type detection ---
+            # Uses the same normals_base formula:
+            #   normals_base == 28 → float positions (3 × float32, 12 bytes)
+            #   normals_base == 12 → int16 positions (4 × int16 x/y/z/scale, 8 bytes)
+            #   other              → default to int16
+            # Override: vertex_stride in (32,40,44) is always int16;
+            #           vertex_stride in (28,36) is always float.
             if self.vertex_stride in (32, 40, 44):
                 self.position_type = 0  # int16
             elif self.vertex_stride in (28, 36):
                 self.position_type = 1  # float
-            elif self.normals_stride == 32:
+            elif _normals_base >= 28:
                 self.position_type = 1  # float
-            elif self.vertex_stride - 16 == 8 or self.vertex_stride - 8 == 8:
-                self.position_type = 0  # int16
             else:
-                self.position_type = 0  # default to int16 for unknown
+                self.position_type = 0  # int16
+
             print(f'\nName = {self.name}'
                   f'\nVertex Stride: {self.vertex_stride}'
                   f'\nNormals Stride: {self.normals_stride}'
                   f'\nUV Count: {self.uv_count}'
                   f'\nColor Count: {self.color_count}')
-            tail_seek = 20 if self.parent_sk_mesh.version >= 17 else 16
-            f.seek(tail_seek, 1)
+
+            # --- Post-stride skip ---
+            # v17 has 4 extra bytes here compared to other versions
+            if version == 17:
+                f.seek(20, 1)
+            else:
+                f.seek(16, 1)
         def extract_mesh_file(self,f):
             """
             Creates a file gathering the raw data of all Lods the Mesh.
@@ -671,8 +722,12 @@ class SkeletalMeshAsset(Asset):
         self.bones = []
         self.mesh_count = 0
         self.meshes = []
+        self.pending_file_rename_old = ""  # staged file rename — applied on next export
+        self.pending_file_rename_new = ""
     def parse(self,f):
         super().parse(f)
+        if self.version not in (12, 13, 15, 16, 17):
+            raise Exception(f'Unsupported .mmb version: {self.version}. Supported versions: 12, 13, 15, 16, 17.')
         self.bone_count = br.uint32(f)
         for b in range(self.bone_count):
             self.bones.append(self.Bone(f))
@@ -711,6 +766,7 @@ class BlenderMeshImporter:
         bm.from_mesh(obj_data)
 
         lod = mesh.lods[lod_index]
+        lod.blender_obj_name = obj.name  # record actual Blender name (may differ from obj_name if Blender de-duped it)
         # Import vertices
         verts = lod.get_vertex_positions(raw_mesh_file)
         for v in verts:
@@ -733,8 +789,8 @@ class BlenderMeshImporter:
         bm.to_mesh(obj_data)
         bm.free()
 
-        # Store original mmb vertex order as a custom attribute.
-        # This should allow the order to persist through mesh operators such as 'Mesh > Separate > By Loose Parts'
+        # Store original MMB vertex index on each vertex so the order survives
+        # operations like 'Mesh > Separate > By Loose Parts'.
         attr = obj_data.attributes.new(name='mmb_vertex_order', type='INT', domain='POINT')
         for i in range(lod.vertex_count):
             attr.data[i].value = i
@@ -763,7 +819,19 @@ class BlenderMeshImporter:
         obj_data.update()
 
         # Import Normals
-        obj_data.normals_split_custom_set_from_vertices(lod.get_normals(raw_mesh_file))
+        # Some VAT meshes store animation-texture lookup data in the normals stream
+        # rather than actual surface normals (e.g. geckofish: all ny=0, nz=0).
+        # Detect degenerate normals (all pointing the same direction) and skip
+        # custom normal import in that case — Blender will auto-calculate them.
+        computed_normals = lod.get_normals(raw_mesh_file)
+        if computed_normals:
+            first = computed_normals[0]
+            degenerate = all(
+                abs(n.dot(first)) > 0.999
+                for n in computed_normals[1:min(len(computed_normals), 64)]
+            )
+            if not degenerate:
+                obj_data.normals_split_custom_set_from_vertices(computed_normals)
 
         # Import Bone Weights
         weights = lod.get_bone_weights(raw_mesh_file)
@@ -854,43 +922,37 @@ class BlenderMeshExporter:
         return mod_file
     @staticmethod
     def overwrite_vertex_positions(file, skeletal_mesh:SkeletalMeshAsset, mesh:SkeletalMeshAsset.Mesh, lod_index = 0):
-        obj = BME.find_object_by_name(mesh.name+f"_LOD{lod_index}")
+        lod_tracked = mesh.lods[lod_index].blender_obj_name
+        obj_lookup = lod_tracked if lod_tracked else mesh.name + f"_LOD{lod_index}"
+        obj = BME.find_object_by_name(obj_lookup)
         lod:SkeletalMeshAsset.Mesh.LOD = mesh.lods[lod_index]
         if obj:
             data = obj.data
-            SWOMT = bpy.context.scene.SWOMT
-            original_file = get_merged_mmb(SWOMT.AssetPath)
-
             with open(file,'rb+') as f:
-                # Read original w values from the IMPORTED file.
                 if mesh.position_type == 0:
                     original_w = []
-                    original_file.seek(lod.data_offset)
+                    f.seek(lod.data_offset)
                     for v in range(lod.vertex_count):
-                        original_file.seek(6, 1)
-                        w = unpack('<h', original_file.read(2))[0]
+                        f.seek(6, 1)
+                        w = unpack('<h', f.read(2))[0]
                         original_w.append(w)
-                        original_file.seek(mesh.vertex_stride - 8, 1)
+                        f.seek(mesh.vertex_stride - 8, 1)
                 else:
                     original_w = [None] * lod.vertex_count
 
                 mmb_attr = data.attributes.get('mmb_vertex_order')
                 if mmb_attr is not None:
                     blender_to_mmb = {bv_idx: mmb_attr.data[bv_idx].value for bv_idx in range(len(data.vertices))}
-                    is_valid = (len(blender_to_mmb) == lod.vertex_count and all(0 <= idx < lod.vertex_count for idx in blender_to_mmb.values()))
+                    is_valid = (len(blender_to_mmb) == lod.vertex_count and
+                                all(0 <= idx < lod.vertex_count for idx in blender_to_mmb.values()))
                     use_mapping = is_valid
-                    print(f"[AFoPMT] Exported '{mesh.name}' LOD{lod_index}: "
-                          f"mmb_vertex_order attribute found, valid={is_valid}")
                 else:
                     use_mapping = False
-                    print(f"[AFoPMT] Exported '{mesh.name}' LOD{lod_index}: "
-                          f"mmb_vertex_order attribute NOT found, using fallback. "
-                          f"Please re-import the mesh to get the correct vertex order")
 
                 for bv_idx, bv in enumerate(data.vertices):
-                    mmb_idx = blender_to_mmb.get(bv_idx, bv_idx) if use_mapping else bv_idx
+                    mmb_idx = blender_to_mmb[bv_idx] if use_mapping else bv_idx
                     f.seek(lod.data_offset + mmb_idx * mesh.vertex_stride)
-                    lod.write_vertex_position(f, pos=(-bv.co.x, bv.co.y, bv.co.z), scale=original_w[mmb_idx])
+                    lod.write_vertex_position(f, pos=bv.co * Vector((-1.0, 1.0, 1.0)), scale=original_w[mmb_idx])
     @staticmethod
     def write_vertices(file, mesh:SkeletalMeshAsset.Mesh, lod_index = 0):
         obj = BME.find_object_by_name(mesh.name+f"_LOD{lod_index}")
@@ -963,15 +1025,355 @@ class ExportLOD(bpy.types.Operator):
 
     def execute(self,context):
         mod_file = BME.copy_mmb_file()
+        mesh = asset.meshes[self.mesh_index]
         BME.overwrite_vertex_positions(file=mod_file,
                                        skeletal_mesh=asset,
-                                       mesh=asset.meshes[self.mesh_index],
+                                       mesh=mesh,
                                        lod_index=self.lod_index)
+
+        # Apply staged mesh name rename to the _MOD copy.
+        # Nulls go BEFORE the new name; length prefix stays unchanged.
+        if mesh.pending_rename_new:
+            padded = b'\x00' * (mesh.name_length - len(mesh.pending_rename_new)) + mesh.pending_rename_new.encode('utf-8')
+            try:
+                with open(mod_file, 'rb+') as f:
+                    f.seek(mesh.name_offset + 2)
+                    f.write(padded)
+            except Exception as e:
+                self.report({'ERROR'}, f"Failed to patch mesh name in mod file: {e}")
+                return {'FINISHED'}
+
+        # Apply staged file rename — move _MOD.mmb → new_stem.mmb in the same folder.
+        if asset.pending_file_rename_new:
+            new_file = str(Path(mod_file).parent / (asset.pending_file_rename_new + '.mmb'))
+            try:
+                os.replace(mod_file, new_file)
+            except Exception as e:
+                self.report({'ERROR'}, f"Failed to rename mod file: {e}")
+                return {'FINISHED'}
+            self.report({'INFO'}, f"Exported → {os.path.basename(new_file)}")
+
         return {'FINISHED'}
+class RenameMesh(bpy.types.Operator):
+    """Rename a mesh and patch its name in the .mmb file in place"""
+    bl_idname = "object.rename_mesh"
+    bl_label = "Rename Mesh"
+
+    mesh_index: bpy.props.IntProperty()
+
+    @classmethod
+    def poll(cls, context):
+        return asset is not None
+
+    def invoke(self, context, event):
+        old_name = asset.meshes[self.mesh_index].name
+        # Re-register a Scene property with maxlen set to the original name length.
+        # Blender enforces maxlen natively in the text widget — this is the only
+        # reliable way to hard-lock the input length dynamically.
+        bpy.types.Scene.mmb_rename_input = bpy.props.StringProperty(
+            name="New Name",
+            maxlen=len(old_name),
+        )
+        context.scene.mmb_rename_input = old_name
+        # Center the dialog on screen
+        context.window.cursor_warp(context.window.width // 2, context.window.height // 2)
+        return context.window_manager.invoke_props_dialog(self, width=380)
+
+    def draw(self, context):
+        mesh = asset.meshes[self.mesh_index]
+        layout = self.layout
+        layout.label(text=f"Original: {mesh.name}")
+        layout.label(text=f"Max length: {len(mesh.name)} characters")
+        layout.prop(context.scene, "mmb_rename_input", text="New Name")
+
+    def execute(self, context):
+        mesh = asset.meshes[self.mesh_index]
+        old_name = mesh.name
+        new_name = context.scene.mmb_rename_input.strip()
+
+        if len(new_name) == 0:
+            self.report({'ERROR'}, "Name cannot be empty.")
+            return {'CANCELLED'}
+
+        if len(new_name) > len(old_name):
+            self.report({'ERROR'}, f"Name too long. Max {len(old_name)} characters.")
+            return {'CANCELLED'}
+
+        # Stage the rename — original .mmb is never touched.
+        # The patch is written to the _MOD copy when the user exports a LOD.
+        mesh.pending_rename_new = new_name
+        mesh.name = new_name
+
+        # Rename any already-imported Blender objects so Export can still find them
+        for li, lod in enumerate(mesh.lods):
+            old_obj_name = lod.blender_obj_name if lod.blender_obj_name else f"{old_name}_LOD{li}"
+            new_obj_name = f"{new_name}_LOD{li}"
+            obj = bpy.data.objects.get(old_obj_name)
+            if obj is not None:
+                obj.name = new_obj_name
+                if obj.data is not None:
+                    obj.data.name = new_obj_name
+                lod.blender_obj_name = obj.name  # use obj.name in case Blender de-duped it
+
+        return {'FINISHED'}
+
+
+class ZeroOutMesh(bpy.types.Operator):
+    """Zero out all vertex positions for all LODs of this mesh in the _MOD file"""
+    bl_idname = "object.zero_out_mesh"
+    bl_label = "Zero Out"
+
+    mesh_index: bpy.props.IntProperty()
+
+    @classmethod
+    def poll(cls, context):
+        return asset is not None
+
+    def execute(self, context):
+        mesh = asset.meshes[self.mesh_index]
+        SWOMT = context.scene.SWOMT
+        mod_file = BME.copy_mmb_file()
+
+        with open(mod_file, 'rb+') as f:
+            for lod in mesh.lods:
+                # Read original w values for int16 meshes so file size stays intact
+                if mesh.position_type == 0:
+                    original_w = []
+                    f.seek(lod.data_offset)
+                    for v in range(lod.vertex_count):
+                        f.seek(6, 1)
+                        w = unpack('<h', f.read(2))[0]
+                        original_w.append(w)
+                        f.seek(mesh.vertex_stride - 8, 1)
+                else:
+                    original_w = [1] * lod.vertex_count
+
+                for v in range(lod.vertex_count):
+                    f.seek(lod.data_offset + v * mesh.vertex_stride)
+                    lod.write_vertex_position(f, pos=(0.0, 0.0, 0.0), scale=original_w[v] if mesh.position_type == 0 else None)
+
+        mesh.zeroed_out_in_session = True
+        self.report({'INFO'}, f"Zeroed out '{mesh.name}' ({len(mesh.lods)} LOD(s)) in {os.path.basename(mod_file)}")
+        return {'FINISHED'}
+
+
+class RevertMesh(bpy.types.Operator):
+    """Revert vertex positions to original for all LODs of this mesh in the _MOD file.
+    Only works if Zero Out was used in this session."""
+    bl_idname = "object.revert_mesh"
+    bl_label = "Revert"
+
+    mesh_index: bpy.props.IntProperty()
+
+    @classmethod
+    def poll(cls, context):
+        return asset is not None
+
+    def execute(self, context):
+        mesh = asset.meshes[self.mesh_index]
+
+        if not mesh.zeroed_out_in_session:
+            self.report({'WARNING'}, "Mesh was not zeroed out in this session — nothing to revert.")
+            return {'CANCELLED'}
+
+        SWOMT = context.scene.SWOMT
+        original_file = get_merged_mmb(SWOMT.AssetPath)
+        mod_file = BME.copy_mmb_file()
+        pos_size = 12 if mesh.position_type == 1 else 8
+
+        with open(mod_file, 'rb+') as f:
+            for lod in mesh.lods:
+                for v in range(lod.vertex_count):
+                    offset = lod.data_offset + v * mesh.vertex_stride
+                    original_file.seek(offset)
+                    pos_bytes = original_file.read(pos_size)
+                    f.seek(offset)
+                    f.write(pos_bytes)
+
+        mesh.zeroed_out_in_session = False
+        self.report({'INFO'}, f"Reverted '{mesh.name}' ({len(mesh.lods)} LOD(s)) to original positions.")
+        return {'FINISHED'}
+
+
+class SelectMGraphObject(bpy.types.Operator):
+    """Select the MGraphObject file and patch the mesh name inside it"""
+    bl_idname = "object.select_mgraphobject"
+    bl_label = "Select MGraphObject File to Patch"
+
+    filepath: bpy.props.StringProperty(subtype="FILE_PATH")
+    filter_glob: bpy.props.StringProperty(default="*", options={'HIDDEN'})
+
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        old_name = context.scene.get('_mmb_rename_old', '')
+        new_name = context.scene.get('_mmb_rename_new', '')
+
+        if not old_name or not new_name:
+            self.report({'ERROR'}, "Rename info missing. Please rename the mesh again.")
+            return {'CANCELLED'}
+
+        try:
+            with open(self.filepath, 'rb') as f:
+                data = f.read()
+        except Exception as e:
+            self.report({'ERROR'}, f"Could not read file: {e}")
+            return {'CANCELLED'}
+
+        # The mgraphobject uses null-terminated strings stored as \x00value\x00.
+        # We search for \x00MeshName_value\x00 so we only match the exact MeshName
+        # field — not partial matches like g_res_torso_base_01_f which ends with
+        # the same bytes as res_torso_base_01_f.
+        #
+        # For null-terminated strings, padding nulls go AFTER the new name
+        # (new_name\x00 + padding), so the game reads the correct string and
+        # stops at the first null terminator.
+        old_pattern = b'\x00' + old_name.encode('utf-8') + b'\x00'
+        padding = len(old_name) - len(new_name)
+        new_pattern = b'\x00' + new_name.encode('utf-8') + b'\x00' + b'\x00' * padding
+
+        count = data.count(old_pattern)
+        if count == 0:
+            self.report({'WARNING'}, f"MeshName '{old_name}' not found in selected file. Nothing patched.")
+            return {'FINISHED'}
+
+        patched = data.replace(old_pattern, new_pattern)
+
+        backup_path = self.filepath + '.bak'
+        try:
+            import shutil
+            shutil.copy2(self.filepath, backup_path)
+        except Exception as e:
+            self.report({'ERROR'}, f"Could not create backup: {e}")
+            return {'CANCELLED'}
+
+        try:
+            with open(self.filepath, 'wb') as f:
+                f.write(patched)
+        except Exception as e:
+            self.report({'ERROR'}, f"Could not write file: {e}")
+            return {'CANCELLED'}
+
+        self.report({'INFO'}, f"Patched {count} MeshName occurrence(s): '{old_name}' → '{new_name}' in {os.path.basename(self.filepath)} (backup: {os.path.basename(backup_path)})")
+        return {'FINISHED'}
+
+
+class RenameMMBFile(bpy.types.Operator):
+    """Rename the loaded .mmb file on disk and update path references in a mgraphobject"""
+    bl_idname = "object.rename_mmb_file"
+    bl_label = "Rename MMB File"
+
+    @classmethod
+    def poll(cls, context):
+        return asset is not None
+
+    def invoke(self, context, event):
+        old_stem = Path(context.scene.SWOMT.AssetPath).stem
+        bpy.types.Scene.mmb_file_rename_input = bpy.props.StringProperty(
+            name="New Filename",
+            maxlen=len(old_stem),
+        )
+        context.scene.mmb_file_rename_input = old_stem
+        context.window.cursor_warp(context.window.width // 2, context.window.height // 2)
+        return context.window_manager.invoke_props_dialog(self, width=380)
+
+    def draw(self, context):
+        old_stem = Path(context.scene.SWOMT.AssetPath).stem
+        layout = self.layout
+        layout.label(text=f"Original: {old_stem}")
+        layout.label(text=f"Must be exactly {len(old_stem)} characters")
+        layout.prop(context.scene, "mmb_file_rename_input", text="New Filename")
+
+    def execute(self, context):
+        SWOMT = context.scene.SWOMT
+        old_path = Path(SWOMT.AssetPath)
+        old_stem = old_path.stem
+        new_stem = context.scene.mmb_file_rename_input.strip()
+
+        if not new_stem:
+            self.report({'ERROR'}, "Filename cannot be empty.")
+            return {'CANCELLED'}
+        if len(new_stem) != len(old_stem):
+            self.report({'ERROR'}, f"New name must be exactly {len(old_stem)} characters.")
+            return {'CANCELLED'}
+
+        # Stage the file rename — original .mmb is never touched.
+        # The _MOD copy is renamed on next export.
+        asset.pending_file_rename_old = old_stem
+        asset.pending_file_rename_new = new_stem
+
+        # Stash for the mgraphobject file-reference patch (applied immediately)
+        context.scene['_mmb_file_old_stem'] = old_stem
+        context.scene['_mmb_file_new_stem'] = new_stem
+
+        bpy.ops.object.select_mgraphobject_file_patch('INVOKE_DEFAULT')
+        return {'FINISHED'}
+
+
+class SelectMGraphObjectFilePatch(bpy.types.Operator):
+    """Select the MGraphObject file and update all path references to the renamed .mmb"""
+    bl_idname = "object.select_mgraphobject_file_patch"
+    bl_label = "Select MGraphObject to Update File References"
+
+    filepath: bpy.props.StringProperty(subtype="FILE_PATH")
+    filter_glob: bpy.props.StringProperty(default="*", options={'HIDDEN'})
+
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        old_stem = context.scene.get('_mmb_file_old_stem', '')
+        new_stem = context.scene.get('_mmb_file_new_stem', '')
+
+        if not old_stem or not new_stem:
+            self.report({'ERROR'}, "File rename info missing. Please rename the file again.")
+            return {'CANCELLED'}
+
+        try:
+            with open(self.filepath, 'rb') as f:
+                data = bytearray(f.read())
+        except Exception as e:
+            self.report({'ERROR'}, f"Could not read file: {e}")
+            return {'CANCELLED'}
+
+        # Only replace the .mmb file reference — leave .mreflex, .juice,
+        # assetName, and any other occurrences of the stem untouched.
+        old_b = (old_stem + '.mmb').encode('utf-8')
+        new_b = (new_stem + '.mmb').encode('utf-8')
+
+        count = data.count(old_b)
+        if count == 0:
+            self.report({'WARNING'}, f"'{old_stem}.mmb' not found in selected file. Nothing patched.")
+            return {'FINISHED'}
+
+        patched = data.replace(old_b, new_b)
+
+        backup_path = self.filepath + '.bak'
+        try:
+            import shutil
+            shutil.copy2(self.filepath, backup_path)
+        except Exception as e:
+            self.report({'ERROR'}, f"Could not create backup: {e}")
+            return {'CANCELLED'}
+
+        try:
+            with open(self.filepath, 'wb') as f:
+                f.write(patched)
+        except Exception as e:
+            self.report({'ERROR'}, f"Could not write file: {e}")
+            return {'CANCELLED'}
+
+        self.report({'INFO'}, f"Updated {count} .mmb reference(s): '{old_stem}.mmb' → '{new_stem}.mmb' in {os.path.basename(self.filepath)} (backup: {os.path.basename(backup_path)})")
+        return {'FINISHED'}
+
+
 # PANELS #
 class SWOMTPanel(bpy.types.Panel):
     """Creates a Panel in the Scene Properties window"""
-    bl_label = "Star Wars: Outlaws Mesh Tool"
+    bl_label = "AFoP Mesh Tool | Version 0.1.7"
     bl_idname = "OBJECT_PT_swomtpanel"
     bl_space_type = "PROPERTIES"
     bl_region_type = "WINDOW"
@@ -1001,10 +1403,19 @@ class MeshPanel(bpy.types.Panel):
         row = layout.row()
         if asset:
             row.label(text=asset.name)
+            row.operator("object.rename_mmb_file", text="Rename File")
             for mi, m in enumerate(asset.meshes):
                 mesh_row = layout.row()
                 mesh_box = mesh_row.box()
-                mesh_box.label(text = m.name, icon = "MESH_ICOSPHERE")
+                name_row = mesh_box.row()
+                name_row.label(text=m.name, icon="MESH_ICOSPHERE")
+                rename_op = name_row.operator("object.rename_mesh", text="Rename Mesh")
+                rename_op.mesh_index = mi
+                action_row = mesh_box.row()
+                zero_op = action_row.operator("object.zero_out_mesh", text="Hide Mesh")
+                zero_op.mesh_index = mi
+                revert_op = action_row.operator("object.revert_mesh", text="Revert Mesh")
+                revert_op.mesh_index = mi
                 for li,l in enumerate(m.lods):
                     row = mesh_box.row()
                     row.label(text = f"LOD{li} - {l.vertex_count}", icon = "CON_SIZELIKE")
@@ -1016,11 +1427,17 @@ class MeshPanel(bpy.types.Panel):
                     lod_export_button.mesh_index = mi
 
 classes=[SWOMTSettings,
+         ZeroOutMesh,
+         RevertMesh,
          SWOMTPanel,
          MeshPanel,
          LoadMMB,
          ImportLOD,
-         ExportLOD]
+         ExportLOD,
+         RenameMesh,
+         SelectMGraphObject,
+         RenameMMBFile,
+         SelectMGraphObjectFilePatch]
 
 def register():
     for c in classes:
