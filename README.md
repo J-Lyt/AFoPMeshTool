@@ -1,15 +1,17 @@
-Currently can only import meshes, no export yet.
+Based on the work by [AlexPo](https://github.com/AlexP0) for [SWOutlawsMeshTool](https://github.com/AlexP0/SWOutlawsMeshTool)
 
 **Installation**
-- Click the green <> Code button and Download as Zip
-- In Blender, open Preferences
-- go to Add-ons
-- Click the little downward arrow top-right corner
-- Install from Disk...
-- Select the .zip file you downloaded.
+1. Click the green '<> Code' button and then 'Download ZIP'
+2. In Blender, Go to 'Edit > Preferences'
+3. Go to Add-ons
+4. Click the little downward arrow top-right corner
+5. Install from Disk...
+6. Select the .zip file you downloaded.
 
 **Usage**
-- Find the Star Wars: Outlaws Mesh Tool panel in the Scene Properties tab (the little cone and spheres)
-- Select an .mmb asset (must be either .mmb or .mmb_0)
-- Click Load
-- Click Import on the mesh you want
+1. Find the 'AFoP Mesh Tool' panel in the Scene Properties tab (the little cone and spheres)
+2. Select an .mmb asset
+3. Click Load
+4. Click Import on the mesh you want
+5. Make changes to your mesh
+6. With the mesh selected, Click Export
