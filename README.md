@@ -1,4 +1,4 @@
-Based on the work by [AlexPo](https://github.com/AlexP0) for [SWOutlawsMeshTool](https://github.com/AlexP0/SWOutlawsMeshTool)
+Based on the work by [AlexP0](https://github.com/AlexP0) for [SWOutlawsMeshTool](https://github.com/AlexP0/SWOutlawsMeshTool)
 
 **Installation**
 1. Click the green '<> Code' button and then 'Download ZIP'
