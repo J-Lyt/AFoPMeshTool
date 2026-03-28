@@ -7,13 +7,11 @@
 #   - Formula-based position type detection: normals_base = ns - 4*uv - 4*col; 28→float, 12→int16
 #   - All fixes are version-conditional (additive only — existing versions unchanged)
 
-_VERSION = (0, 1, 15)
-
 bl_info = {
-    "name": "AFoP Mesh Tool | Version {}.{}.{}".format(*_VERSION),
+    "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": _VERSION,
+    "version": (0, 1, 15),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 12, 13, 15, 16, 17.",
     "category": "Import-Export"
@@ -42,9 +40,7 @@ def _fetch_remote_version():
     try:
         req = urllib.request.urlopen(_RAW_URL, timeout=8)
         text = req.read(4096).decode("utf-8", errors="ignore")
-        m = re.search(r'_VERSION\s*=\s*\((\d+),\s*(\d+),\s*(\d+)\)', text)
-        if not m:
-            m = re.search(r'"version"\s*:\s*\((\d+),\s*(\d+),\s*(\d+)\)', text)
+        m = re.search(r'"version"\s*:\s*\((\d+),\s*(\d+),\s*(\d+)\)', text)
         if m:
             return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
     except Exception:
@@ -1428,7 +1424,7 @@ class SelectMGraphObjectFilePatch(bpy.types.Operator):
 # PANELS #
 class SWOMTPanel(bpy.types.Panel):
     """Creates a Panel in the Scene Properties window"""
-    bl_label = bl_info["name"]
+    bl_label = "AFoP Mesh Tool | Version {}.{}.{}".format(*bl_info["version"])
     bl_idname = "OBJECT_PT_swomtpanel"
     bl_space_type = "PROPERTIES"
     bl_region_type = "WINDOW"
