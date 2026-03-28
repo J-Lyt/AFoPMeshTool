@@ -964,6 +964,12 @@ asset : SkeletalMeshAsset = None
 BMI = BlenderMeshImporter
 BME = BlenderMeshExporter
 
+@bpy.app.handlers.persistent
+def _on_load_post(filepath, *args, **kwargs):
+    """Resets the asset when a .blend file is loaded."""
+    global asset
+    asset = None
+
 class SWOMTSettings(bpy.types.PropertyGroup):
     AssetPath: bpy.props.StringProperty(name="Asset Path", subtype="FILE_PATH")
 
@@ -1450,10 +1456,14 @@ def register():
     for c in classes:
         bpy.utils.register_class(c)
     bpy.types.Scene.SWOMT = bpy.props.PointerProperty(type=SWOMTSettings)
+    if _on_load_post not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_on_load_post)
 
 def unregister():
     for c in classes:
         bpy.utils.unregister_class(c)
+    if _on_load_post in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_on_load_post)
 
 if __name__ == "__main__":
     register()
