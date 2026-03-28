@@ -8,10 +8,10 @@
 #   - All fixes are version-conditional (additive only — existing versions unchanged)
 
 bl_info = {
-    "name": "AFoP Mesh Tool | Version 0.1.11",
+    "name": "AFoP Mesh Tool | Version 0.1.14",
     "author": "AlexPo, JasperZebra, J-Lyt",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 11),
+    "version": (0, 1, 14),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from Avatar: Frontiers of Pandora .mmb files. Supports versions 12, 13, 15, 16, 17.",
     "category": "Import-Export"
@@ -26,6 +26,38 @@ from mathutils import Matrix, Euler, Vector
 from pathlib import Path
 import os
 import io
+import urllib.request
+import threading
+import re
+
+# Auto-update
+_RAW_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/master/__init__.py"
+_update_status = None   # None = not checked, "up_to_date", or "vX.X.X available"
+_update_error  = None   # set if network fetch failed
+
+def _fetch_remote_version():
+    """Fetch remote __init__.py and return version tuple, or None on failure."""
+    try:
+        req = urllib.request.urlopen(_RAW_URL, timeout=8)
+        text = req.read(4096).decode("utf-8", errors="ignore")
+        m = re.search(r'"version"\s*:\s*\((\d+),\s*(\d+),\s*(\d+)\)', text)
+        if m:
+            return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except Exception:
+        pass
+    return None
+
+def _check_update_thread():
+    global _update_status, _update_error
+    remote = _fetch_remote_version()
+    if remote is None:
+        _update_error = "Could not reach update server."
+        return
+    local = bl_info["version"]
+    if remote > local:
+        _update_status = f"v{remote[0]}.{remote[1]}.{remote[2]} available"
+    else:
+        _update_status = "up_to_date"
 
 
 class ByteReader:
@@ -404,7 +436,8 @@ class SkeletalMeshAsset(Asset):
                             if weights[i] > 0.0:
                                 iw[indices[i]] = weights[i]
                     elif stride == 44:
-                        f.seek(8, 1)
+                        pos_skip = 12 if self.parent_mesh.position_type == 1 else 8
+                        f.seek(pos_skip, 1)
                         weight_count = 12
                         weights = []
                         for w in range(weight_count):
@@ -416,7 +449,8 @@ class SkeletalMeshAsset(Asset):
                                 iw[br.uint8(f)] = weights[i]
                             else:
                                 f.seek(1, 1)
-                        f.seek(12, 1)
+                        remaining = stride - pos_skip - 24
+                        f.seek(remaining, 1)
                     else:
                         if stride == 24:
                             pos_length = 8
@@ -673,9 +707,11 @@ class SkeletalMeshAsset(Asset):
             #   normals_base == 28 → float positions (3 × float32, 12 bytes)
             #   normals_base == 12 → int16 positions (4 × int16 x/y/z/scale, 8 bytes)
             #   other              → default to int16
-            # Override: vertex_stride in (32,40,44) is always int16;
+            # Override: vertex_stride in (32,40) is always int16;
             #           vertex_stride in (28,36) is always float.
-            if self.vertex_stride in (32, 40, 44):
+            # stride=44 is NOT overridden — some (e.g. gear upperbody) are float (nb=28)
+            #   while others (e.g. head, nb=8) are correctly int16 via the formula.
+            if self.vertex_stride in (32, 40):
                 self.position_type = 0  # int16
             elif self.vertex_stride in (28, 36):
                 self.position_type = 1  # float
@@ -1012,9 +1048,11 @@ class ImportLOD(bpy.types.Operator):
                               skeletal_mesh=sk_mesh,
                               mesh=mesh,
                               lod_index=lod.index)
+        is_new_armature = bpy.data.objects.find(sk_mesh.name) == -1
         armature = BMI.find_or_create_skeleton(sk_mesh)
         BMI.parent_obj_to_armature(obj,armature)
-        BMI.rotate_model(obj,armature)
+        if is_new_armature:
+            BMI.rotate_model(obj,armature)
         return {'FINISHED'}
 
 class ExportLOD(bpy.types.Operator):
@@ -1386,7 +1424,7 @@ class SelectMGraphObjectFilePatch(bpy.types.Operator):
 # PANELS #
 class SWOMTPanel(bpy.types.Panel):
     """Creates a Panel in the Scene Properties window"""
-    bl_label = "AFoP Mesh Tool | Version 0.1.11"
+    bl_label = "AFoP Mesh Tool | Version 0.1.14"
     bl_idname = "OBJECT_PT_swomtpanel"
     bl_space_type = "PROPERTIES"
     bl_region_type = "WINDOW"
@@ -1397,6 +1435,28 @@ class SWOMTPanel(bpy.types.Panel):
         SWOMT = context.scene.SWOMT
 
         layout = self.layout
+
+        # Update status bar
+        if _update_status is None and _update_error is None:
+            row = layout.row()
+            row.operator("object.check_for_updates", text="Check for Updates", icon="FILE_REFRESH")
+        elif _update_error:
+            row = layout.row()
+            row.label(text=f"Update check failed", icon="ERROR")
+            row.operator("object.check_for_updates", text="Retry", icon="FILE_REFRESH")
+        elif _update_status == "up_to_date":
+            row = layout.row()
+            row.label(text="Tool is up to date", icon="CHECKMARK")
+            row.operator("object.check_for_updates", text="", icon="FILE_REFRESH")
+        else:
+            # update available
+            box = layout.box()
+            box.label(text=f"Update available: {_update_status}", icon="INFO")
+            row = box.row()
+            row.operator("object.apply_update", text="Update Now", icon="IMPORT")
+            row.operator("object.check_for_updates", text="", icon="FILE_REFRESH")
+
+        layout.separator()
         row = layout.row()
         row.prop(SWOMT, "AssetPath")
         layout.row().operator("object.load_mmb")
@@ -1439,9 +1499,51 @@ class MeshPanel(bpy.types.Panel):
                     lod_export_button.lod_index = li
                     lod_export_button.mesh_index = mi
 
+class CheckForUpdates(bpy.types.Operator):
+    bl_idname = "object.check_for_updates"
+    bl_label = "Check for Updates"
+
+    def execute(self, context):
+        global _update_status, _update_error
+        _update_status = None
+        _update_error  = None
+        threading.Thread(target=_check_update_thread, daemon=True).start()
+        self.report({'INFO'}, "Checking for updates...")
+        return {'FINISHED'}
+
+
+class ApplyUpdate(bpy.types.Operator):
+    bl_idname = "object.apply_update"
+    bl_label = "Update Now"
+
+    def execute(self, context):
+        try:
+            req = urllib.request.urlopen(_RAW_URL, timeout=30)
+            new_code = req.read()
+        except Exception as e:
+            self.report({'ERROR'}, f"Download failed: {e}")
+            return {'CANCELLED'}
+
+        addon_dir = bpy.utils.user_resource('SCRIPTS')
+        dest = os.path.join(addon_dir, "addons", "sw_outlaws_mesh_tool", "__init__.py")
+        try:
+            with open(dest, 'wb') as f:
+                f.write(new_code)
+        except Exception as e:
+            self.report({'ERROR'}, f"Could not write file: {e}")
+            return {'CANCELLED'}
+
+        global _update_status
+        _update_status = None
+        self.report({'INFO'}, f"Updated! Restart Blender to apply.")
+        return {'FINISHED'}
+
+
 classes=[SWOMTSettings,
          ZeroOutMesh,
          RevertMesh,
+         CheckForUpdates,
+         ApplyUpdate,
          SWOMTPanel,
          MeshPanel,
          LoadMMB,
@@ -1458,6 +1560,8 @@ def register():
     bpy.types.Scene.SWOMT = bpy.props.PointerProperty(type=SWOMTSettings)
     if _on_load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_on_load_post)
+    # Kick off background version check on startup
+    threading.Thread(target=_check_update_thread, daemon=True).start()
 
 def unregister():
     for c in classes:
