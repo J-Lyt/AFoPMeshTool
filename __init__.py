@@ -11,7 +11,7 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 21),
+    "version": (0, 1, 22),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 12, 13, 15, 16, 17.",
     "category": "Import-Export"
@@ -1078,6 +1078,13 @@ class ExportLOD(bpy.types.Operator):
         return asset is not None
 
     def execute(self,context):
+        if bpy.context.active_object and bpy.context.active_object.mode == 'EDIT':
+            for window in bpy.context.window_manager.windows:
+                for area in window.screen.areas:
+                    if area.type == 'VIEW_3D':
+                        with bpy.context.temp_override(window=window, area=area):
+                            bpy.ops.object.mode_set(mode='OBJECT')
+                        break
         mod_file = BME.copy_mmb_file()
         mesh = asset.meshes[self.mesh_index]
         BME.overwrite_vertex_positions(file=mod_file,
@@ -1470,6 +1477,13 @@ class ExportAllLOD0s(bpy.types.Operator):
         return asset is not None
 
     def execute(self, context):
+        if bpy.context.active_object and bpy.context.active_object.mode == 'EDIT':
+            for window in bpy.context.window_manager.windows:
+                for area in window.screen.areas:
+                    if area.type == 'VIEW_3D':
+                        with bpy.context.temp_override(window=window, area=area):
+                            bpy.ops.object.mode_set(mode='OBJECT')
+                        break
         mod_file = BME.copy_mmb_file()
         for mesh in asset.meshes:
             if not mesh.lods:
