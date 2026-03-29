@@ -11,7 +11,7 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 20),
+    "version": (0, 1, 21),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 12, 13, 15, 16, 17.",
     "category": "Import-Export"
@@ -931,12 +931,7 @@ class BlenderMeshImporter:
 class BlenderMeshExporter:
     @staticmethod
     def find_object_by_name(name=""):
-        obj = None
-        try:
-            obj = bpy.data.objects[name]
-        except KeyError:
-            raise KeyError(f"{name} object was not found.") from None
-        return obj
+        return bpy.data.objects.get(name, None)
     @staticmethod
     def copy_mmb_file():
         """
