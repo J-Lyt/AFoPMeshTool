@@ -11,7 +11,7 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 21),
+    "version": (0, 1, 22),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 12, 13, 15, 16, 17.",
     "category": "Import-Export"
