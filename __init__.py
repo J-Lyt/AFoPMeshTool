@@ -11,7 +11,7 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 15),
+    "version": (0, 1, 20),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 12, 13, 15, 16, 17.",
     "category": "Import-Export"
@@ -977,7 +977,7 @@ class BlenderMeshExporter:
                     original_w = [None] * lod.vertex_count
 
                 mmb_attr = data.attributes.get('mmb_vertex_order')
-                if mmb_attr is not None:
+                if mmb_attr is not None and len(mmb_attr.data) == len(data.vertices):
                     blender_to_mmb = {bv_idx: mmb_attr.data[bv_idx].value for bv_idx in range(len(data.vertices))}
                     is_valid = (len(blender_to_mmb) == lod.vertex_count and
                                 all(0 <= idx < lod.vertex_count for idx in blender_to_mmb.values()))
@@ -1006,8 +1006,23 @@ def _on_load_post(filepath, *args, **kwargs):
     global asset
     asset = None
 
+def _auto_load_mmb(self, context):
+    path = self.AssetPath
+    if not path or not os.path.isfile(path):
+        return
+    try:
+        with open(path, 'rb') as file:
+            sk_mesh = SkeletalMeshAsset()
+            sk_mesh.parse(file)
+            sk_mesh.name = Path(path).stem
+            global asset
+            asset = sk_mesh
+    except Exception as e:
+        print(f"MMB auto-load failed: {e}")
+
 class SWOMTSettings(bpy.types.PropertyGroup):
-    AssetPath: bpy.props.StringProperty(name="Asset Path", subtype="FILE_PATH")
+    AssetPath: bpy.props.StringProperty(name="Asset Path", subtype="FILE_PATH", update=_auto_load_mmb)
+    mesh_expanded: bpy.props.BoolVectorProperty(size=32, default=tuple([False]*32))
 
 # OPERATORS #
 class LoadMMB(bpy.types.Operator):
@@ -1421,6 +1436,89 @@ class SelectMGraphObjectFilePatch(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class ImportAllLOD0s(bpy.types.Operator):
+    """Imports LOD0 for every mesh in the asset"""
+    bl_idname = 'object.import_all_lod0s'
+    bl_label = "Import All LOD0's"
+
+    @classmethod
+    def poll(cls, context):
+        return asset is not None
+
+    def execute(self, context):
+        sk_mesh = asset
+        SWOMT = context.scene.SWOMT
+        merged_mmb = get_merged_mmb(SWOMT["AssetPath"])
+        is_new_armature = bpy.data.objects.find(sk_mesh.name) == -1
+        armature = BMI.find_or_create_skeleton(sk_mesh)
+        for mi, mesh in enumerate(sk_mesh.meshes):
+            if not mesh.lods:
+                continue
+            lod = mesh.lods[0]
+            obj = BMI.import_mesh(merged_mmb,
+                                  skeletal_mesh=sk_mesh,
+                                  mesh=mesh,
+                                  lod_index=lod.index)
+            BMI.parent_obj_to_armature(obj, armature)
+        if is_new_armature:
+            BMI.rotate_model(obj, armature)
+        return {'FINISHED'}
+
+
+class ExportAllLOD0s(bpy.types.Operator):
+    """Exports LOD0 for every mesh in the asset"""
+    bl_idname = 'object.export_all_lod0s'
+    bl_label = "Export All LOD0's"
+
+    @classmethod
+    def poll(cls, context):
+        return asset is not None
+
+    def execute(self, context):
+        mod_file = BME.copy_mmb_file()
+        for mesh in asset.meshes:
+            if not mesh.lods:
+                continue
+            BME.overwrite_vertex_positions(file=mod_file,
+                                           skeletal_mesh=asset,
+                                           mesh=mesh,
+                                           lod_index=0)
+            if mesh.zeroed_out_in_session:
+                with open(mod_file, 'rb+') as f:
+                    for lod in mesh.lods:
+                        if mesh.position_type == 0:
+                            original_w = []
+                            f.seek(lod.data_offset)
+                            for v in range(lod.vertex_count):
+                                f.seek(6, 1)
+                                w = unpack('<h', f.read(2))[0]
+                                original_w.append(w)
+                                f.seek(mesh.vertex_stride - 8, 1)
+                        else:
+                            original_w = [1] * lod.vertex_count
+                        for v in range(lod.vertex_count):
+                            f.seek(lod.data_offset + v * mesh.vertex_stride)
+                            lod.write_vertex_position(f, pos=(0.0, 0.0, 0.0), scale=original_w[v] if mesh.position_type == 0 else None)
+            if mesh.pending_rename_new:
+                padded = b'\x00' * (mesh.name_length - len(mesh.pending_rename_new)) + mesh.pending_rename_new.encode('utf-8')
+                try:
+                    with open(mod_file, 'rb+') as f:
+                        f.seek(mesh.name_offset + 2)
+                        f.write(padded)
+                except Exception as e:
+                    self.report({'ERROR'}, f"Failed to patch mesh name: {e}")
+                    return {'FINISHED'}
+        if asset.pending_file_rename_new:
+            new_file = str(Path(mod_file).parent / (asset.pending_file_rename_new + '.mmb'))
+            try:
+                os.replace(mod_file, new_file)
+            except Exception as e:
+                self.report({'ERROR'}, f"Failed to rename mod file: {e}")
+                return {'FINISHED'}
+            self.report({'INFO'}, f"Exported → {os.path.basename(new_file)}")
+        return {'FINISHED'}
+
+
 # PANELS #
 class SWOMTPanel(bpy.types.Panel):
     """Creates a Panel in the Scene Properties window"""
@@ -1459,7 +1557,6 @@ class SWOMTPanel(bpy.types.Panel):
         layout.separator()
         row = layout.row()
         row.prop(SWOMT, "AssetPath")
-        layout.row().operator("object.load_mmb")
 
 class MeshPanel(bpy.types.Panel):
     bl_label = "Mesh"
@@ -1477,27 +1574,34 @@ class MeshPanel(bpy.types.Panel):
         if asset:
             row.label(text=asset.name)
             row.operator("object.rename_mmb_file", text="Rename File")
+            all_row = layout.row()
+            all_row.operator("object.import_all_lod0s", text="Import All LOD0's")
+            all_row.operator("object.export_all_lod0s", text="Export All LOD0's")
             for mi, m in enumerate(asset.meshes):
+                expanded = SWOMT.mesh_expanded[mi] if mi < 32 else True
                 mesh_row = layout.row()
                 mesh_box = mesh_row.box()
                 name_row = mesh_box.row()
+                name_row.prop(SWOMT, "mesh_expanded", index=mi, text="",
+                              icon='TRIA_DOWN' if expanded else 'TRIA_RIGHT', emboss=False)
                 name_row.label(text=m.name, icon="MESH_ICOSPHERE")
-                rename_op = name_row.operator("object.rename_mesh", text="Rename Mesh")
-                rename_op.mesh_index = mi
-                action_row = mesh_box.row()
-                zero_op = action_row.operator("object.zero_out_mesh", text="Hide Mesh")
-                zero_op.mesh_index = mi
-                revert_op = action_row.operator("object.revert_mesh", text="Revert Mesh")
-                revert_op.mesh_index = mi
-                for li,l in enumerate(m.lods):
-                    row = mesh_box.row()
-                    row.label(text = f"LOD{li} - {l.vertex_count}", icon = "CON_SIZELIKE")
-                    lod_import_button = row.operator("object.import_lod")
-                    lod_import_button.lod_index = li
-                    lod_import_button.mesh_index = mi
-                    lod_export_button = row.operator("object.export_lod")
-                    lod_export_button.lod_index = li
-                    lod_export_button.mesh_index = mi
+                if expanded:
+                    rename_op = name_row.operator("object.rename_mesh", text="Rename Mesh")
+                    rename_op.mesh_index = mi
+                    action_row = mesh_box.row()
+                    zero_op = action_row.operator("object.zero_out_mesh", text="Remove Mesh")
+                    zero_op.mesh_index = mi
+                    revert_op = action_row.operator("object.revert_mesh", text="Revert Mesh")
+                    revert_op.mesh_index = mi
+                    for li,l in enumerate(m.lods):
+                        row = mesh_box.row()
+                        row.label(text = f"LOD{li} - {l.vertex_count}", icon = "CON_SIZELIKE")
+                        lod_import_button = row.operator("object.import_lod")
+                        lod_import_button.lod_index = li
+                        lod_import_button.mesh_index = mi
+                        lod_export_button = row.operator("object.export_lod")
+                        lod_export_button.lod_index = li
+                        lod_export_button.mesh_index = mi
 
 class CheckForUpdates(bpy.types.Operator):
     bl_idname = "object.check_for_updates"
@@ -1539,6 +1643,8 @@ class ApplyUpdate(bpy.types.Operator):
 
 
 classes=[SWOMTSettings,
+         ImportAllLOD0s,
+         ExportAllLOD0s,
          ZeroOutMesh,
          RevertMesh,
          CheckForUpdates,
