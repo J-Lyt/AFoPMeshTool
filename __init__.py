@@ -32,8 +32,37 @@ import re
 
 # Auto-update
 _RAW_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/master/__init__.py"
+_BONE_JSON_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/master/bone_matrices.json"
+_BONE_JSON_FILENAME = "bone_matrices.json"
 _update_status = None   # None = not checked, "up_to_date", or "vX.X.X available"
 _update_error  = None   # set if network fetch failed
+
+def _get_bone_json_path():
+    """Return the path for bone_matrices.json (same folder as plugin file)"""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), _BONE_JSON_FILENAME)
+
+def _download_bone_json():
+    """Download bone_matrices.json to the plugin folder"""
+    try:
+        req = urllib.request.urlopen(_BONE_JSON_URL, timeout=30)
+        data = req.read()
+        dest = _get_bone_json_path()
+        with open(dest, 'wb') as f:
+            f.write(data)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+def _check_bone_json():
+    """If bone_matrices.json is missing, download it silently in a background thread."""
+    if not os.path.isfile(_get_bone_json_path()):
+        def _download_thread():
+            ok, err = _download_bone_json()
+            if not ok:
+                print(f"[AFoPMT] Failed to download bone_matrices.json: {err}")
+            else:
+                print("[AFoPMT] bone_matrices.json downloaded successfully")
+        threading.Thread(target=_download_thread, daemon=True).start()
 
 def _fetch_remote_version():
     """Fetch remote __init__.py and return version tuple, or None on failure."""
@@ -2244,9 +2273,15 @@ class ApplyUpdate(bpy.types.Operator):
             self.report({'ERROR'}, f"Could not write file: {e}")
             return {'CANCELLED'}
 
+        # Update bone_matrices.json
+        ok, err = _download_bone_json()
+
         global _update_status
         _update_status = None
-        self.report({'INFO'}, f"Updated! Restart Blender to apply.")
+        if not ok:
+            self.report({'WARNING'}, f"Updated! Restart Blender to apply. (Failed to download bone_matrices.json): {err}")
+        else:
+            self.report({'INFO'}, "Updated! Restart Blender to apply.")
         return {'FINISHED'}
 
 
@@ -2277,6 +2312,8 @@ def register():
         bpy.app.handlers.load_post.append(_on_load_post)
     # Kick off background version check on startup
     threading.Thread(target=_check_update_thread, daemon=True).start()
+    # Download bone_matrices.json if it is missing
+    _check_bone_json()
 
 def unregister():
     for c in classes:
