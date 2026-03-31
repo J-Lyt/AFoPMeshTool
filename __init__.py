@@ -1167,11 +1167,11 @@ class BlenderMeshExporter:
                 file_data = bytearray(f.read())
             file_data[insert_at:insert_at] = new_slot_bytes
 
-            # Patch u_count at its recorded offset
+            # Patch u_count at its offset
             old_u = unpack('<H', file_data[mesh.u_count_offset:mesh.u_count_offset+2])[0]
             file_data[mesh.u_count_offset:mesh.u_count_offset+2] = pack('<H', old_u + n)
 
-            # Adjust every LOD data_offset field across ALL meshes that is >= insert_at
+            # Adjust LOD data_offset fields across meshes
             for other_mesh in mesh.parent_sk_mesh.meshes:
                 for lod in other_mesh.lods:
                     if lod.data_offset_file_pos > insert_at:
@@ -1414,7 +1414,7 @@ class RenameMesh(bpy.types.Operator):
         return {'FINISHED'}
 
 
-_bone_matrices = None   # loaded once on first remap; {bone_name: [16 floats]}
+_bone_matrices = None
 
 def _load_bone_matrices():
     """
@@ -1613,7 +1613,7 @@ class RemapMeshBone(bpy.types.Operator):
             self.report({'ERROR'}, f"Slot already has '{new_name}' at position {mesh_bones_list.index(new_skel_idx)}")
             return {'CANCELLED'}
 
-        # Retrieve the inverse bind matrix from either the JSON file or a donor mmb
+        # Get the inverse bind matrix from either the JSON file or a donor mmb
         new_matrix = None
         if self.use_auto:
             matrices = _load_bone_matrices()
@@ -1745,7 +1745,7 @@ class AddMeshBone(bpy.types.Operator):
             self.report({'ERROR'}, f"'{new_name}' is already staged for addition.")
             return {'CANCELLED'}
 
-        # Resolve the inverse bind matrix
+        # Get the inverse bind matrix
         new_matrix = None
         if self.use_auto:
             matrices = _load_bone_matrices()
