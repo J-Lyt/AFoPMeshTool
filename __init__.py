@@ -1208,9 +1208,26 @@ BME = BlenderMeshExporter
 
 @bpy.app.handlers.persistent
 def _on_load_post(filepath, *args, **kwargs):
-    """Resets the asset when a .blend file is loaded."""
+    """Resets the asset when a .blend file is loaded, then re-loads it from the AssetPath if the file still exists."""
     global asset
     asset = None
+    try:
+        for scene in bpy.data.scenes:
+            path = scene.SWOMT.get("AssetPath", "")
+            if not path or not os.path.isfile(path):
+                continue
+            try:
+                with open(path, 'rb') as f:
+                    sk_mesh = SkeletalMeshAsset()
+                    sk_mesh.parse(f)
+                    sk_mesh.name = Path(path).stem
+                    asset = sk_mesh
+                print(f"[AFoPMT] Loaded '{sk_mesh.name}' from '{path}'")
+            except Exception as e:
+                print(f"[AFoPMT] Failed to Load '{path}': {e}")
+            break
+    except Exception as e:
+        print(f"[AFoPMT] _on_load_post error: {e}")
 
 def _auto_load_mmb(self, context):
     path = self.AssetPath
