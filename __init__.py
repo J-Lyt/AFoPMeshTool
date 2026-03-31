@@ -470,18 +470,11 @@ class SkeletalMeshAsset(Asset):
                         pos_skip = 12 if self.parent_mesh.position_type == 1 else 8
                         f.seek(pos_skip, 1)
                         weight_count = 12
-                        weights = []
-                        for w in range(weight_count):
-                            weight = br.uint8_norm(f)
-                            if weight > 0.0:
-                                weights.append(weight)
+                        weights = [br.uint8_norm(f) for _ in range(weight_count)]
+                        indices = [br.uint16(f) for _ in range(weight_count)]
                         for i in range(weight_count):
-                            if i < len(weights):
-                                iw[br.uint8(f)] = weights[i]
-                            else:
-                                f.seek(1, 1)
-                        remaining = stride - pos_skip - 24
-                        f.seek(remaining, 1)
+                            if weights[i] > 0.0:
+                                iw[indices[i]] = weights[i]
                     else:
                         if stride == 24:
                             pos_length = 8
@@ -700,7 +693,9 @@ class SkeletalMeshAsset(Asset):
                     for _ in range(max_bones - active_count):
                         f.write(bp.uint8(0))
                     for idx, _ in sorted_w:
-                        f.write(bp.uint8(idx))
+                        f.write(bp.uint16(idx))
+                    for _ in range(max_bones - active_count):
+                        f.write(bp.uint16(0))
 
                 else:
                     for _, w in sorted_w:
