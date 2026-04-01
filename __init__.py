@@ -1353,12 +1353,32 @@ def _auto_load_mmb(self, context):
         print(f"MMB auto-load failed: {e}")
 
 class SWOMTSettings(bpy.types.PropertyGroup):
-    AssetPath: bpy.props.StringProperty(name="Asset Path", subtype="FILE_PATH", update=_auto_load_mmb)
+    AssetPath: bpy.props.StringProperty(name="Asset Path", update=_auto_load_mmb)
     mesh_expanded: bpy.props.BoolVectorProperty(size=32, default=tuple([False]*32))
     bone_slots_expanded: bpy.props.BoolVectorProperty(size=32, default=tuple([False]*32))
     export_weights: bpy.props.BoolProperty(name="Export Weights", default=False, description="Write Blender weights into the exported file. (May cause issues with certain meshes i.e. Heads)")
 
 # OPERATORS #
+class BrowseMMBFile(bpy.types.Operator):
+    """Load a .mmb file"""
+    bl_idname = "object.browse_mmb_file"
+    bl_label = "Import .mmb"
+
+    filepath: bpy.props.StringProperty(subtype="FILE_PATH")
+    filter_glob: bpy.props.StringProperty(default="*.mmb", options={'HIDDEN'})
+
+    def invoke(self, context, event):
+        current = context.scene.SWOMT.AssetPath
+        if current:
+            self.filepath = current
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        context.scene.SWOMT.AssetPath = self.filepath
+        return {'FINISHED'}
+
+
 class LoadMMB(bpy.types.Operator):
     """Reads data from base .mmb file"""
     bl_idname = "object.load_mmb"
@@ -1984,10 +2004,10 @@ class RevertMesh(bpy.types.Operator):
 class SelectMGraphObject(bpy.types.Operator):
     """Select the MGraphObject file and patch the mesh name inside it"""
     bl_idname = "object.select_mgraphobject"
-    bl_label = "Select MGraphObject File to Patch"
+    bl_label = "Select .mgraphobject"
 
     filepath: bpy.props.StringProperty(subtype="FILE_PATH")
-    filter_glob: bpy.props.StringProperty(default="*", options={'HIDDEN'})
+    filter_glob: bpy.props.StringProperty(default="*.mgraphobject", options={'HIDDEN'})
 
     def invoke(self, context, event):
         context.window_manager.fileselect_add(self)
@@ -2101,10 +2121,10 @@ class RenameMMBFile(bpy.types.Operator):
 class SelectMGraphObjectFilePatch(bpy.types.Operator):
     """Select the MGraphObject file and update all path references to the renamed .mmb"""
     bl_idname = "object.select_mgraphobject_file_patch"
-    bl_label = "Select MGraphObject to Update File References"
+    bl_label = "Select .mgraphobject"
 
     filepath: bpy.props.StringProperty(subtype="FILE_PATH")
-    filter_glob: bpy.props.StringProperty(default="*", options={'HIDDEN'})
+    filter_glob: bpy.props.StringProperty(default="*.mgraphobject", options={'HIDDEN'})
 
     def invoke(self, context, event):
         context.window_manager.fileselect_add(self)
@@ -2284,8 +2304,9 @@ class SWOMTPanel(bpy.types.Panel):
             row.operator("object.check_for_updates", text="", icon="FILE_REFRESH")
 
         layout.separator()
-        row = layout.row()
-        row.prop(SWOMT, "AssetPath")
+        row = layout.row(align=True)
+        row.prop(SWOMT, "AssetPath", text="Asset Path")
+        row.operator("object.browse_mmb_file", text="", icon="FILE_FOLDER")
 
         layout.separator()
         row = layout.row()
@@ -2499,6 +2520,7 @@ class ApplyUpdate(bpy.types.Operator):
 
 
 classes=[SWOMTSettings,
+         BrowseMMBFile,
          ComputeNormals,
          ClearNormals,
          ImportAllLOD0s,
