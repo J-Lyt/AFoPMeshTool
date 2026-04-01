@@ -1356,7 +1356,7 @@ class SWOMTSettings(bpy.types.PropertyGroup):
     AssetPath: bpy.props.StringProperty(name="Asset Path", update=_auto_load_mmb)
     mesh_expanded: bpy.props.BoolVectorProperty(size=32, default=tuple([False]*32))
     bone_slots_expanded: bpy.props.BoolVectorProperty(size=32, default=tuple([False]*32))
-    export_weights: bpy.props.BoolProperty(name="Export Weights", default=False, description="Write Blender weights into the exported file. (May cause issues with certain meshes i.e. Heads)")
+    export_weights: bpy.props.BoolProperty(name="Export Weights", default=False, description="Write Blender weights into the exported file. (May cause issues with certain meshes)")
 
 # OPERATORS #
 class BrowseMMBFile(bpy.types.Operator):
