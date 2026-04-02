@@ -11,7 +11,7 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 25),
+    "version": (0, 1, 26),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 12, 13, 15, 16, 17.",
     "category": "Import-Export"
@@ -470,18 +470,11 @@ class SkeletalMeshAsset(Asset):
                         pos_skip = 12 if self.parent_mesh.position_type == 1 else 8
                         f.seek(pos_skip, 1)
                         weight_count = 12
-                        weights = []
-                        for w in range(weight_count):
-                            weight = br.uint8_norm(f)
-                            if weight > 0.0:
-                                weights.append(weight)
+                        weights = [br.uint8_norm(f) for _ in range(weight_count)]
+                        indices = [br.uint16(f) for _ in range(weight_count)]
                         for i in range(weight_count):
-                            if i < len(weights):
-                                iw[br.uint8(f)] = weights[i]
-                            else:
-                                f.seek(1, 1)
-                        remaining = stride - pos_skip - 24
-                        f.seek(remaining, 1)
+                            if weights[i] > 0.0:
+                                iw[indices[i]] = weights[i]
                     else:
                         if stride == 24:
                             pos_length = 8
@@ -546,22 +539,38 @@ class SkeletalMeshAsset(Asset):
                 f = raw_mesh_file
                 f.seek(self.vertex_data_offset_b)
                 v = Vector((0.0,0.0,1.0))
+                self._all_w_zero = True # If all w values are zero, the normals store non-surface data (e.g. VAT).
+                self._tangent_space = False # Normals stored in tangent space: x axis non-negative across all verts.
+                _raw_x_min = 1.0
                 for i in range(self.vertex_count):
                     stride_start = f.tell()
                     if self.parent_mesh.normal_type == 0:
-                        x = br.int8_norm(f) *-1
+                        raw_x = br.int8_norm(f)
+                        if raw_x < _raw_x_min:
+                            _raw_x_min = raw_x
+                        x = raw_x * -1
                         y = br.int8_norm(f)
                         z = br.int8_norm(f)
                         w = br.int8(f)
+                        if w != 0:
+                            self._all_w_zero = False
                         v = Vector((x*w, y*w, z*w)).normalized()
                         v.negate()  # TODO not sure about this
                     elif self.parent_mesh.normal_type == 1:
-                        x = br.float(f) *-1
+                        self._all_w_zero = False
+                        raw_x = br.float(f)
+                        if raw_x < _raw_x_min:
+                            _raw_x_min = raw_x
+                        x = raw_x * -1
                         y = br.float(f)
                         z = br.float(f)
                         v = Vector((x,y,z)).normalized()
                     f.seek(stride_start + stride)
                     normals.append(v)
+                # If raw x never goes below -0.05, the x axis is non-negative i.e. tangent-space encoding.
+                # Cannot decode to object-space normals without the tangent basis; fall back to computed.
+                if _raw_x_min > -0.05:
+                    self._tangent_space = True
                 return normals
 
             def get_uvs(self,raw_mesh_file, index=0):
@@ -700,7 +709,9 @@ class SkeletalMeshAsset(Asset):
                     for _ in range(max_bones - active_count):
                         f.write(bp.uint8(0))
                     for idx, _ in sorted_w:
-                        f.write(bp.uint8(idx))
+                        f.write(bp.uint16(idx))
+                    for _ in range(max_bones - active_count):
+                        f.write(bp.uint16(0))
 
                 else:
                     for _, w in sorted_w:
@@ -969,17 +980,110 @@ class BlenderMeshImporter:
         # Import Normals
         # Some VAT meshes store animation-texture lookup data in the normals stream
         # rather than actual surface normals (e.g. geckofish: all ny=0, nz=0).
-        # Detect degenerate normals (all pointing the same direction) and skip
-        # custom normal import in that case — Blender will auto-calculate them.
+        # Detect degenerate normals (all pointing the same direction) and fall back to computing normals.
         computed_normals = lod.get_normals(raw_mesh_file)
+        degenerate = False
         if computed_normals:
             first = computed_normals[0]
-            degenerate = all(
-                abs(n.dot(first)) > 0.999
-                for n in computed_normals[1:min(len(computed_normals), 64)]
-            )
+            sample = computed_normals[1:min(len(computed_normals), 256)]
+
+            all_w_zero = getattr(lod, '_all_w_zero', False)
+            tangent_space = getattr(lod, '_tangent_space', False)
+            all_same_dir = all(abs(n.dot(first)) > 0.999 for n in sample)
+            zero_count = sum(1 for n in computed_normals if n.length < 0.1)
+            mostly_zero = zero_count > len(computed_normals) * 0.5
+
+            # Compare normals in file against the meshes own face normals.
+            # Create a temporary mesh and measure the average dot between each stored normal and the face it belongs to.
+            # Valid normals should match with their faces (avg_dot typically between 0.4 and 0.9).
+            import bmesh as _bmesh
+            bm_check = _bmesh.new()
+            bm_check.from_mesh(obj_data)
+            bm_check.faces.ensure_lookup_table()
+            dot_sum = 0.0
+            dot_count = 0
+            for face in bm_check.faces:
+                face.normal_update()
+                fn = face.normal
+                for loop in face.loops:
+                    vi = loop.vert.index
+                    if vi < len(computed_normals):
+                        sn = computed_normals[vi]
+                        if sn.length > 0.1:
+                            dot_sum += fn.dot(sn)
+                            dot_count += 1
+                    if dot_count >= 4096:
+                        break
+                if dot_count >= 4096:
+                    break
+            bm_check.free()
+            avg_dot = (dot_sum / dot_count) if dot_count > 0 else 0.0
+            # Stored normals that don't match with face normals (avg_dot < 0.1)
+            # or normals that point consistently opposite to faces (avg_dot < -0.1) are degenerate.
+            bad_correlation = abs(avg_dot) < 0.1
+
+            degenerate = all_w_zero or tangent_space or all_same_dir or mostly_zero or bad_correlation
+
             if not degenerate:
+                print(f"[AFoPMT] {obj.name}: Importing normals from file")
                 obj_data.normals_split_custom_set_from_vertices(computed_normals)
+            else:
+                reasons = []
+                if all_w_zero: reasons.append("All w=0 (e.g. VAT Data)")
+                if tangent_space: reasons.append("Tangent-Space Encoding (x axis non-negative)")
+                if all_same_dir: reasons.append("All Same Direction")
+                if mostly_zero: reasons.append(f"Mostly Zero ({zero_count}/{len(computed_normals)})")
+                if bad_correlation: reasons.append(f"No Face Correlation (avg_dot={avg_dot:.3f})")
+                print(f"[AFoPMT] {obj.name}: Degenerate Normals Detected ({', '.join(reasons)}) - Computing Normals")
+
+        if degenerate:
+            # Compute Normals against a temp copy of the imported mesh (which will be merged by distance)
+            # and transfer normals back to the original mesh
+            import bmesh as _bmesh
+
+            merge_dist = 1e-4 # (0.0001) world-space units
+
+            # Create merged mesh for computing normals
+            bm_weld = _bmesh.new()
+            bm_weld.from_mesh(obj_data)
+            _bmesh.ops.remove_doubles(bm_weld, verts=bm_weld.verts, dist=merge_dist)
+            bm_weld.faces.ensure_lookup_table()
+            bm_weld.verts.ensure_lookup_table()
+
+            # Compute angle-weighted normals on the merged mesh
+            weld_normals = [Vector((0.0, 0.0, 0.0)) for _ in range(len(bm_weld.verts))]
+            for face in bm_weld.faces:
+                face.normal_update()
+                for loop in face.loops:
+                    angle = loop.calc_angle()
+                    weld_normals[loop.vert.index] += face.normal * angle
+
+            # Create spatial map (by world pos) to reconnect normals from merged mesh to original
+            def _key(co):
+                return (round(co.x, 4), round(co.y, 4), round(co.z, 4))
+
+            pos_to_normal = {}
+            for wv in bm_weld.verts:
+                n = weld_normals[wv.index]
+                length = n.length
+                n = n / length if length > 1e-8 else Vector((0.0, 0.0, 1.0))
+                pos_to_normal[_key(wv.co)] = n
+
+            bm_weld.free()
+
+            # Get original mesh verts and check against spatial map
+            bm_orig = _bmesh.new()
+            bm_orig.from_mesh(obj_data)
+            bm_orig.verts.ensure_lookup_table()
+
+            smooth_normals = []
+            for ov in bm_orig.verts:
+                k = _key(ov.co)
+                smooth_normals.append(pos_to_normal.get(k, Vector((0.0, 0.0, 1.0))))
+
+            bm_orig.free()
+
+            obj_data.normals_split_custom_set_from_vertices(smooth_normals)
 
         # Import Bone Weights
         weights = lod.get_bone_weights(raw_mesh_file)
@@ -1213,9 +1317,26 @@ BME = BlenderMeshExporter
 
 @bpy.app.handlers.persistent
 def _on_load_post(filepath, *args, **kwargs):
-    """Resets the asset when a .blend file is loaded."""
+    """Resets the asset when a .blend file is loaded, then re-loads it from the AssetPath if the file still exists."""
     global asset
     asset = None
+    try:
+        for scene in bpy.data.scenes:
+            path = scene.SWOMT.get("AssetPath", "")
+            if not path or not os.path.isfile(path):
+                continue
+            try:
+                with open(path, 'rb') as f:
+                    sk_mesh = SkeletalMeshAsset()
+                    sk_mesh.parse(f)
+                    sk_mesh.name = Path(path).stem
+                    asset = sk_mesh
+                print(f"[AFoPMT] Loaded '{sk_mesh.name}' from '{path}'")
+            except Exception as e:
+                print(f"[AFoPMT] Failed to Load '{path}': {e}")
+            break
+    except Exception as e:
+        print(f"[AFoPMT] _on_load_post error: {e}")
 
 def _auto_load_mmb(self, context):
     path = self.AssetPath
@@ -1232,12 +1353,32 @@ def _auto_load_mmb(self, context):
         print(f"MMB auto-load failed: {e}")
 
 class SWOMTSettings(bpy.types.PropertyGroup):
-    AssetPath: bpy.props.StringProperty(name="Asset Path", subtype="FILE_PATH", update=_auto_load_mmb)
+    AssetPath: bpy.props.StringProperty(name="Asset Path", update=_auto_load_mmb)
     mesh_expanded: bpy.props.BoolVectorProperty(size=32, default=tuple([False]*32))
     bone_slots_expanded: bpy.props.BoolVectorProperty(size=32, default=tuple([False]*32))
-    export_weights: bpy.props.BoolProperty(name="Export Weights", default=False, description="Write Blender weights into the exported file. (May cause issues with certain meshes i.e. Heads)")
+    export_weights: bpy.props.BoolProperty(name="Export Weights", default=False, description="Write Blender weights into the exported file. (May cause issues with certain meshes)")
 
 # OPERATORS #
+class BrowseMMBFile(bpy.types.Operator):
+    """Load a .mmb file"""
+    bl_idname = "object.browse_mmb_file"
+    bl_label = "Import .mmb"
+
+    filepath: bpy.props.StringProperty(subtype="FILE_PATH")
+    filter_glob: bpy.props.StringProperty(default="*.mmb", options={'HIDDEN'})
+
+    def invoke(self, context, event):
+        current = context.scene.SWOMT.AssetPath
+        if current:
+            self.filepath = current
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        context.scene.SWOMT.AssetPath = self.filepath
+        return {'FINISHED'}
+
+
 class LoadMMB(bpy.types.Operator):
     """Reads data from base .mmb file"""
     bl_idname = "object.load_mmb"
@@ -1353,6 +1494,7 @@ class ExportLOD(bpy.types.Operator):
             self.report({'INFO'}, f"Exported → {os.path.basename(new_file)}")
 
         return {'FINISHED'}
+
 class RenameMesh(bpy.types.Operator):
     """Rename a mesh and patch its name in the .mmb file in place"""
     bl_idname = "object.rename_mesh"
@@ -1669,7 +1811,6 @@ class RemapMeshBone(bpy.types.Operator):
         self.report({'INFO'}, f"Slot {self.slot_index}: '{old_name}' to '{new_name}' via {source} (will patch on export)")
         return {'FINISHED'}
 
-
 class AddMeshBone(bpy.types.Operator):
     """
     Add a new bone slot to this mesh's bone table.
@@ -1863,10 +2004,10 @@ class RevertMesh(bpy.types.Operator):
 class SelectMGraphObject(bpy.types.Operator):
     """Select the MGraphObject file and patch the mesh name inside it"""
     bl_idname = "object.select_mgraphobject"
-    bl_label = "Select MGraphObject File to Patch"
+    bl_label = "Select .mgraphobject"
 
     filepath: bpy.props.StringProperty(subtype="FILE_PATH")
-    filter_glob: bpy.props.StringProperty(default="*", options={'HIDDEN'})
+    filter_glob: bpy.props.StringProperty(default="*.mgraphobject", options={'HIDDEN'})
 
     def invoke(self, context, event):
         context.window_manager.fileselect_add(self)
@@ -1980,10 +2121,10 @@ class RenameMMBFile(bpy.types.Operator):
 class SelectMGraphObjectFilePatch(bpy.types.Operator):
     """Select the MGraphObject file and update all path references to the renamed .mmb"""
     bl_idname = "object.select_mgraphobject_file_patch"
-    bl_label = "Select MGraphObject to Update File References"
+    bl_label = "Select .mgraphobject"
 
     filepath: bpy.props.StringProperty(subtype="FILE_PATH")
-    filter_glob: bpy.props.StringProperty(default="*", options={'HIDDEN'})
+    filter_glob: bpy.props.StringProperty(default="*.mgraphobject", options={'HIDDEN'})
 
     def invoke(self, context, event):
         context.window_manager.fileselect_add(self)
@@ -2163,8 +2304,96 @@ class SWOMTPanel(bpy.types.Panel):
             row.operator("object.check_for_updates", text="", icon="FILE_REFRESH")
 
         layout.separator()
+        row = layout.row(align=True)
+        row.prop(SWOMT, "AssetPath", text="Asset Path")
+        row.operator("object.browse_mmb_file", text="", icon="FILE_FOLDER")
+
+        layout.separator()
         row = layout.row()
-        row.prop(SWOMT, "AssetPath")
+        row.operator("object.compute_normals", text="Compute Normals", icon="NORMALS_FACE")
+        row.operator("object.clear_custom_normals", text="Clear Normals", icon="REMOVE")
+
+class ComputeNormals(bpy.types.Operator):
+    """Compute normals for the selected mesh object (Original normals are preserved on export)"""
+    bl_idname = "object.compute_normals"
+    bl_label = "Compute Normals"
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return (
+                obj is not None and
+                obj.type == 'MESH' and
+                obj.select_get()
+        )
+
+    def execute(self, context):
+        obj = context.active_object
+
+        import bmesh as _bmesh
+
+        obj_data = obj.data
+        merge_dist = 1e-4 # (0.0001) world-space units
+
+        bm_weld = _bmesh.new()
+        bm_weld.from_mesh(obj_data)
+        _bmesh.ops.remove_doubles(bm_weld, verts=bm_weld.verts, dist=merge_dist)
+        bm_weld.faces.ensure_lookup_table()
+        bm_weld.verts.ensure_lookup_table()
+
+        weld_normals = [Vector((0.0, 0.0, 0.0)) for _ in range(len(bm_weld.verts))]
+        for face in bm_weld.faces:
+            face.normal_update()
+            for loop in face.loops:
+                angle = loop.calc_angle()
+                weld_normals[loop.vert.index] += face.normal * angle
+
+        def _key(co):
+            return (round(co.x, 4), round(co.y, 4), round(co.z, 4))
+
+        pos_to_normal = {}
+        for wv in bm_weld.verts:
+            n = weld_normals[wv.index]
+            length = n.length
+            pos_to_normal[_key(wv.co)] = n / length if length > 1e-8 else Vector((0.0, 0.0, 1.0))
+
+        bm_weld.free()
+
+        bm_orig = _bmesh.new()
+        bm_orig.from_mesh(obj_data)
+        bm_orig.verts.ensure_lookup_table()
+
+        smooth_normals = []
+        for ov in bm_orig.verts:
+            k = _key(ov.co)
+            smooth_normals.append(pos_to_normal.get(k, Vector((0.0, 0.0, 1.0))))
+
+        bm_orig.free()
+
+        obj_data.normals_split_custom_set_from_vertices(smooth_normals)
+        obj_data.update()
+
+        self.report({'INFO'}, f"Computed normals for {obj.name}.")
+        return {'FINISHED'}
+
+class ClearNormals(bpy.types.Operator):
+    """Clear normals for the selected mesh object (Original normals are preserved on export)"""
+    bl_idname = "object.clear_custom_normals"
+    bl_label = "Clear Normals"
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return (
+                obj is not None and
+                obj.type == 'MESH' and
+                obj.select_get() and
+                obj.data.has_custom_normals
+        )
+
+    def execute(self, context):
+        bpy.ops.mesh.customdata_custom_splitnormals_clear()
+        return {'FINISHED'}
 
 class MeshPanel(bpy.types.Panel):
     bl_label = "Mesh"
@@ -2291,6 +2520,9 @@ class ApplyUpdate(bpy.types.Operator):
 
 
 classes=[SWOMTSettings,
+         BrowseMMBFile,
+         ComputeNormals,
+         ClearNormals,
          ImportAllLOD0s,
          ExportAllLOD0s,
          ZeroOutMesh,
