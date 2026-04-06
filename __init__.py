@@ -4,14 +4,14 @@
 #   - Added v12/v15/v16 parsing (multi-version support)
 #   - Fixed pre-LOD section: root_bone_index and lod_info_type are version/u_count conditional
 #   - Fixed tail section: UV hashes are 4 bytes on all versions; unk field order differs v12-15 vs v16-17
-#   - Formula-based position type detection: normals_base = ns - 4*uv - 4*col; 28→float, 12→int16
+#   - Formula-based position type detection: normals_base = ns - 4*uv - 4*col; 28->float, 12->int16
 #   - All fixes are version-conditional (additive only — existing versions unchanged)
 
 bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 26),
+    "version": (0, 1, 30),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 12, 13, 15, 16, 17.",
     "category": "Import-Export"
@@ -29,6 +29,8 @@ import io
 import urllib.request
 import threading
 import re
+import copy
+import operator
 
 # Auto-update
 _RAW_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/master/__init__.py"
@@ -259,7 +261,7 @@ class BytePacker:
     @staticmethod
     def uint8_norm(v):
         if 0.0 <= v <= 1.0:
-            i = int(v * ((2 ** 8)-1))
+            i = max(0, min(int(v * ((2 ** 8)-1)), 255))
         else:
             raise Exception("Couldn't normalize value as uint8Norm, "
                             "it wasn't between 0.0 and 1.0. Unknown max value."
@@ -274,12 +276,12 @@ class BytePacker:
     @staticmethod
     def int16_norm(v):
         # print(v)
-        if -1.0 < v < 1.0:
+        if -1.0 <= v <= 1.0:
             # if v >= 0:
             #     v = int(abs(v) * (2 ** 15))
             # else:
             #     v = 2 ** 16 - int(abs(v) * (2 ** 15))
-            v = int(v * (2 ** 15))
+            v = max(min(int(v * (2 ** 15)), 32767), -32768)
         else:
             raise Exception("Couldn't normalize value as int16Norm, it wasn't between -1.0 and 1.0. Unknown max value.")
         return pack('<h', v)
@@ -287,6 +289,7 @@ class BytePacker:
     def uint16_norm(v):
         if 0.0 < v < 1.0:
             i = v * (2 ** 16) - 1
+            i = int(i)
         else:
             raise Exception("Couldn't normalize value as uint16Norm, it wasn't between -1.0 and 1.0. Unknown max value.")
         return pack('<H', i)
@@ -383,10 +386,12 @@ class SkeletalMeshAsset(Asset):
     class Mesh:
         class LOD:
             def __init__(self, parent_mesh,index):
+                self.start_offset = 0
                 self.parent_mesh:SkeletalMeshAsset.Mesh = parent_mesh
                 self.index = index
                 self.vertex_count = 0
                 self.index_count = 0
+                self.size_a = 0
                 self.vertex_data_offset_a = 0
                 self.vertex_data_offset_b = 0
                 self.face_block_offset = 0
@@ -394,10 +399,17 @@ class SkeletalMeshAsset(Asset):
                 self.data_size = 0
                 self.data_offset_file_pos = 0   # file position of the data_offset uint32 field
                 self.blender_obj_name = ""  # set at import time; used by exporter to find the object
+                self.is_header_lod = False
+                self.vertex_end_bytes = None
+                self.normals_end_bytes = None
+                self.faces_end_bytes = None
+                self.data_start = 0  # offset within mesh_file BytesIO where this LOD's block begins
+
             def parse(self, f):
+                self.start_offset = f.tell()
                 self.vertex_count = br.uint32(f)
                 self.index_count = br.uint32(f)
-                unknown_size = br.uint32(f)
+                self.size_a = br.uint32(f)  # seems to be face_block_offset divided by 2
                 self.vertex_data_offset_a = br.uint32(f)
                 self.vertex_data_offset_b = br.uint32(f)
                 self.face_block_offset = br.uint32(f)
@@ -405,6 +417,47 @@ class SkeletalMeshAsset(Asset):
                 self.data_offset = br.uint32(f)
                 self.data_size = br.uint32(f)
                 lod_screen_size = br.float(f)
+                if self.data_offset < self.parent_mesh.parent_sk_mesh.size:
+                    self.is_header_lod = True
+                    print("Lod ", self.index, "is in header.")
+
+            def write(self, f):
+                f.seek(self.start_offset)
+                f.write(bp.uint32(self.vertex_count))
+                f.write(bp.uint32(self.index_count))
+                f.write(bp.uint32(int(self.face_block_offset / 2)))
+                f.write(bp.uint32(self.vertex_data_offset_a))
+                f.write(bp.uint32(self.vertex_data_offset_b))
+                f.write(bp.uint32(self.face_block_offset))
+                f.write(bp.uint32(self.data_offset))
+                f.write(bp.uint32(self.data_size))
+
+            def gather_extra_bytes(self, f):
+                offset = f.tell()
+                f.seek(self.data_offset)
+                real_vertex_size = self.vertex_count * self.parent_mesh.vertex_stride
+                extra_bytes_size = self.vertex_data_offset_b - self.vertex_data_offset_a - real_vertex_size
+                f.seek(real_vertex_size, 1)
+                print(f.tell())
+                self.vertex_end_bytes = f.read(extra_bytes_size)
+                print("Vertex Extra Bytes:", self.vertex_end_bytes)
+
+                real_normals_size = self.vertex_count * self.parent_mesh.normals_stride
+                extra_bytes_size = self.face_block_offset - self.vertex_data_offset_b - real_normals_size
+                f.seek(real_normals_size, 1)
+                print(f.tell())
+                self.normals_end_bytes = f.read(extra_bytes_size)
+                print("Normal Extra Bytes:", self.normals_end_bytes)
+
+                real_face_size = self.index_count * 2
+                size_without_face = self.face_block_offset - self.vertex_data_offset_a
+                extra_bytes_size = self.data_size - size_without_face - real_face_size
+                f.seek(real_face_size, 1)
+                print(f.tell())
+                self.faces_end_bytes = f.read(extra_bytes_size)
+                print("Face Extra Bytes:", self.faces_end_bytes)
+
+                f.seek(offset)
 
             def get_vertex_positions(self,raw_mesh_file):
                 vertices = []
@@ -446,12 +499,19 @@ class SkeletalMeshAsset(Asset):
                             if weights[i] > 0.0:
                                 iw[indices[i]] = weights[i]
                     elif stride == 32:
+                        # Layout: 8 pos | 4×uint16 primary_weights | 4×uint16 secondary_indices |
+                        #          4×uint8 primary_indices | 4×uint8 secondary_weights
                         f.seek(8, 1)
-                        weights = [br.uint16(f) / 32767.0 for _ in range(8)]
-                        indices = [br.uint8(f) for _ in range(8)]
-                        for i in range(8):
-                            if weights[i] > 0.0:
-                                iw[indices[i]] = weights[i]
+                        primary_weights  = [br.uint16(f) / 32767.0 for _ in range(4)]
+                        secondary_indices = [br.uint16(f) for _ in range(4)]
+                        primary_indices  = [br.uint8(f) for _ in range(4)]
+                        secondary_weights = [br.uint8(f) / 255.0 for _ in range(4)]
+                        for i in range(4):
+                            if primary_weights[i] > 0.0:
+                                iw[primary_indices[i]] = iw.get(primary_indices[i], 0.0) + primary_weights[i]
+                        # Secondary weights are preserved verbatim from the source file on
+                        # export and must NOT be merged into Blender vertex groups - doing so
+                        # would cause them to be double-counted back into the primary slots.
                     elif stride == 36:
                         f.seek(12, 1)
                         weights = [br.uint16(f) / 32767.0 for _ in range(8)]
@@ -621,10 +681,11 @@ class SkeletalMeshAsset(Asset):
                 """
                 Writes a single vertex position into file at the current position and skips to the end of stride.
                 :param file: file to write on
-                :param pos: (x,y,z)
-                :param scale: the per-vertex w (scale) value read from the original file.
-                              If None or 0, the vertex is a zero-displacement override vertex
-                              and is skipped (the original bytes are left intact).
+                :param pos: (x,y,z) world-space position in the same units get_vertex_positions returns.
+                :param scale: the per-vertex w value read from the original file.
+                              For position_type 0: world = int16_norm(raw) * w,
+                              so the inverse is raw = round(world / w * 32767), packed as int16.
+                              If None or 0, the vertex is skipped (zero-displacement override).
                 :return:
                 """
                 f = file
@@ -637,16 +698,19 @@ class SkeletalMeshAsset(Asset):
                     if scale is None or scale == 0:
                         f.seek(stride_start + stride)
                         return
-                    f.write(bp.int16_norm(x / scale))
-                    f.write(bp.int16_norm(y / scale))
-                    f.write(bp.int16_norm(z / scale))
+                    # Invert: world = int16_norm(raw) * w => raw = round(world / w * 32767)
+                    def to_raw(v, w):
+                        return max(-32768, min(32767, int(round(v / w * 32767))))
+                    f.write(bp.int16(to_raw(x, scale)))
+                    f.write(bp.int16(to_raw(y, scale)))
+                    f.write(bp.int16(to_raw(z, scale)))
                     f.write(bp.int16(scale))
                 elif self.parent_mesh.position_type == 1:
                     f.write(bp.float(x))
                     f.write(bp.float(y))
                     f.write(bp.float(z))
                 f.seek(stride_start + stride)
-            
+
             def write_bone_weights(self, file, mmb_index, blender_weights):
                 """
                 Writes bone weights for one vertex into file at the correct stride offset.
@@ -721,8 +785,9 @@ class SkeletalMeshAsset(Asset):
                     for idx, _ in sorted_w:
                         f.write(bp.uint8(idx))
             
-        def __init__(self,parent_sk_mesh):
+        def __init__(self,parent_sk_mesh, index=0):
             self.parent_sk_mesh:SkeletalMeshAsset = parent_sk_mesh
+            self.index = index
             self.name = ""
             self.name_offset = 0        # byte offset of the uint16 length prefix in the source file
             self.name_length = 0        # original byte count of the name field (from the uint16 prefix)
@@ -742,6 +807,7 @@ class SkeletalMeshAsset(Asset):
             self.uv_count = 0
             self.normal_type = 0 # 0:int8_norm 1:floats
             self.position_type = 0 # 0:int16_norm 1:floats
+            self.mesh_file = None  # BytesIO of reversed ordered LOD mesh data (used by create_mesh_file)
         def parse(self, f):
             self.name_offset = f.tell()
             _nlen = unpack('<H', f.read(2))[0]
@@ -820,16 +886,16 @@ class SkeletalMeshAsset(Asset):
 
             # --- Normal type detection ---
             # normals_base = normals_stride - 4*uv_count - 4*color_count
-            # normals_base > 8  → normal_type 1 (float normals, 28-byte block)
-            # normals_base <= 8 → normal_type 0 (int8_norm, 4-byte block)
+            # normals_base > 8 -> normal_type 1 (float normals, 28-byte block)
+            # normals_base <= 8 -> normal_type 0 (int8_norm, 4-byte block)
             _normals_base = self.normals_stride - 4 * self.uv_count - 4 * self.color_count
             self.normal_type = 1 if _normals_base > 8 else 0
 
             # --- Position type detection ---
             # Uses the same normals_base formula:
-            #   normals_base == 28 → float positions (3 × float32, 12 bytes)
-            #   normals_base == 12 → int16 positions (4 × int16 x/y/z/scale, 8 bytes)
-            #   other              → default to int16
+            #   normals_base == 28 -> float positions (3 × float32, 12 bytes)
+            #   normals_base == 12 -> int16 positions (4 × int16 x/y/z/scale, 8 bytes)
+            #   other              -> default to int16
             # Override: vertex_stride in (32,40) is always int16;
             #           vertex_stride in (28,36) is always float.
             # stride=44 is NOT overridden — some (e.g. gear upperbody) are float (nb=28)
@@ -892,9 +958,27 @@ class SkeletalMeshAsset(Asset):
             self.bones.append(self.Bone(f))
         self.mesh_count = br.uint32(f)
         for m in range(self.mesh_count):
-            mesh = self.Mesh(self)
+            mesh = self.Mesh(self, index=m)
             mesh.parse(f)
             self.meshes.append(mesh)
+
+    def clear(self):
+        self.bones = []
+        self.meshes = []
+
+    def get_sorted_lods(self):
+        lod_map = {}
+        for m in self.meshes:
+            for l in m.lods:
+                lod_map[l] = l.data_offset
+        sorted_lods = {k: v for k, v in sorted(lod_map.items(), key=lambda item: item[1])}
+        return sorted_lods
+
+    def get_mesh_data_start_offset(self):
+        lods = self.get_sorted_lods()
+        first_lod = next(iter(lods))
+        print("Mesh Data Start Offset = ", first_lod.data_offset)
+        return first_lod.data_offset
 
 class BlenderMeshImporter:
     @staticmethod
@@ -947,12 +1031,6 @@ class BlenderMeshImporter:
             bm_face.normal_flip() #this is required because the *-1 on x vertex co flips the mesh normals
         bm.to_mesh(obj_data)
         bm.free()
-
-        # Store original MMB vertex index on each vertex so the order survives
-        # operations like 'Mesh > Separate > By Loose Parts'.
-        attr = obj_data.attributes.new(name='mmb_vertex_order', type='INT', domain='POINT')
-        for i in range(lod.vertex_count):
-            attr.data[i].value = i
 
         bm = bmesh.new()
         bm.from_mesh(obj_data)
@@ -1151,91 +1229,286 @@ class BlenderMeshImporter:
 
 class BlenderMeshExporter:
     @staticmethod
+    def _compute_normals_for_object(obj):
+        """
+        Compute smooth angle-weighted normals for obj and store them as custom split normals.
+        Merge vertices by distance, compute angle-weighted face normals on the merged mesh, then transfer
+        them back to the original (possibly split) vertex layout.
+        """
+        obj_data = obj.data
+        merge_dist = 1e-4
+
+        bm_weld = bmesh.new()
+        bm_weld.from_mesh(obj_data)
+        bmesh.ops.remove_doubles(bm_weld, verts=bm_weld.verts, dist=merge_dist)
+        bm_weld.faces.ensure_lookup_table()
+        bm_weld.verts.ensure_lookup_table()
+
+        weld_normals = [Vector((0.0, 0.0, 0.0)) for _ in range(len(bm_weld.verts))]
+        for face in bm_weld.faces:
+            face.normal_update()
+            for loop in face.loops:
+                angle = loop.calc_angle()
+                weld_normals[loop.vert.index] += face.normal * angle
+
+        def _key(co):
+            return (round(co.x, 4), round(co.y, 4), round(co.z, 4))
+
+        pos_to_normal = {}
+        for wv in bm_weld.verts:
+            n = weld_normals[wv.index]
+            length = n.length
+            pos_to_normal[_key(wv.co)] = n / length if length > 1e-8 else Vector((0.0, 0.0, 1.0))
+
+        bm_weld.free()
+
+        bm_orig = bmesh.new()
+        bm_orig.from_mesh(obj_data)
+        bm_orig.verts.ensure_lookup_table()
+
+        smooth_normals = []
+        for ov in bm_orig.verts:
+            smooth_normals.append(pos_to_normal.get(_key(ov.co), Vector((0.0, 0.0, 1.0))))
+
+        bm_orig.free()
+
+        obj_data.normals_split_custom_set_from_vertices(smooth_normals)
+        obj_data.update()
+
+    @staticmethod
+    def _triangulate_object(obj, compute_normals=False):
+        """
+        Triangulate all faces of obj in-place using bmesh.
+        Quads and n-gons are converted to tris before export so the face index buffer only contains
+        triangles as the format requires.
+        """
+        me = obj.data
+        bm = bmesh.new()
+        bm.from_mesh(me)
+        bmesh.ops.triangulate(bm, faces=bm.faces, quad_method='BEAUTY', ngon_method='BEAUTY')
+        bm.to_mesh(me)
+        bm.free()
+        me.update()
+
+        if compute_normals:
+            BME._compute_normals_for_object(obj)
+
+    @staticmethod
     def find_object_by_name(name=""):
         return bpy.data.objects.get(name, None)
     @staticmethod
-    def copy_mmb_file():
+    def _write_mod_file(edited_lod_index_per_mesh: dict, out_path: str):
         """
-        Takes the merged mmb file and creates a copy of it.
-        :return: Path to the created file.
+        For each mesh/LOD pair in edited_lod_index_per_mesh, the vertex, normal,
+        and face data are rewritten from the current Blender mesh. All other LODs
+        and the full file header are copied verbatim from the source file.
+
+        If the new data fits within the original block it is written in-place.
+        If the new data is larger, the file is restructured: bytes are inserted at
+        the end of the edited LOD's block, and all affected offsets are updated.
+
+        :param edited_lod_index_per_mesh: dict mapping mesh_index -> lod_index to rewrite.
+               A value of -1 means copy all LODs verbatim (no Blender mesh needed).
+        :param out_path: destination file path to write.
         """
         SWOMT = bpy.context.scene.SWOMT
-        file = SWOMT.AssetPath
-        print(f"file = {file}")
-        merged_file = get_merged_mmb(file)
-        print(f'merged file size = {merged_file.getbuffer().nbytes}')
-        mod_file = os.path.splitext(file)[0] + "_MOD.mmb"
-        print(f'mod file = {mod_file}')
-        if os.path.exists(mod_file):
-            return mod_file
-        else:
-            with open(mod_file, 'wb') as w:
-                CopyFile(merged_file, w, 0, merged_file.getbuffer().nbytes)
-        return mod_file
+        src_path = SWOMT.AssetPath
+        export_normals = SWOMT.export_normals or _vert_count_changed()
+
+        # If a _MOD file already exists, use it as the source so successive exports accumulate.
+        mod_candidate = os.path.splitext(src_path)[0] + "_MOD.mmb"
+        if os.path.isfile(mod_candidate):
+            src_path = mod_candidate
+
+        with open(src_path, 'rb') as src:
+            file_data = bytearray(src.read())
+
+        # Sync lod.data_offset values from the source file (_MOD or original).
+        for m in asset.meshes:
+            for lod in m.lods:
+                fp = lod.data_offset_file_pos
+                lod.data_offset = unpack('<I', file_data[fp:fp+4])[0]
+
+        # Read asset.size (bytes 4-8) - boundary between header and streaming sections
+        asset_size = unpack('<I', file_data[4:8])[0]
+
+        for mesh_index, lod_index in edited_lod_index_per_mesh.items():
+            if lod_index < 0:
+                continue
+            mesh = asset.meshes[mesh_index]
+            if lod_index >= len(mesh.lods):
+                continue
+            lod = mesh.lods[lod_index]
+
+            obj = BME.find_object_by_name(mesh.name + f"_LOD{lod_index}")
+            if obj is None:
+                continue
+
+            new_vert_count  = len(obj.data.vertices)
+            new_index_count = len(obj.data.polygons) * 3
+
+            # Build new data blocks
+            verts_buf = io.BytesIO()
+            BME.write_vertices(verts_buf, mesh, lod_index)
+            if lod.vertex_end_bytes:
+                verts_buf.write(lod.vertex_end_bytes)
+
+            norms_buf = io.BytesIO()
+            if export_normals:
+                BME.write_normals(norms_buf, mesh, lod_index)
+                if lod.normals_end_bytes:
+                    norms_buf.write(lod.normals_end_bytes)
+            else:
+                # Preserve the original normals bytes from the source file unchanged.
+                orig_higher_size = sum(
+                    mesh.lods[li].data_size
+                    for li in range(lod_index + 1, len(mesh.lods))
+                )
+                orig_intra_vob = lod.vertex_data_offset_b - orig_higher_size
+                orig_intra_fb  = lod.face_block_offset    - orig_higher_size
+                orig_normals_size = orig_intra_fb - orig_intra_vob
+                orig_abs_vob = lod.data_offset + orig_intra_vob
+                norms_buf.write(file_data[orig_abs_vob:orig_abs_vob + orig_normals_size])
+
+            faces_buf = io.BytesIO()
+            BME.write_triangles(faces_buf, mesh, lod_index)
+            if lod.faces_end_bytes:
+                faces_buf.write(lod.faces_end_bytes)
+
+            vd = verts_buf.getvalue()
+            nd = norms_buf.getvalue()
+            fd = faces_buf.getvalue()
+
+            # higher_size: sum of data_size for LODs with index -> lod_index in this mesh.
+            higher_size = sum(
+                mesh.lods[li].data_size
+                for li in range(lod_index + 1, len(mesh.lods))
+            )
+
+            # Intra-block positions (relative to lod.data_offset).
+            # These are preserved from the original and must NOT be included in new_data_size.
+            intra_voa = lod.vertex_data_offset_a - higher_size
+
+            # New intra-block positions based on actual buffer sizes.
+            new_intra_vob = intra_voa + len(vd)
+            new_intra_fb  = new_intra_vob + len(nd)
+
+            # new_data_size is the only writable region (vd+nd+fd), excluding the preserved prefix bytes.
+            file_lod_data_size = unpack('<I', file_data[lod.start_offset + 28:lod.start_offset + 32])[0]
+            orig_data_size   = file_lod_data_size - intra_voa  # writable region in source
+
+            # Preserve any trailing bytes after face data (e.g. fa7f sentinel padding).
+            orig_trailing_size = orig_data_size - len(vd) - len(nd) - len(fd)
+            if orig_trailing_size > 0:
+                trailing_abs = lod.data_offset + intra_voa + len(vd) + len(nd) + len(fd)
+                trailing_bytes = bytes(file_data[trailing_abs:trailing_abs + orig_trailing_size])
+            else:
+                trailing_bytes = b''
+                orig_trailing_size = 0
+
+            new_data_size    = len(vd) + len(nd) + len(fd) + len(trailing_bytes)
+            delta = new_data_size - orig_data_size  # bytes added (negative = shrink)
+
+            # Absolute positions in file_data
+            abs_voa     = lod.data_offset + intra_voa
+            new_abs_vob = lod.data_offset + new_intra_vob
+            new_abs_fb  = lod.data_offset + new_intra_fb
+            # Insertion point is at the end of the full block (including prefix)
+            insert_at   = lod.data_offset + file_lod_data_size
+
+            if delta > 0:
+                # Growing: insert delta bytes into file_data at insert_at
+                file_data[insert_at:insert_at] = b'\x00' * delta
+
+                # Update data_offset for every LOD in every mesh whose block starts after the insertion point
+                for other_mesh in asset.meshes:
+                    for other_lod in other_mesh.lods:
+                        if other_lod.data_offset > lod.data_offset:
+                            fp = other_lod.data_offset_file_pos
+                            old_val = unpack('<I', file_data[fp:fp+4])[0]
+                            file_data[fp:fp+4] = pack('<I', old_val + delta)
+
+                # Update asset.size if the edited LOD lives in the header section
+                if lod.data_offset < asset_size:
+                    asset_size += delta
+                    file_data[4:8] = pack('<I', asset_size)
+
+                # Update voa/vob/fb for lower-indexed LODs in this mesh.
+                for li in range(0, lod_index):
+                    other_lod = mesh.lods[li]
+                    so = other_lod.start_offset
+                    for field_off in (12, 16, 20):  # voa, vob, fb
+                        old = unpack('<I', file_data[so+field_off:so+field_off+4])[0]
+                        file_data[so+field_off:so+field_off+4] = pack('<I', old + delta)
+
+            elif delta < 0:
+                # Shrinking: zero the freed bytes (no structural change needed)
+                shrink_start = lod.data_offset + intra_voa + new_data_size
+                file_data[shrink_start:insert_at] = b'\x00' * (-delta)
+
+            # Write the new vertex/normal/face data at their correct positions.
+            abs_voa     = lod.data_offset + intra_voa
+            new_abs_vob = lod.data_offset + new_intra_vob
+            new_abs_fb  = lod.data_offset + new_intra_fb
+
+            file_data[abs_voa    :abs_voa     + len(vd)] = vd
+            file_data[new_abs_vob:new_abs_vob + len(nd)] = nd
+            file_data[new_abs_fb :new_abs_fb  + len(fd)] = fd
+            if trailing_bytes:
+                trail_abs = new_abs_fb + len(fd)
+                file_data[trail_abs:trail_abs + len(trailing_bytes)] = trailing_bytes
+
+            # Patch the edited LOD's own header fields.
+            so = lod.start_offset
+            new_vob_for_header = higher_size + new_intra_vob
+            new_fb_for_header  = higher_size + new_intra_fb
+            # data_size in the header = intra_voa (prefix) + writable region
+            new_file_data_size = intra_voa + new_data_size
+            file_data[so +  0: so +  4] = pack('<I', new_vert_count)
+            file_data[so +  4: so +  8] = pack('<I', new_index_count)
+            file_data[so +  8: so + 12] = pack('<I', new_fb_for_header // 2)  # size_a
+            # voa (so+12) is unchanged
+            file_data[so + 16: so + 20] = pack('<I', new_vob_for_header)      # vob
+            file_data[so + 20: so + 24] = pack('<I', new_fb_for_header)       # fb
+            # data_offset (so+24) is unchanged for the edited LOD itself
+            file_data[so + 28: so + 32] = pack('<I', new_file_data_size)      # data_size
+
+            # Update the in-memory LOD so re-import in the same session uses correct values.
+            lod.vertex_count         = new_vert_count
+            lod.index_count          = new_index_count
+            lod.vertex_data_offset_b = new_vob_for_header
+            lod.face_block_offset    = new_fb_for_header
+            lod.data_size            = new_file_data_size
+
+            # For other LODs: update data_offset and reversed-buffer offsets
+            if delta != 0:
+                for other_mesh in asset.meshes:
+                    for other_lod in other_mesh.lods:
+                        if other_lod.data_offset > lod.data_offset:
+                            # Read the patched value from file_data
+                            fp = other_lod.data_offset_file_pos
+                            other_lod.data_offset = unpack('<I', file_data[fp:fp+4])[0]
+
+                for li in range(0, lod_index):
+                    other_lod = mesh.lods[li]
+                    other_lod_so = other_lod.start_offset
+                    other_lod.vertex_data_offset_a = unpack('<I', file_data[other_lod_so+12:other_lod_so+16])[0]
+                    other_lod.vertex_data_offset_b = unpack('<I', file_data[other_lod_so+16:other_lod_so+20])[0]
+                    other_lod.face_block_offset    = unpack('<I', file_data[other_lod_so+20:other_lod_so+24])[0]
+
+        with open(out_path, 'wb') as out:
+            out.write(file_data)
+
+
     @staticmethod
-    def overwrite_vertex_positions(file, skeletal_mesh:SkeletalMeshAsset, mesh:SkeletalMeshAsset.Mesh, lod_index = 0, operator=None, export_weights=False):
-        lod_tracked = mesh.lods[lod_index].blender_obj_name
-        obj_lookup = lod_tracked if lod_tracked else mesh.name + f"_LOD{lod_index}"
-        obj = BME.find_object_by_name(obj_lookup)
-        lod:SkeletalMeshAsset.Mesh.LOD = mesh.lods[lod_index]
-        if obj:
-            data = obj.data
-            with open(file,'rb+') as f:
-                if mesh.position_type == 0:
-                    original_w = []
-                    f.seek(lod.data_offset)
-                    for v in range(lod.vertex_count):
-                        f.seek(6, 1)
-                        w = unpack('<h', f.read(2))[0]
-                        original_w.append(w)
-                        f.seek(mesh.vertex_stride - 8, 1)
-                else:
-                    original_w = [None] * lod.vertex_count
-
-                mmb_attr = data.attributes.get('mmb_vertex_order')
-                if mmb_attr is not None and len(mmb_attr.data) == len(data.vertices):
-                    blender_to_mmb = {bv_idx: mmb_attr.data[bv_idx].value for bv_idx in range(len(data.vertices))}
-                    is_valid = (len(blender_to_mmb) == lod.vertex_count and
-                                all(0 <= idx < lod.vertex_count for idx in blender_to_mmb.values()))
-                    use_mapping = is_valid
-                else:
-                    use_mapping = False
-
-                for bv_idx, bv in enumerate(data.vertices):
-                    mmb_idx = blender_to_mmb[bv_idx] if use_mapping else bv_idx
-                    f.seek(lod.data_offset + mmb_idx * mesh.vertex_stride)
-                    lod.write_vertex_position(f, pos=bv.co * Vector((-1.0, 1.0, 1.0)), scale=original_w[mmb_idx])
-
-                if export_weights:
-                    # Export bone weights from Blender vertex groups
-                    mesh_bones = list(mesh.mesh_bones.keys())
-                    name_to_mesh_bone = {}
-                    for mesh_bone_idx, real_bone_idx in enumerate(mesh_bones):
-                        if real_bone_idx < len(skeletal_mesh.bones):
-                            bone_name = skeletal_mesh.bones[real_bone_idx].name
-                            name_to_mesh_bone[bone_name] = mesh_bone_idx
-
-                    skipped_groups = set()
-
-                    for bv_idx, bv in enumerate(data.vertices):
-                        mmb_idx = blender_to_mmb[bv_idx] if use_mapping else bv_idx
-                        weights = {}
-                        for vge in bv.groups:
-                            vg_name = obj.vertex_groups[vge.group].name
-                            if vg_name in name_to_mesh_bone and vge.weight > 0.0:
-                                weights[name_to_mesh_bone[vg_name]] = vge.weight
-                            elif vg_name not in name_to_mesh_bone:
-                                skipped_groups.add(vg_name)
-                        if weights:
-                            lod.write_bone_weights(f, mmb_idx, weights)
-
-                    if skipped_groups and operator:
-                        operator.report({'WARNING'}, f"Skipped {len(skipped_groups)} vertex group(s) not in mesh bone table: {sorted(skipped_groups)[:5]}{'...' if len(skipped_groups) > 5 else ''}")
-
-        # Apply staged bone remaps (outside 'if obj:' so they can be applied even when the mesh has not been imported)
-        # Patches both the 64-byte inverse bind matrix AND the 2-byte skeleton index for each remapped slot in the exported (_MOD) file
+    def _apply_header_patches(file_path: str, mesh, skeletal_mesh: SkeletalMeshAsset, operator=None):
+        """
+        Apply all staged header-level patches to an already-written mod file:
+        bone remaps, bone additions, mesh rename, and zero-out.
+        """
+        # --- Bone remaps ---
         if mesh.pending_bone_remaps:
-            with open(file, 'rb+') as f:
+            with open(file_path, 'rb+') as f:
                 mesh_bones_list = list(mesh.mesh_bones.items())
                 for slot_idx, (new_skel_idx, new_matrix) in mesh.pending_bone_remaps.items():
                     if slot_idx < len(mesh.mesh_bone_file_offsets):
@@ -1245,7 +1518,6 @@ class BlenderMeshExporter:
                         f.write(pack('<16f', *new_matrix))
                         f.seek(index_offset)
                         f.write(pack('<H', new_skel_idx))
-            # Rebuild mesh.mesh_bones to reflect the new mapping
             new_mesh_bones = {}
             for slot_idx, (old_skel_idx, matrix) in enumerate(mesh_bones_list):
                 remap = mesh.pending_bone_remaps.get(slot_idx)
@@ -1257,46 +1529,42 @@ class BlenderMeshExporter:
             mesh.mesh_bones = new_mesh_bones
             mesh.pending_bone_remaps = {}
 
-        # Apply staged bone additions - insert new 66-byte slots at bone_table_end_offset
+        # Bone additions
         if mesh.pending_bone_additions:
             n = len(mesh.pending_bone_additions)
             insert_at = mesh.bone_table_end_offset
-            inserted_bytes = n * 66  # 64 matrix + 2 index per slot
+            inserted_bytes = n * 66  # 64-byte matrix + 2-byte index per slot
 
             new_slot_bytes = b''
             for new_skel_idx, new_matrix in mesh.pending_bone_additions:
                 new_slot_bytes += pack('<16f', *new_matrix)
                 new_slot_bytes += pack('<H', new_skel_idx)
 
-            with open(file, 'rb') as f:
+            with open(file_path, 'rb') as f:
                 file_data = bytearray(f.read())
             file_data[insert_at:insert_at] = new_slot_bytes
 
-            # Patch u_count at its offset
-            old_u = unpack('<H', file_data[mesh.u_count_offset:mesh.u_count_offset+2])[0]
-            file_data[mesh.u_count_offset:mesh.u_count_offset+2] = pack('<H', old_u + n)
+            old_u = unpack('<H', file_data[mesh.u_count_offset:mesh.u_count_offset + 2])[0]
+            file_data[mesh.u_count_offset:mesh.u_count_offset + 2] = pack('<H', old_u + n)
 
-            # Adjust LOD data_offset fields across meshes
-            for other_mesh in mesh.parent_sk_mesh.meshes:
+            for other_mesh in skeletal_mesh.meshes:
                 for lod in other_mesh.lods:
                     if lod.data_offset_file_pos > insert_at:
                         field_pos = lod.data_offset_file_pos + inserted_bytes
                     else:
                         field_pos = lod.data_offset_file_pos
-                    old_val = unpack('<I', file_data[field_pos:field_pos+4])[0]
+                    old_val = unpack('<I', file_data[field_pos:field_pos + 4])[0]
                     if old_val > 0:
-                        file_data[field_pos:field_pos+4] = pack('<I', old_val + inserted_bytes)
-                    # Update value so further exports stay consistent
+                        file_data[field_pos:field_pos + 4] = pack('<I', old_val + inserted_bytes)
                     lod.data_offset += inserted_bytes
                     lod.data_offset_file_pos = field_pos
 
-            with open(file, 'wb') as f:
+            with open(file_path, 'wb') as f:
                 f.write(file_data)
 
             for i in range(len(mesh.mesh_bone_file_offsets)):
                 if mesh.mesh_bone_file_offsets[i] >= insert_at:
                     mesh.mesh_bone_file_offsets[i] += inserted_bytes
-            # Append offsets for the newly added slots
             for si, (new_skel_idx, new_matrix) in enumerate(mesh.pending_bone_additions):
                 new_index_offset = insert_at + si * 66 + 64
                 mesh.mesh_bone_file_offsets.append(new_index_offset)
@@ -1304,12 +1572,504 @@ class BlenderMeshExporter:
             mesh.bone_table_end_offset = insert_at + inserted_bytes
             mesh.pending_bone_additions = []
 
+        # Zero out all LODs
+        if mesh.zeroed_out_in_session:
+            with open(file_path, 'rb+') as f:
+                for lod in mesh.lods:
+                    for v in range(lod.vertex_count):
+                        f.seek(lod.data_offset + v * mesh.vertex_stride)
+                        lod.write_vertex_position(f, pos=(0.0, 0.0, 0.0),
+                                                  scale=None if mesh.position_type == 1 else 1)
 
-    def write_vertices(file, mesh:SkeletalMeshAsset.Mesh, lod_index = 0):
-        obj = BME.find_object_by_name(mesh.name+f"_LOD{lod_index}")
-        lod:SkeletalMeshAsset.Mesh.LOD = mesh.lods[lod_index]
+        # Mesh name rename
+        if mesh.pending_rename_new:
+            padded = (b'\x00' * (mesh.name_length - len(mesh.pending_rename_new))
+                      + mesh.pending_rename_new.encode('utf-8'))
+            try:
+                with open(file_path, 'rb+') as f:
+                    f.seek(mesh.name_offset + 2)
+                    f.write(padded)
+            except Exception as e:
+                if operator:
+                    operator.report({'ERROR'}, f"Failed to patch mesh name in mod file: {e}")
+
+
+
+
+
+
+    @staticmethod
+    def get_vertex_blend_indices(vertex):
+        """
+        Returns a dictionary of the vertex normalized, sorted and truncated 8 weights.
+        """
+        group_weights = {}
+
+        # Gather bone groups
+        for vg in vertex.groups:
+            if vg.weight > 0.0:
+                group_weights[vg.group] = vg.weight
+
+        # Normalize
+        total_weight = 0
+        for k in group_weights.keys():
+            total_weight += group_weights[k]
+        if total_weight == 0:
+            raise Exception("Vertex {v} has no weight".format(v=vertex.index))
+        normalizer = 1 / total_weight
+        for gw in group_weights:
+            group_weights[gw] *= normalizer
+
+        # Sort Weights
+        sorted_weights = sorted(group_weights.items(), key=operator.itemgetter(1), reverse=True)
+
+        # Truncate Weights
+        trunc_weights = sorted_weights[0:8]
+        return trunc_weights
+
+    @staticmethod
+    def convert_coordinate(co):
+        return Vector((co[0] * -1, co[1], co[2]))
+
+    @staticmethod
+    def write_vertices(file, mesh:SkeletalMeshAsset.Mesh, lod_index=0):
+        f = file
+        obj = BME.find_object_by_name(mesh.name + f"_LOD{lod_index}")
+        lod: SkeletalMeshAsset.Mesh.LOD = mesh.lods[lod_index]
         if obj:
             data = obj.data
+            bm = bmesh.new()
+            bm.from_mesh(data)
+            bm.verts.ensure_lookup_table()
+            stride = mesh.vertex_stride
+            pos_length = 8 if mesh.position_type == 0 else 12
+            print(stride, mesh.position_type)
+            mesh_bones = list(mesh.mesh_bones.keys())  # skeleton bone indices in mesh-slot order
+
+            # Map: bone name -> mesh slot index
+            name_to_mesh_slot = {}
+            for slot, skel_idx in enumerate(mesh_bones):
+                if skel_idx < len(asset.bones):
+                    name_to_mesh_slot[asset.bones[skel_idx].name] = slot
+
+            # Map: Blender vertex group index -> mesh slot index
+            vgroup_to_mesh_slot = {}
+            for vg in obj.vertex_groups:
+                if vg.name in name_to_mesh_slot:
+                    vgroup_to_mesh_slot[vg.index] = name_to_mesh_slot[vg.name]
+
+            # For int16 positions, read per-vertex w scale from the original source file.
+            SWOMT = bpy.context.scene.SWOMT
+            # Use MOD file as source if it exists, matching _write_mod_file behaviour.
+            src_path = SWOMT.AssetPath
+            mod_candidate = os.path.splitext(src_path)[0] + "_MOD.mmb"
+            if os.path.isfile(mod_candidate):
+                src_path = mod_candidate
+
+            if mesh.position_type == 0:
+                original_w = []
+                with open(src_path, 'rb') as src:
+                    src.seek(lod.data_offset + 6)
+                    for _ in range(lod.vertex_count):
+                        original_w.append(unpack('<h', src.read(2))[0])
+                        src.seek(stride - 2, 1)
+                if len(data.vertices) != lod.vertex_count:
+                    fallback_scale = int(sum(abs(w) for w in original_w) / len(original_w)) if original_w else 1
+                    original_w = [fallback_scale] * len(data.vertices)
+            else:
+                original_w = [None] * len(data.vertices)
+
+            # Read original weight+index bytes per vertex when vert count is unchanged and export_weights is unchecked.
+            export_weights = bpy.context.scene.SWOMT.export_weights or (len(data.vertices) != lod.vertex_count)
+            weight_bytes_per_vert = stride - pos_length
+
+            # Compute abs_voa once for weight reading
+            higher_size_w = sum(
+                mesh.lods[li].data_size
+                for li in range(lod_index + 1, len(mesh.lods))
+            )
+            intra_voa_w = lod.vertex_data_offset_a - higher_size_w
+            abs_voa_w   = lod.data_offset + intra_voa_w
+
+            orig_weight_bytes = None
+            # Per-vertex data needed when export_weights=True and stride=32
+            orig_stride32_data = None
+            # Per-vertex original slot indices for the else branch (strides 12, 16, 24 etc...)
+            orig_slot_indices = None
+
+            if not export_weights and weight_bytes_per_vert > 0:
+                orig_weight_bytes = []
+                with open(src_path, 'rb') as src:
+                    for vi in range(lod.vertex_count):
+                        src.seek(abs_voa_w + vi * stride + pos_length)
+                        orig_weight_bytes.append(src.read(weight_bytes_per_vert))
+            elif export_weights and len(data.vertices) == lod.vertex_count:
+                if stride == 32:
+                    orig_stride32_data = []
+                    with open(src_path, 'rb') as src:
+                        for vi in range(lod.vertex_count):
+                            src.seek(abs_voa_w + vi * stride + pos_length)
+                            pri_w = unpack('<4H', src.read(8))
+                            sec_i = src.read(8)   # 4×uint16 raw bytes
+                            pri_i = list(src.read(4))  # 4×uint8 primary indices
+                            sec_w = src.read(4)   # 4×uint8 raw bytes
+                            orig_sum = sum(pri_w)
+                            orig_stride32_data.append((orig_sum, sec_i, sec_w, pri_i))
+                elif stride not in (20, 36, 40, 44):
+                    # else branch: wc = (stride - pos_length) / 2
+                    # weights are uint8, indices are uint8
+                    wc = int(weight_bytes_per_vert / 2)
+                    orig_slot_indices = []
+                    with open(src_path, 'rb') as src:
+                        for vi in range(lod.vertex_count):
+                            src.seek(abs_voa_w + vi * stride + pos_length + wc)
+                            orig_slot_indices.append(list(src.read(wc)))
+
+            for vi, v in enumerate(bm.verts):
+                stride_start = f.tell()
+
+                # Write position
+                lod.write_vertex_position(
+                    f,
+                    pos=BME.convert_coordinate(v.co),
+                    scale=original_w[vi],
+                )
+                f.seek(stride_start + pos_length)
+
+                # Write bone weights - use original bytes if vert count is unchanged
+                if orig_weight_bytes is not None:
+                    f.write(orig_weight_bytes[vi])
+                    f.seek(stride_start + stride)
+                    continue
+
+                # Gather bone weights
+                vertex = data.vertices[v.index]
+                raw_weights = []
+                for vge in vertex.groups:
+                    slot = vgroup_to_mesh_slot.get(vge.group)
+                    if slot is not None and vge.weight > 0.0:
+                        raw_weights.append((slot, vge.weight))
+                raw_weights.sort(key=lambda x: x[1], reverse=True)
+
+                # Write bone weights
+                if stride == 20:
+                    max_bones = 4
+                    sw = raw_weights[:max_bones]
+                    for _, w in sw:
+                        f.write(bp.uint16(max(0, min(int(round(w * 32767)), 32767))))
+                    for _ in range(max_bones - len(sw)):
+                        f.write(bp.uint16(0))
+                    for s, _ in sw:
+                        f.write(bp.uint8(s))
+                    for _ in range(max_bones - len(sw)):
+                        f.write(bp.uint8(0))
+
+                elif stride == 32:
+                    if orig_stride32_data is not None:
+                        # Preserve original slot structure (indices) exactly.
+                        # Only update the weight value for each slot based on the
+                        # Blender vertex group weight for that slot's bone index.
+                        orig_sum, sec_i_bytes, sec_w_bytes, orig_pri_i = orig_stride32_data[vi]
+                        remaining = {s: w for s, w in raw_weights}
+                        for slot_bone in orig_pri_i:
+                            w = remaining.pop(slot_bone, 0.0)
+                            f.write(bp.uint16(max(0, min(int(round(w * 32767)), 32767))))
+                        f.write(sec_i_bytes)
+                        for slot_bone in orig_pri_i:
+                            f.write(bp.uint8(slot_bone))
+                        f.write(sec_w_bytes)
+                    else:
+                        primary = raw_weights[:4]
+                        for _, w in primary:
+                            f.write(bp.uint16(max(0, min(int(round(w * 32767)), 32767))))
+                        for _ in range(4 - len(primary)):
+                            f.write(bp.uint16(0))
+                        for _ in range(4): # secondary indices - zeroed
+                            f.write(bp.uint16(0))
+                        for s, _ in primary:
+                            f.write(bp.uint8(s))
+                        for _ in range(4 - len(primary)):
+                            f.write(bp.uint8(0))
+                        for _ in range(4): # secondary weights - zeroed
+                            f.write(bp.uint8(0))
+
+                elif stride == 36:
+                    max_bones = 8
+                    sw = raw_weights[:max_bones]
+                    for _, w in sw:
+                        f.write(bp.uint16(max(0, min(int(round(w * 32767)), 32767))))
+                    for _ in range(max_bones - len(sw)):
+                        f.write(bp.uint16(0))
+                    for s, _ in sw:
+                        f.write(bp.uint8(s))
+                    for _ in range(max_bones - len(sw)):
+                        f.write(bp.uint8(0))
+
+                elif stride == 40:
+                    max_bones = 8
+                    sw = raw_weights[:max_bones]
+                    for _, w in sw:
+                        f.write(bp.uint16(max(0, min(int(round(w * 32767)), 32767))))
+                    for _ in range(max_bones - len(sw)):
+                        f.write(bp.uint16(0))
+                    for s, _ in sw:
+                        f.write(bp.uint16(s))
+                    for _ in range(max_bones - len(sw)):
+                        f.write(bp.uint16(0))
+
+                elif stride == 44:
+                    max_bones = 12
+                    sw = raw_weights[:max_bones]
+                    for i in range(max_bones):
+                        if i < len(sw):
+                            f.write(bp.uint8(max(0, min(int(round(sw[i][1] * 255)), 255))))
+                        else:
+                            f.write(bp.uint8(0))
+                    for i in range(max_bones):
+                        if i < len(sw):
+                            f.write(bp.uint16(sw[i][0]))
+                        else:
+                            f.write(bp.uint16(0))
+
+                else:
+                    wc = int((stride - pos_length) / 2)
+                    sw = raw_weights[:wc]
+                    if orig_slot_indices is not None:
+                        # Preserve original slot structure
+                        remaining = {s: w for s, w in raw_weights}
+                        slot_idxs = orig_slot_indices[vi]
+                        for slot_bone in slot_idxs:
+                            w = remaining.pop(slot_bone, 0.0)
+                            f.write(bp.uint8(max(0, min(int(round(w * 255)), 255))))
+                        for slot_bone in slot_idxs:
+                            f.write(bp.uint8(slot_bone))
+                    else:
+                        # No original indices available - write Blender weights
+                        for i in range(wc):
+                            if i < len(sw):
+                                f.write(bp.uint8(max(0, min(int(round(sw[i][1] * 255)), 255))))
+                            else:
+                                f.write(bp.uint8(0))
+                        for i in range(wc):
+                            if i < len(sw):
+                                f.write(bp.uint8(sw[i][0]))
+                            else:
+                                f.write(bp.uint8(0))
+
+                # Advance to next vertex slot
+                f.seek(stride_start + stride)
+            bm.free()
+
+
+
+    @staticmethod
+    def write_normals(file, mesh:SkeletalMeshAsset.Mesh, lod_index=0):
+        f = file
+        obj = BME.find_object_by_name(mesh.name + f"_LOD{lod_index}")
+        lod: SkeletalMeshAsset.Mesh.LOD = mesh.lods[lod_index]
+        if obj:
+            data = obj.data
+            bm = bmesh.new()
+            bm.from_mesh(data)
+            bm.verts.ensure_lookup_table()
+            bm.faces.ensure_lookup_table()
+            data.loops.data.calc_tangents()
+
+            # Gather per-vertex normal, tangent, bitangent-sign, and UV data from loops
+            NTB = [(Vector((1.0, 0.0, 0.0)), Vector((0.0, 1.0, 0.0)), 1.0)] * len(data.vertices)
+            UVs = [[[(0.0, 0.0)] * len(data.vertices)] for _ in range(mesh.uv_count)]
+            # Build per-UV-layer data
+            uv_layers = bm.loops.layers.uv
+            all_uvs = [[(0.0, 0.0)] * len(data.vertices) for _ in range(mesh.uv_count)]
+
+            for bface in bm.faces:
+                for loop in bface.loops:
+                    vi = loop.vert.index
+                    for ui in range(mesh.uv_count):
+                        if ui < len(uv_layers):
+                            u = loop[uv_layers[ui]].uv[0]
+                            v = 1 - loop[uv_layers[ui]].uv[1]
+                            all_uvs[ui][vi] = (u, v)
+
+            for l in data.loops:
+                flip = -1.0 if l.bitangent_sign == -1 else 1.0
+                NTB[l.vertex_index] = (l.normal, l.tangent, flip)
+
+            color_layer = bm.verts.layers.float_color.get("Color_0")
+
+            if mesh.normal_type == 0:
+                # Read original tangent bytes and nw from source file if vertex count is unchanged.
+                # Blender recomputes tangent space on import and the result differs from the
+                # original, so preserving original tangents gives better fidelity.
+                # nw also varies per vertex (not always -1) and must be preserved.
+                SWOMT = bpy.context.scene.SWOMT
+                src_path_n = SWOMT.AssetPath
+                mod_candidate_n = os.path.splitext(src_path_n)[0] + "_MOD.mmb"
+                if os.path.isfile(mod_candidate_n):
+                    src_path_n = mod_candidate_n
+                orig_tangents = None
+                orig_nw = None
+                if len(data.vertices) == lod.vertex_count:
+                    higher_size = sum(
+                        mesh.lods[li].data_size
+                        for li in range(lod_index + 1, len(mesh.lods))
+                    )
+                    intra_vob = lod.vertex_data_offset_b - higher_size
+                    abs_vob = lod.data_offset + intra_vob
+                    orig_tangents = []
+                    orig_nw = []
+                    with open(src_path_n, 'rb') as src:
+                        for _ in range(lod.vertex_count):
+                            src.seek(abs_vob + _ * mesh.normals_stride)
+                            src.seek(3, 1)              # skip nx, ny, nz
+                            orig_nw.append(unpack('<b', src.read(1))[0])
+                            orig_tangents.append(src.read(4))  # tangent bytes
+
+                for vi, v in enumerate(data.vertices):
+                    normal  = NTB[v.index][0]
+                    tangent = NTB[v.index][1]
+                    flip    = NTB[v.index][2]
+
+                    # Write normal as int8
+                    # nw varies per vertex - preserve from source when available
+                    def clamp_i8(val):
+                        return max(-127, min(127, int(round(val * 127))))
+                    f.write(bp.int8(clamp_i8(normal[0] * -1)))
+                    f.write(bp.int8(clamp_i8(normal[1])))
+                    f.write(bp.int8(clamp_i8(normal[2])))
+                    f.write(bp.int8(orig_nw[vi] if orig_nw is not None else -1))
+
+                    # Write tangent: use original bytes if available, else recompute
+                    if orig_tangents is not None:
+                        f.write(orig_tangents[vi])
+                    else:
+                        f.write(bp.X10Y10Z10W2(tangent[0] * -1, tangent[1], tangent[2], max(0, int(flip))))
+
+                    # Write vertex color (before UVs, matching reader order)
+                    if color_layer is not None:
+                        vertex_color = bm.verts[v.index][color_layer]
+                        for c in vertex_color:
+                            f.write(bp.uint8_norm(c))
+
+                    # Write UVs
+                    for ui in range(mesh.uv_count):
+                        u, v_uv = all_uvs[ui][v.index]
+                        f.write(bp.int16_norm(max(-1.0, min(1.0, u))))
+                        f.write(bp.int16_norm(max(-1.0, min(1.0, v_uv))))
+
+            else:
+                for v in data.vertices:
+                    normal  = NTB[v.index][0]
+                    tangent = NTB[v.index][1]
+                    v_flip  = NTB[v.index][2]
+
+                    f.write(bp.float(normal[0] * -1))
+                    f.write(bp.float(normal[1]))
+                    f.write(bp.float(normal[2]))
+                    f.write(bp.float(tangent[0] * -1))
+                    f.write(bp.float(tangent[1]))
+                    f.write(bp.float(tangent[2]))
+                    f.write(bp.float(v_flip))
+
+                    if color_layer is not None:
+                        vertex_color = bm.verts[v.index][color_layer]
+                        for c in vertex_color:
+                            f.write(bp.uint8_norm(c))
+
+                    for ui in range(mesh.uv_count):
+                        u, v_uv = all_uvs[ui][v.index]
+                        f.write(bp.int16_norm(max(-1.0, min(1.0, u))))
+                        f.write(bp.int16_norm(max(-1.0, min(1.0, v_uv))))
+
+            bm.free()
+
+
+    @staticmethod
+    def write_triangles(file, mesh:SkeletalMeshAsset.Mesh, lod_index=0):
+        f = file
+        obj = BME.find_object_by_name(mesh.name + f"_LOD{lod_index}")
+        lod: SkeletalMeshAsset.Mesh.LOD = mesh.lods[lod_index]
+        if obj:
+            data = obj.data
+            bm = bmesh.new()
+            bm.from_mesh(data)
+            bm.verts.ensure_lookup_table()
+            bm.faces.ensure_lookup_table()
+            for p in data.polygons:
+                f.write(bp.uint16(p.vertices[0]))
+                f.write(bp.uint16(p.vertices[2]))
+                f.write(bp.uint16(p.vertices[1]))
+            bm.free()
+
+    @staticmethod
+    def copy_previous_mesh_data(source_path, file, mesh_index=0, lod_index=0):
+        sorted_lods = asset.get_sorted_lods()
+        with open(source_path, 'rb') as source:
+            for lod in sorted_lods:
+                print(lod.data_offset, lod.data_size, lod.vertex_count)
+                if lod.index == lod_index and lod.parent_mesh.index == mesh_index:
+                    return
+                source.seek(lod.data_offset)
+                file.write(source.read(lod.data_size))
+
+    @staticmethod
+    def create_mesh_file(mesh_index=0, lod_index=-1):
+        """
+        Creates a BytesIO of the reverse-sorted LODs for a mesh using the edited
+        Blender mesh for the given lod_index (or unedited data for all others).
+        :return: Mesh object with updated LOD offset/size fields and mesh_file set.
+        """
+        SWOMT = bpy.context.scene.SWOMT
+        file = SWOMT.AssetPath
+        mesh_file = io.BytesIO()
+        offset_diff = 0
+        mesh = asset.meshes[mesh_index]
+        modded_mesh: SkeletalMeshAsset.Mesh = copy.deepcopy(asset.meshes[mesh_index])
+
+        with open(file, 'rb') as source:
+            for lod in reversed(asset.meshes[mesh_index].lods):
+                current_modded_lod = modded_mesh.lods[lod.index]
+                current_modded_lod.parent_mesh = modded_mesh
+                new_vertex_data_offset_a = mesh_file.tell()
+                current_modded_lod.data_start = mesh_file.tell() # start of this LOD's block in mesh_file
+                if lod.index == lod_index:
+                    print("Edited LOD")
+                    obj = BME.find_object_by_name(mesh.name + f"_LOD{lod_index}")
+                    current_modded_lod.vertex_count = len(obj.data.vertices)
+                    current_modded_lod.index_count = len(obj.data.polygons) * 3
+                    print("New Vertex count: ", len(obj.data.vertices))
+                    print("New indices count: ", len(obj.data.polygons) * 3)
+                    # Vertices
+                    current_modded_lod.vertex_data_offset_a = mesh_file.tell()
+                    BME.write_vertices(mesh_file, mesh, lod_index)
+                    if lod.vertex_end_bytes is not None:
+                        mesh_file.write(lod.vertex_end_bytes)
+                    # Normals
+                    current_modded_lod.vertex_data_offset_b = mesh_file.tell()
+                    BME.write_normals(mesh_file, mesh, lod_index)
+                    if lod.normals_end_bytes is not None:
+                        mesh_file.write(lod.normals_end_bytes)
+                    # Indices
+                    current_modded_lod.face_block_offset = mesh_file.tell()
+                    BME.write_triangles(mesh_file, mesh, lod_index)
+                    if lod.faces_end_bytes is not None:
+                        mesh_file.write(lod.faces_end_bytes)
+                else:
+                    # Unedited lod - copy from source file
+                    source.seek(lod.data_offset)
+                    current_modded_lod.vertex_data_offset_a = new_vertex_data_offset_a
+                    offset_diff = new_vertex_data_offset_a - lod.vertex_data_offset_a
+                    current_modded_lod.vertex_data_offset_b = lod.vertex_data_offset_b + offset_diff
+                    current_modded_lod.face_block_offset = lod.face_block_offset + offset_diff
+                    mesh_file.write(source.read(lod.data_size))
+
+                current_modded_lod.data_size = mesh_file.tell() - new_vertex_data_offset_a
+                print("\n", lod.index, lod.data_offset, lod.data_size, lod.vertex_count)
+                print("Vertex_data_offset_a = ", new_vertex_data_offset_a, "   was  ", lod.vertex_data_offset_a,
+                      "  diff = ", offset_diff)
+                print("Mesh_File data start : ", new_vertex_data_offset_a, "Data Size : ", current_modded_lod.data_size)
+        modded_mesh.mesh_file = mesh_file
+        return modded_mesh
 
 asset : SkeletalMeshAsset = None
 BMI = BlenderMeshImporter
@@ -1352,11 +2112,51 @@ def _auto_load_mmb(self, context):
     except Exception as e:
         print(f"MMB auto-load failed: {e}")
 
+def _vert_count_changed():
+    """Return True if any imported LOD0 Blender object has a different vert count than the MMB."""
+    if asset is None:
+        return False
+    for m in asset.meshes:
+        if not m.lods:
+            continue
+        lod = m.lods[0]
+        obj_name = lod.blender_obj_name or f"{m.name}_LOD0"
+        obj = bpy.data.objects.get(obj_name)
+        if obj is not None and len(obj.data.vertices) != lod.vertex_count:
+            return True
+    return False
+
+def _on_compute_normals_on_export_update(self, context):
+    """Auto-enable export_normals when compute_normals_on_export is checked."""
+    if self.compute_normals_on_export:
+        self.export_normals = True
+
+def _on_export_normals_update(self, context):
+    """Prevent unchecking export_normals when vert count has changed."""
+    if not self.export_normals and _vert_count_changed():
+        self.export_normals = True
+
 class SWOMTSettings(bpy.types.PropertyGroup):
     AssetPath: bpy.props.StringProperty(name="Asset Path", update=_auto_load_mmb)
     mesh_expanded: bpy.props.BoolVectorProperty(size=32, default=tuple([False]*32))
     bone_slots_expanded: bpy.props.BoolVectorProperty(size=32, default=tuple([False]*32))
-    export_weights: bpy.props.BoolProperty(name="Export Weights", default=False, description="Write Blender weights into the exported file. (May cause issues with certain meshes)")
+    compute_normals_on_export: bpy.props.BoolProperty(
+        name="Compute Normals on Export",
+        default=False,
+        description="Recompute normals after on export.",
+        update=_on_compute_normals_on_export_update,
+    )
+    export_normals: bpy.props.BoolProperty(
+        name="Export Normals",
+        default=False,
+        description="Write normals into the exported file. When unchecked, the original normals from the .mmb are preserved. Automatically forced on when vert count has changed.",
+        update=_on_export_normals_update,
+    )
+    export_weights: bpy.props.BoolProperty(
+        name="Export Weights",
+        default=False,
+        description="Write bone weights into the exported file. When unchecked, the original weights from the .mmb are preserved. Automatically forced on when vert count has changed.",
+    )
 
 # OPERATORS #
 class BrowseMMBFile(bpy.types.Operator):
@@ -1444,46 +2244,32 @@ class ExportLOD(bpy.types.Operator):
                         with bpy.context.temp_override(window=window, area=area):
                             bpy.ops.object.mode_set(mode='OBJECT')
                         break
-        mod_file = BME.copy_mmb_file()
+
+        SWOMT = context.scene.SWOMT
+        src_path = SWOMT.AssetPath
+        mod_file = os.path.splitext(src_path)[0] + "_MOD.mmb"
+
+        # Triangulate the Blender mesh before export so all faces are tris
         mesh = asset.meshes[self.mesh_index]
-        BME.overwrite_vertex_positions(file=mod_file,
-                                       skeletal_mesh=asset,
-                                       mesh=mesh,
-                                       lod_index=self.lod_index,
-                                       operator=self,
-                                       export_weights=context.scene.SWOMT.export_weights)
+        lod_obj_name = mesh.lods[self.lod_index].blender_obj_name or f"{mesh.name}_LOD{self.lod_index}"
+        tri_obj = BME.find_object_by_name(lod_obj_name)
+        if tri_obj:
+            BME._triangulate_object(tri_obj, compute_normals=context.scene.SWOMT.compute_normals_on_export)
 
-        # Apply staged Hide Mesh — zero all LODs of this mesh in the _MOD file.
-        if mesh.zeroed_out_in_session:
-            with open(mod_file, 'rb+') as f:
-                for lod in mesh.lods:
-                    if mesh.position_type == 0:
-                        original_w = []
-                        f.seek(lod.data_offset)
-                        for v in range(lod.vertex_count):
-                            f.seek(6, 1)
-                            w = unpack('<h', f.read(2))[0]
-                            original_w.append(w)
-                            f.seek(mesh.vertex_stride - 8, 1)
-                    else:
-                        original_w = [1] * lod.vertex_count
-                    for v in range(lod.vertex_count):
-                        f.seek(lod.data_offset + v * mesh.vertex_stride)
-                        lod.write_vertex_position(f, pos=(0.0, 0.0, 0.0), scale=original_w[v] if mesh.position_type == 0 else None)
+        try:
+            BME._write_mod_file(
+                edited_lod_index_per_mesh={self.mesh_index: self.lod_index},
+                out_path=mod_file,
+            )
+        except Exception as e:
+            self.report({'ERROR'}, f"Export failed: {e}")
+            return {'CANCELLED'}
 
-        # Apply staged mesh name rename to the _MOD copy.
-        # Nulls go BEFORE the new name; length prefix stays unchanged.
-        if mesh.pending_rename_new:
-            padded = b'\x00' * (mesh.name_length - len(mesh.pending_rename_new)) + mesh.pending_rename_new.encode('utf-8')
-            try:
-                with open(mod_file, 'rb+') as f:
-                    f.seek(mesh.name_offset + 2)
-                    f.write(padded)
-            except Exception as e:
-                self.report({'ERROR'}, f"Failed to patch mesh name in mod file: {e}")
-                return {'FINISHED'}
+        # Apply header-level patches for every mesh
+        for mesh in asset.meshes:
+            BME._apply_header_patches(mod_file, mesh, asset, operator=self)
 
-        # Apply staged file rename — move _MOD.mmb → new_stem.mmb in the same folder.
+        # Apply staged file rename
         if asset.pending_file_rename_new:
             new_file = str(Path(mod_file).parent / (asset.pending_file_rename_new + '.mmb'))
             try:
@@ -1491,7 +2277,7 @@ class ExportLOD(bpy.types.Operator):
             except Exception as e:
                 self.report({'ERROR'}, f"Failed to rename mod file: {e}")
                 return {'FINISHED'}
-            self.report({'INFO'}, f"Exported → {os.path.basename(new_file)}")
+            self.report({'INFO'}, f"Exported -> {os.path.basename(new_file)}")
 
         return {'FINISHED'}
 
@@ -2062,7 +2848,7 @@ class SelectMGraphObject(bpy.types.Operator):
             self.report({'ERROR'}, f"Could not write file: {e}")
             return {'CANCELLED'}
 
-        self.report({'INFO'}, f"Patched {count} MeshName occurrence(s): '{old_name}' → '{new_name}' in {os.path.basename(self.filepath)} (backup: {os.path.basename(backup_path)})")
+        self.report({'INFO'}, f"Patched {count} MeshName occurrence(s): '{old_name}' -> '{new_name}' in {os.path.basename(self.filepath)} (backup: {os.path.basename(backup_path)})")
         return {'FINISHED'}
 
 
@@ -2172,7 +2958,7 @@ class SelectMGraphObjectFilePatch(bpy.types.Operator):
             self.report({'ERROR'}, f"Could not write file: {e}")
             return {'CANCELLED'}
 
-        self.report({'INFO'}, f"Updated {count} .mmb reference(s): '{old_stem}.mmb' → '{new_stem}.mmb' in {os.path.basename(self.filepath)} (backup: {os.path.basename(backup_path)})")
+        self.report({'INFO'}, f"Updated {count} .mmb reference(s): '{old_stem}.mmb' -> '{new_stem}.mmb' in {os.path.basename(self.filepath)} (backup: {os.path.basename(backup_path)})")
         return {'FINISHED'}
 
 
@@ -2222,41 +3008,37 @@ class ExportAllLOD0s(bpy.types.Operator):
                         with bpy.context.temp_override(window=window, area=area):
                             bpy.ops.object.mode_set(mode='OBJECT')
                         break
-        mod_file = BME.copy_mmb_file()
-        for mesh in asset.meshes:
-            if not mesh.lods:
+
+        SWOMT = context.scene.SWOMT
+        src_path = SWOMT.AssetPath
+        mod_file = os.path.splitext(src_path)[0] + "_MOD.mmb"
+
+        # Triangulate mesh before export
+        for m in asset.meshes:
+            if not m.lods:
                 continue
-            BME.overwrite_vertex_positions(file=mod_file,
-                                           skeletal_mesh=asset,
-                                           mesh=mesh,
-                                           lod_index=0,
-                                           operator=self,
-                                           export_weights=context.scene.SWOMT.export_weights)
-            if mesh.zeroed_out_in_session:
-                with open(mod_file, 'rb+') as f:
-                    for lod in mesh.lods:
-                        if mesh.position_type == 0:
-                            original_w = []
-                            f.seek(lod.data_offset)
-                            for v in range(lod.vertex_count):
-                                f.seek(6, 1)
-                                w = unpack('<h', f.read(2))[0]
-                                original_w.append(w)
-                                f.seek(mesh.vertex_stride - 8, 1)
-                        else:
-                            original_w = [1] * lod.vertex_count
-                        for v in range(lod.vertex_count):
-                            f.seek(lod.data_offset + v * mesh.vertex_stride)
-                            lod.write_vertex_position(f, pos=(0.0, 0.0, 0.0), scale=original_w[v] if mesh.position_type == 0 else None)
-            if mesh.pending_rename_new:
-                padded = b'\x00' * (mesh.name_length - len(mesh.pending_rename_new)) + mesh.pending_rename_new.encode('utf-8')
-                try:
-                    with open(mod_file, 'rb+') as f:
-                        f.seek(mesh.name_offset + 2)
-                        f.write(padded)
-                except Exception as e:
-                    self.report({'ERROR'}, f"Failed to patch mesh name: {e}")
-                    return {'FINISHED'}
+            lod_obj_name = m.lods[0].blender_obj_name or f"{m.name}_LOD0"
+            tri_obj = BME.find_object_by_name(lod_obj_name)
+            if tri_obj:
+                BME._triangulate_object(tri_obj, compute_normals=context.scene.SWOMT.compute_normals_on_export)
+
+        # Export LOD0 as the edited LOD for every mesh that has LODs
+        edited = {m.index: 0 for m in asset.meshes if m.lods}
+
+        try:
+            BME._write_mod_file(
+                edited_lod_index_per_mesh=edited,
+                out_path=mod_file,
+            )
+        except Exception as e:
+            self.report({'ERROR'}, f"Export failed: {e}")
+            return {'CANCELLED'}
+
+        # Apply header-level patches for every mesh
+        for mesh in asset.meshes:
+            BME._apply_header_patches(mod_file, mesh, asset, operator=self)
+
+        # Apply staged file rename
         if asset.pending_file_rename_new:
             new_file = str(Path(mod_file).parent / (asset.pending_file_rename_new + '.mmb'))
             try:
@@ -2264,7 +3046,8 @@ class ExportAllLOD0s(bpy.types.Operator):
             except Exception as e:
                 self.report({'ERROR'}, f"Failed to rename mod file: {e}")
                 return {'FINISHED'}
-            self.report({'INFO'}, f"Exported → {os.path.basename(new_file)}")
+            self.report({'INFO'}, f"Exported -> {os.path.basename(new_file)}")
+
         return {'FINISHED'}
 
 
@@ -2329,50 +3112,7 @@ class ComputeNormals(bpy.types.Operator):
 
     def execute(self, context):
         obj = context.active_object
-
-        import bmesh as _bmesh
-
-        obj_data = obj.data
-        merge_dist = 1e-4 # (0.0001) world-space units
-
-        bm_weld = _bmesh.new()
-        bm_weld.from_mesh(obj_data)
-        _bmesh.ops.remove_doubles(bm_weld, verts=bm_weld.verts, dist=merge_dist)
-        bm_weld.faces.ensure_lookup_table()
-        bm_weld.verts.ensure_lookup_table()
-
-        weld_normals = [Vector((0.0, 0.0, 0.0)) for _ in range(len(bm_weld.verts))]
-        for face in bm_weld.faces:
-            face.normal_update()
-            for loop in face.loops:
-                angle = loop.calc_angle()
-                weld_normals[loop.vert.index] += face.normal * angle
-
-        def _key(co):
-            return (round(co.x, 4), round(co.y, 4), round(co.z, 4))
-
-        pos_to_normal = {}
-        for wv in bm_weld.verts:
-            n = weld_normals[wv.index]
-            length = n.length
-            pos_to_normal[_key(wv.co)] = n / length if length > 1e-8 else Vector((0.0, 0.0, 1.0))
-
-        bm_weld.free()
-
-        bm_orig = _bmesh.new()
-        bm_orig.from_mesh(obj_data)
-        bm_orig.verts.ensure_lookup_table()
-
-        smooth_normals = []
-        for ov in bm_orig.verts:
-            k = _key(ov.co)
-            smooth_normals.append(pos_to_normal.get(k, Vector((0.0, 0.0, 1.0))))
-
-        bm_orig.free()
-
-        obj_data.normals_split_custom_set_from_vertices(smooth_normals)
-        obj_data.update()
-
+        BME._compute_normals_for_object(obj)
         self.report({'INFO'}, f"Computed normals for {obj.name}.")
         return {'FINISHED'}
 
@@ -2413,8 +3153,31 @@ class MeshPanel(bpy.types.Panel):
             row.operator("object.rename_mmb_file", text="Rename File")
             all_row = layout.row()
             all_row.operator("object.import_all_lod0s", text="Import All LOD0's")
-            all_row.operator("object.export_all_lod0s", text="Export All LOD0's")
-            layout.prop(SWOMT, "export_weights")
+            any_lod0_imported = any(
+                bpy.data.objects.get(
+                    m.lods[0].blender_obj_name if m.lods[0].blender_obj_name else f"{m.name}_LOD0"
+                ) is not None
+                for m in asset.meshes if m.lods
+            )
+            export_all_row = all_row.row()
+            export_all_row.enabled = any_lod0_imported
+            export_all_row.operator("object.export_all_lod0s", text="Export All LOD0's")
+            layout.prop(SWOMT, "compute_normals_on_export")
+            normals_row = layout.row()
+            forced = _vert_count_changed()
+            if forced:
+                normals_row.enabled = False
+                normals_row.prop(SWOMT, "export_normals")
+                normals_row.label(text="", icon='LOCKED')
+            else:
+                normals_row.prop(SWOMT, "export_normals")
+            weights_row = layout.row()
+            if forced:
+                weights_row.enabled = False
+                weights_row.prop(SWOMT, "export_weights")
+                weights_row.label(text="", icon='LOCKED')
+            else:
+                weights_row.prop(SWOMT, "export_weights")
             for mi, m in enumerate(asset.meshes):
                 expanded = SWOMT.mesh_expanded[mi] if mi < 32 else True
                 mesh_row = layout.row()
@@ -2439,6 +3202,11 @@ class MeshPanel(bpy.types.Panel):
                         lod_import_button = row.operator("object.import_lod")
                         lod_import_button.lod_index = li
                         lod_import_button.mesh_index = mi
+                        # TODO: Improve check for export button
+                        # obj_name = l.blender_obj_name if l.blender_obj_name else f"{m.name}_LOD{li}"
+                        # lod_export_row = row.row()
+                        # lod_export_row.enabled = bpy.data.objects.get(obj_name) is not None
+                        # lod_export_button = lod_export_row.operator("object.export_lod")
                         lod_export_button = row.operator("object.export_lod")
                         lod_export_button.lod_index = li
                         lod_export_button.mesh_index = mi
