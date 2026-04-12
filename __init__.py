@@ -459,44 +459,6 @@ class SkeletalMeshAsset(Asset):
 
                 f.seek(offset)
 
-            def write(self, f):
-                f.seek(self.start_offset)
-                f.write(bp.uint32(self.vertex_count))
-                f.write(bp.uint32(self.index_count))
-                f.write(bp.uint32(int(self.face_block_offset / 2)))
-                f.write(bp.uint32(self.vertex_data_offset_a))
-                f.write(bp.uint32(self.vertex_data_offset_b))
-                f.write(bp.uint32(self.face_block_offset))
-                f.write(bp.uint32(self.data_offset))
-                f.write(bp.uint32(self.data_size))
-
-            def gather_extra_bytes(self, f):
-                offset = f.tell()
-                f.seek(self.data_offset)
-                real_vertex_size = self.vertex_count * self.parent_mesh.vertex_stride
-                extra_bytes_size = self.vertex_data_offset_b - self.vertex_data_offset_a - real_vertex_size
-                f.seek(real_vertex_size, 1)
-                print(f.tell())
-                self.vertex_end_bytes = f.read(extra_bytes_size)
-                print("Vertex Extra Bytes:", self.vertex_end_bytes)
-
-                real_normals_size = self.vertex_count * self.parent_mesh.normals_stride
-                extra_bytes_size = self.face_block_offset - self.vertex_data_offset_b - real_normals_size
-                f.seek(real_normals_size, 1)
-                print(f.tell())
-                self.normals_end_bytes = f.read(extra_bytes_size)
-                print("Normal Extra Bytes:", self.normals_end_bytes)
-
-                real_face_size = self.index_count * 2
-                size_without_face = self.face_block_offset - self.vertex_data_offset_a
-                extra_bytes_size = self.data_size - size_without_face - real_face_size
-                f.seek(real_face_size, 1)
-                print(f.tell())
-                self.faces_end_bytes = f.read(extra_bytes_size)
-                print("Face Extra Bytes:", self.faces_end_bytes)
-
-                f.seek(offset)
-
             def get_vertex_positions(self, raw_mesh_file):
                 vertices = []
                 mesh = self.parent_mesh
@@ -526,10 +488,6 @@ class SkeletalMeshAsset(Asset):
                 stride = self.parent_mesh.vertex_stride
                 pos_length = 0 #size of vertex position in stride
                 f = raw_mesh_file
-                # Non-interleaved meshes (e.g. v19 HEAD): vc×stride > data_size means the main
-                # data block does not contain interleaved positions — bone weights unavailable.
-                if self.vertex_count * stride > self.data_size:
-                    return [{} for _ in range(self.vertex_count)]
                 f.seek(self.vertex_data_offset_a)
                 for v in range(self.vertex_count):
                     iw = {}
@@ -852,7 +810,6 @@ class SkeletalMeshAsset(Asset):
             self.position_type = 0 # 0:int16_norm 1:floats
             self.mesh_file = None  # BytesIO of reversed ordered LOD mesh data (used by create_mesh_file)
         def parse(self, f):
-            version = self.parent_sk_mesh.version
             self.name_offset = f.tell()
             _nlen = unpack('<H', f.read(2))[0]
             self.name_length = _nlen
@@ -918,7 +875,7 @@ class SkeletalMeshAsset(Asset):
             if version in (16, 17):
                 self.color_count = br.uint8(f)
                 f.seek(4 * self.color_count, 1)
-                f.seek(4, 1)               # unk after color (v16/v17/v19)
+                f.seek(4, 1)               # unk after color (v16/v17)
                 count_c = br.uint8(f)
                 f.seek(4 * count_c, 1)
             else:
@@ -961,6 +918,7 @@ class SkeletalMeshAsset(Asset):
                   f'\nColor Count: {self.color_count}')
 
             # --- Post-stride skip ---
+            # v17 has 4 extra bytes here compared to other versions
             if version == 17:
                 f.seek(20, 1)
             else:
@@ -1075,11 +1033,6 @@ class BlenderMeshImporter:
             bm_face.normal_flip() #this is required because the *-1 on x vertex co flips the mesh normals
         bm.to_mesh(obj_data)
         bm.free()
-
-        # Stamp original MMB vertex index so order survives Separate by Loose Parts
-        attr = obj_data.attributes.new(name='mmb_vertex_order', type='INT', domain='POINT')
-        for i in range(lod.vertex_count):
-            attr.data[i].value = i
 
         bm = bmesh.new()
         bm.from_mesh(obj_data)
@@ -1774,32 +1727,20 @@ class BlenderMeshExporter:
                             src.seek(abs_voa_w + vi * stride + pos_length + wc)
                             orig_slot_indices.append(list(src.read(wc)))
 
-            # Build blender→mmb index remapping from mmb_vertex_order attribute
-            mmb_attr = data.attributes.get('mmb_vertex_order')
-            if mmb_attr is not None and len(mmb_attr.data) == len(data.vertices):
-                blender_to_mmb = {bv_idx: mmb_attr.data[bv_idx].value for bv_idx in range(len(data.vertices))}
-                use_mmb_mapping = (len(blender_to_mmb) == lod.vertex_count and
-                                   all(0 <= idx < lod.vertex_count for idx in blender_to_mmb.values()))
-            else:
-                blender_to_mmb = {}
-                use_mmb_mapping = False
-
             for vi, v in enumerate(bm.verts):
-                mmb_idx = blender_to_mmb[vi] if use_mmb_mapping else vi
-                f.seek(mmb_idx * stride)
                 stride_start = f.tell()
 
                 # Write position
                 lod.write_vertex_position(
                     f,
                     pos=BME.convert_coordinate(v.co),
-                    scale=original_w[mmb_idx],
+                    scale=original_w[vi],
                 )
                 f.seek(stride_start + pos_length)
 
                 # Write bone weights - use original bytes if vert count is unchanged
                 if orig_weight_bytes is not None:
-                    f.write(orig_weight_bytes[mmb_idx])
+                    f.write(orig_weight_bytes[vi])
                     f.seek(stride_start + stride)
                     continue
 
@@ -1830,7 +1771,7 @@ class BlenderMeshExporter:
                         # Preserve original slot structure (indices) exactly.
                         # Only update the weight value for each slot based on the
                         # Blender vertex group weight for that slot's bone index.
-                        orig_sum, sec_i_bytes, sec_w_bytes, orig_pri_i = orig_stride32_data[mmb_idx]
+                        orig_sum, sec_i_bytes, sec_w_bytes, orig_pri_i = orig_stride32_data[vi]
                         remaining = {s: w for s, w in raw_weights}
                         for slot_bone in orig_pri_i:
                             w = remaining.pop(slot_bone, 0.0)
@@ -1898,7 +1839,7 @@ class BlenderMeshExporter:
                     if orig_slot_indices is not None:
                         # Preserve original slot structure
                         remaining = {s: w for s, w in raw_weights}
-                        slot_idxs = orig_slot_indices[mmb_idx]
+                        slot_idxs = orig_slot_indices[vi]
                         for slot_bone in slot_idxs:
                             w = remaining.pop(slot_bone, 0.0)
                             f.write(bp.uint8(max(0, min(int(round(w * 255)), 255))))
@@ -3058,7 +2999,6 @@ class ImportAllLOD0s(bpy.types.Operator):
     def execute(self, context):
         return _import_all_lods(context, 0)
 
-
 class ImportAllLOD1s(bpy.types.Operator):
     """Imports LOD1 for every mesh in the asset"""
     bl_idname = 'object.import_all_lod1s'
@@ -3070,7 +3010,6 @@ class ImportAllLOD1s(bpy.types.Operator):
 
     def execute(self, context):
         return _import_all_lods(context, 1)
-
 
 class ImportAllLOD2s(bpy.types.Operator):
     """Imports LOD2 for every mesh in the asset"""
@@ -3084,7 +3023,6 @@ class ImportAllLOD2s(bpy.types.Operator):
     def execute(self, context):
         return _import_all_lods(context, 2)
 
-
 class ImportAllLOD3s(bpy.types.Operator):
     """Imports LOD3 for every mesh in the asset"""
     bl_idname = 'object.import_all_lod3s'
@@ -3096,7 +3034,6 @@ class ImportAllLOD3s(bpy.types.Operator):
 
     def execute(self, context):
         return _import_all_lods(context, 3)
-
 
 class ExportAllLODs(bpy.types.Operator):
     """Exports every LOD that has a Blender object in the scene"""
@@ -3258,17 +3195,27 @@ class MeshPanel(bpy.types.Panel):
         if asset:
             row.label(text=asset.name)
             row.operator("object.rename_mmb_file", text="Rename File")
-            all_row = layout.row()
-            all_row.operator("object.import_all_lod0s", text="Import All LOD0's")
-            any_lod0_imported = any(
-                bpy.data.objects.get(
-                    m.lods[0].blender_obj_name if m.lods[0].blender_obj_name else f"{m.name}_LOD0"
+            layout.separator()
+            layout.label(text="Import", icon='IMPORT')
+            imp_row = layout.row(align=True)
+            for lod_n in range(4):
+                any_lod_exists = any(len(m.lods) > lod_n for m in asset.meshes if m.lods)
+                btn = imp_row.row(align=True)
+                btn.enabled = any_lod_exists
+                btn.operator(f"object.import_all_lod{lod_n}s", text=f"LOD{lod_n}")
+            any_imported = any(
+                len(m.lods) > lod_n and bpy.data.objects.get(
+                    m.lods[lod_n].blender_obj_name if m.lods[lod_n].blender_obj_name else f"{m.name}_LOD{lod_n}"
                 ) is not None
                 for m in asset.meshes if m.lods
+                for lod_n in range(len(m.lods))
             )
-            export_all_row = all_row.row()
-            export_all_row.enabled = any_lod0_imported
-            export_all_row.operator("object.export_all_lod0s", text="Export All LOD0's")
+            layout.separator()
+            layout.label(text="Export", icon='EXPORT')
+            exp_row = layout.row()
+            exp_row.scale_y = 1.5
+            exp_row.enabled = any_imported
+            exp_row.operator("object.export_all_lods", text="Export All LODs")
             layout.prop(SWOMT, "compute_normals_on_export")
             normals_row = layout.row()
             forced = _vert_count_changed()
