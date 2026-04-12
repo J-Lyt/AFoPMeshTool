@@ -13,7 +13,7 @@ bl_info = {
     "location": "Scene Properties > AFoP Mesh Tool Panel",
     "version": (0, 1, 30),
     "blender": (5, 0, 0),
-    "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 12, 13, 15, 16, 17.",
+    "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 12, 13, 15, 16, 17, 19.",
     "category": "Import-Export"
     }
 
@@ -459,21 +459,78 @@ class SkeletalMeshAsset(Asset):
 
                 f.seek(offset)
 
-            def get_vertex_positions(self,raw_mesh_file):
+            def write(self, f):
+                f.seek(self.start_offset)
+                f.write(bp.uint32(self.vertex_count))
+                f.write(bp.uint32(self.index_count))
+                f.write(bp.uint32(int(self.face_block_offset / 2)))
+                f.write(bp.uint32(self.vertex_data_offset_a))
+                f.write(bp.uint32(self.vertex_data_offset_b))
+                f.write(bp.uint32(self.face_block_offset))
+                f.write(bp.uint32(self.data_offset))
+                f.write(bp.uint32(self.data_size))
+
+            def gather_extra_bytes(self, f):
+                offset = f.tell()
+                f.seek(self.data_offset)
+                real_vertex_size = self.vertex_count * self.parent_mesh.vertex_stride
+                extra_bytes_size = self.vertex_data_offset_b - self.vertex_data_offset_a - real_vertex_size
+                f.seek(real_vertex_size, 1)
+                print(f.tell())
+                self.vertex_end_bytes = f.read(extra_bytes_size)
+                print("Vertex Extra Bytes:", self.vertex_end_bytes)
+
+                real_normals_size = self.vertex_count * self.parent_mesh.normals_stride
+                extra_bytes_size = self.face_block_offset - self.vertex_data_offset_b - real_normals_size
+                f.seek(real_normals_size, 1)
+                print(f.tell())
+                self.normals_end_bytes = f.read(extra_bytes_size)
+                print("Normal Extra Bytes:", self.normals_end_bytes)
+
+                real_face_size = self.index_count * 2
+                size_without_face = self.face_block_offset - self.vertex_data_offset_a
+                extra_bytes_size = self.data_size - size_without_face - real_face_size
+                f.seek(real_face_size, 1)
+                print(f.tell())
+                self.faces_end_bytes = f.read(extra_bytes_size)
+                print("Face Extra Bytes:", self.faces_end_bytes)
+
+                f.seek(offset)
+
+            def get_vertex_positions(self, raw_mesh_file, original_file=None):
                 vertices = []
-                stride = self.parent_mesh.vertex_stride
+                mesh = self.parent_mesh
+
+                # lod_info_type=0x0100: positions are float32 xyz in the extra vertex buffer
+                if mesh.lod_info_type == 0x0100:
+                    f = original_file
+                    file_size = f.seek(0, 2)
+                    stride = self.extra_vert_stride
+                    need = self.extra_vert_offset + self.vertex_count * stride
+                    if self.extra_vert_offset == 0 or need > file_size:
+                        print(f"[MMB] WARNING: extra vertex buffer for '{mesh.name}' LOD{self.index} "
+                              f"is outside the file (offset 0x{self.extra_vert_offset:X}, "
+                              f"file size 0x{file_size:X}). Positions will be zero.")
+                        return [(0.0, 0.0, 0.0)] * self.vertex_count
+                    for i in range(self.vertex_count):
+                        f.seek(self.extra_vert_offset + i * stride)
+                        x, y, z = unpack('<fff', f.read(12))
+                        vertices.append((x, y, z))
+                    return vertices
+
+                stride = mesh.vertex_stride
                 f = raw_mesh_file
                 f.seek(self.vertex_data_offset_a)
                 pos = (0.0,0.0,0.0)
                 for v in range(self.vertex_count):
                     stride_start = f.tell()
-                    if self.parent_mesh.position_type == 0:
+                    if mesh.position_type == 0:
                         x = br.int16_norm(f)
                         y = br.int16_norm(f)
                         z = br.int16_norm(f)
                         w = br.int16(f)
                         pos = (x*w,y*w,z*w)
-                    elif self.parent_mesh.position_type == 1:
+                    elif mesh.position_type == 1:
                         x = br.float(f)
                         y = br.float(f)
                         z = br.float(f)
@@ -487,6 +544,10 @@ class SkeletalMeshAsset(Asset):
                 stride = self.parent_mesh.vertex_stride
                 pos_length = 0 #size of vertex position in stride
                 f = raw_mesh_file
+                # Non-interleaved meshes (e.g. v19 HEAD): vc×stride > data_size means the main
+                # data block does not contain interleaved positions — bone weights unavailable.
+                if self.vertex_count * stride > self.data_size:
+                    return [{} for _ in range(self.vertex_count)]
                 f.seek(self.vertex_data_offset_a)
                 for v in range(self.vertex_count):
                     iw = {}
@@ -809,6 +870,7 @@ class SkeletalMeshAsset(Asset):
             self.position_type = 0 # 0:int16_norm 1:floats
             self.mesh_file = None  # BytesIO of reversed ordered LOD mesh data (used by create_mesh_file)
         def parse(self, f):
+            version = self.parent_sk_mesh.version
             self.name_offset = f.tell()
             _nlen = unpack('<H', f.read(2))[0]
             self.name_length = _nlen
@@ -838,7 +900,13 @@ class SkeletalMeshAsset(Asset):
             #   v13, u==0:      (no root_bone_index, no lod_info_type)
             #   v15/16/17, u>0: root_bone_index[2]  lod_info_type[1]
             #   v15/16/17, u==0: lod_info_type[1]
-            if u_count > 0 and version != 12:
+            if version == 19:
+                # v19: root_bone_index[2] always present regardless of u_count; lod_info_type is uint16
+                f.seek(2, 1)  # root_bone_index[2]
+                lod_info_type = br.uint16(f)
+                if lod_info_type == 0x0100:
+                    f.seek(3, 1)  # 3 extra bytes for lod_info_type=0x0100
+            elif u_count > 0 and version != 12:
                 if version == 13:
                     f.seek(1, 1)  # v13: 1-byte root_bone_index
                 else:             # v15, v16, v17
@@ -850,30 +918,43 @@ class SkeletalMeshAsset(Asset):
                 else:                  # v15, v16, v17 with u_count == 0
                     lod_info_type = br.uint8(f)
 
+            self.lod_info_type = lod_info_type  # store for LOD.parse() and get_vertex_positions
             self.lod_count = br.uint8(f)
             f.seek(4, 1)  # unknown 4 bytes before LOD list
 
             # --- LOD list ---
-            # Each LOD is 36 bytes. When lod_info_type == 2, an extra 28 bytes follow each LOD.
+            # Each LOD is 36 bytes.
+            # lod_info_type == 2:      28 extra bytes per LOD (v15/v16/v17)
+            # lod_info_type == 0x0100: 24 extra bytes per LOD (v19) — 6×uint32 buffer descriptors
             for l in range(self.lod_count):
                 lod = self.LOD(self,l)
                 lod.parse(f)
                 if lod_info_type == 2:
                     f.seek(28, 1)
+                elif lod_info_type == 0x0100:
+                    # 6 uint32s: e1_A, e2_A, sA, e1_B, e2_B, sB
+                    # Buffer B (float32 xyz): base = e2_B, stride = sB / vc
+                    f.seek(8, 1)  # skip e1_A, e2_A (Buffer A, not needed for positions)
+                    f.seek(4, 1)  # skip sA
+                    f.seek(4, 1)  # skip e1_B (cumulative offset, not needed)
+                    e2_B = br.uint32(f)
+                    sB   = br.uint32(f)
+                    lod.extra_vert_offset = e2_B
+                    lod.extra_vert_stride = sB // lod.vertex_count if lod.vertex_count > 0 else 48
                 self.lods.append(lod)
 
             # --- Tail section: UV hashes, color hashes, strides ---
             # UV hashes are 4 bytes each on all versions.
             #
             # v12/v13/v15 layout:  uv_count  uv_hashes  unk[4]  color_count  color_hashes
-            # v16/v17 layout:      uv_count  uv_hashes  color_count  color_hashes  unk[4]  count_c  c_data
+            # v16/v17/v19 layout:  uv_count  uv_hashes  color_count  color_hashes  unk[4]  count_c  c_data
             self.uv_count = br.uint8(f)
             f.seek(4 * self.uv_count, 1)
 
-            if version in (16, 17):
+            if version in (16, 17, 19):
                 self.color_count = br.uint8(f)
                 f.seek(4 * self.color_count, 1)
-                f.seek(4, 1)               # unk after color (v16/v17)
+                f.seek(4, 1)               # unk after color (v16/v17/v19)
                 count_c = br.uint8(f)
                 f.seek(4 * count_c, 1)
             else:
@@ -916,8 +997,17 @@ class SkeletalMeshAsset(Asset):
                   f'\nColor Count: {self.color_count}')
 
             # --- Post-stride skip ---
-            # v17 has 4 extra bytes here compared to other versions
-            if version == 17:
+            # v17: 20-byte skip.
+            # v19: 16-byte skip, then pca_count uint32, then pca_count entries of
+            #      name_len[2] + name[name_len] + 4 bytes.
+            # When pca_count == 0 (e.g. arms, dlc1), v19 skip totals 20 bytes like v17.
+            if version == 19:
+                f.seek(16, 1)
+                pca_count = br.uint32(f)
+                for _ in range(pca_count):
+                    pca_name_len = br.uint16(f)
+                    f.seek(pca_name_len + 4, 1)
+            elif version == 17:
                 f.seek(20, 1)
             else:
                 f.seek(16, 1)
@@ -951,8 +1041,8 @@ class SkeletalMeshAsset(Asset):
         self.pending_file_rename_new = ""
     def parse(self,f):
         super().parse(f)
-        if self.version not in (12, 13, 15, 16, 17):
-            raise Exception(f'Unsupported .mmb version: {self.version}. Supported versions: 12, 13, 15, 16, 17.')
+        if self.version not in (12, 13, 15, 16, 17, 19):
+            raise Exception(f'Unsupported .mmb version: {self.version}. Supported versions: 12, 13, 15, 16, 17, 19.')
         self.bone_count = br.uint32(f)
         for b in range(self.bone_count):
             self.bones.append(self.Bone(f))
@@ -1011,7 +1101,7 @@ class BlenderMeshImporter:
         lod = mesh.lods[lod_index]
         lod.blender_obj_name = obj.name  # record actual Blender name (may differ from obj_name if Blender de-duped it)
         # Import vertices
-        verts = lod.get_vertex_positions(raw_mesh_file)
+        verts = lod.get_vertex_positions(raw_mesh_file, file)
         for v in verts:
             bmv = bm.verts.new()
             v_co = (v[0]*-1,v[1],v[2])
@@ -2777,7 +2867,7 @@ class RevertMesh(bpy.types.Operator):
             obj_name = lod.blender_obj_name if lod.blender_obj_name else f"{mesh.name}_LOD{li}"
             obj = bpy.data.objects.get(obj_name)
             if obj is not None:
-                verts = lod.get_vertex_positions(raw_mesh_file)
+                verts = lod.get_vertex_positions(raw_mesh_file, original_file)
                 for i, vert in enumerate(obj.data.vertices):
                     vert.co = (-verts[i][0], verts[i][1], verts[i][2])
                 obj.data.update()
@@ -2962,6 +3052,29 @@ class SelectMGraphObjectFilePatch(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def _import_all_lods(context, lod_n):
+    """Shared import logic for ImportAllLODNs operators."""
+    sk_mesh = asset
+    SWOMT = context.scene.SWOMT
+    merged_mmb = get_merged_mmb(SWOMT["AssetPath"])
+    is_new_armature = bpy.data.objects.find(sk_mesh.name) == -1
+    armature = BMI.find_or_create_skeleton(sk_mesh)
+    last_obj = None
+    for mi, mesh in enumerate(sk_mesh.meshes):
+        if len(mesh.lods) <= lod_n:
+            continue
+        lod = mesh.lods[lod_n]
+        obj = BMI.import_mesh(merged_mmb,
+                              skeletal_mesh=sk_mesh,
+                              mesh=mesh,
+                              lod_index=lod.index)
+        BMI.parent_obj_to_armature(obj, armature)
+        last_obj = obj
+    if is_new_armature and last_obj is not None:
+        BMI.rotate_model(last_obj, armature)
+    return {'FINISHED'}
+
+
 class ImportAllLOD0s(bpy.types.Operator):
     """Imports LOD0 for every mesh in the asset"""
     bl_idname = 'object.import_all_lod0s'
@@ -2972,29 +3085,52 @@ class ImportAllLOD0s(bpy.types.Operator):
         return asset is not None
 
     def execute(self, context):
-        sk_mesh = asset
-        SWOMT = context.scene.SWOMT
-        merged_mmb = get_merged_mmb(SWOMT["AssetPath"])
-        is_new_armature = bpy.data.objects.find(sk_mesh.name) == -1
-        armature = BMI.find_or_create_skeleton(sk_mesh)
-        for mi, mesh in enumerate(sk_mesh.meshes):
-            if not mesh.lods:
-                continue
-            lod = mesh.lods[0]
-            obj = BMI.import_mesh(merged_mmb,
-                                  skeletal_mesh=sk_mesh,
-                                  mesh=mesh,
-                                  lod_index=lod.index)
-            BMI.parent_obj_to_armature(obj, armature)
-        if is_new_armature:
-            BMI.rotate_model(obj, armature)
-        return {'FINISHED'}
+        return _import_all_lods(context, 0)
 
 
-class ExportAllLOD0s(bpy.types.Operator):
-    """Exports LOD0 for every mesh in the asset"""
-    bl_idname = 'object.export_all_lod0s'
-    bl_label = "Export All LOD0's"
+class ImportAllLOD1s(bpy.types.Operator):
+    """Imports LOD1 for every mesh in the asset"""
+    bl_idname = 'object.import_all_lod1s'
+    bl_label = "Import All LOD1's"
+
+    @classmethod
+    def poll(cls, context):
+        return asset is not None
+
+    def execute(self, context):
+        return _import_all_lods(context, 1)
+
+
+class ImportAllLOD2s(bpy.types.Operator):
+    """Imports LOD2 for every mesh in the asset"""
+    bl_idname = 'object.import_all_lod2s'
+    bl_label = "Import All LOD2's"
+
+    @classmethod
+    def poll(cls, context):
+        return asset is not None
+
+    def execute(self, context):
+        return _import_all_lods(context, 2)
+
+
+class ImportAllLOD3s(bpy.types.Operator):
+    """Imports LOD3 for every mesh in the asset"""
+    bl_idname = 'object.import_all_lod3s'
+    bl_label = "Import All LOD3's"
+
+    @classmethod
+    def poll(cls, context):
+        return asset is not None
+
+    def execute(self, context):
+        return _import_all_lods(context, 3)
+
+
+class ExportAllLODs(bpy.types.Operator):
+    """Exports every LOD that has a Blender object in the scene"""
+    bl_idname = 'object.export_all_lods'
+    bl_label = "Export All LODs"
 
     @classmethod
     def poll(cls, context):
@@ -3292,7 +3428,10 @@ classes=[SWOMTSettings,
          ComputeNormals,
          ClearNormals,
          ImportAllLOD0s,
-         ExportAllLOD0s,
+         ImportAllLOD1s,
+         ImportAllLOD2s,
+         ImportAllLOD3s,
+         ExportAllLODs,
          ZeroOutMesh,
          RevertMesh,
          RemapMeshBone,
