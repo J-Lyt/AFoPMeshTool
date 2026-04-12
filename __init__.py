@@ -33,8 +33,8 @@ import copy
 import operator
 
 # Auto-update
-_RAW_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/master/__init__.py"
-_BONE_JSON_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/master/bone_matrices.json"
+_RAW_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/fullExport/__init__.py"
+_BONE_JSON_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/fullExport/bone_matrices.json"
 _BONE_JSON_FILENAME = "bone_matrices.json"
 _update_status = None   # None = not checked, "up_to_date", or "vX.X.X available"
 _update_error  = None   # set if network fetch failed
