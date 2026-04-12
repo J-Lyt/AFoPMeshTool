@@ -11,9 +11,9 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 34),
+    "version": (0, 1, 35),
     "blender": (5, 0, 0),
-    "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 12, 13, 15, 16, 17, 19.",
+    "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 12, 13, 15, 16, 17.",
     "category": "Import-Export"
     }
 
@@ -500,19 +500,18 @@ class SkeletalMeshAsset(Asset):
                             if weights[i] > 0.0:
                                 iw[indices[i]] = weights[i]
                     elif stride == 32:
-                        # Layout: 8 pos | 4×uint16 primary_weights | 4×uint16 secondary_indices |
-                        #          4×uint8 primary_indices | 4×uint8 secondary_weights
+                        # Layout: 8×uint16 weights | 8×uint8 indices
+                        # Two sub-variants detected by whether all 8 uint16 values sum to 32767:
+                        #   sum == 32767: all 8 slots are real bone weights (e.g. body mesh)
+                        #   sum != 32767: only slots 0-3 are real weights; slots 4-7 are
+                        #                secondary index data, not bone weights (e.g. banshee)
                         f.seek(8, 1)
-                        primary_weights  = [br.uint16(f) / 32767.0 for _ in range(4)]
-                        secondary_indices = [br.uint16(f) for _ in range(4)]
-                        primary_indices  = [br.uint8(f) for _ in range(4)]
-                        secondary_weights = [br.uint8(f) / 255.0 for _ in range(4)]
-                        for i in range(4):
-                            if primary_weights[i] > 0.0:
-                                iw[primary_indices[i]] = iw.get(primary_indices[i], 0.0) + primary_weights[i]
-                        # Secondary weights are preserved verbatim from the source file on
-                        # export and must NOT be merged into Blender vertex groups - doing so
-                        # would cause them to be double-counted back into the primary slots.
+                        weights = [br.uint16(f) / 32767.0 for _ in range(8)]
+                        indices = [br.uint8(f) for _ in range(8)]
+                        weight_slots = range(8) if sum(int(w * 32767) for w in weights) == 32767 else range(4)
+                        for i in weight_slots:
+                            if weights[i] > 0.0:
+                                iw[indices[i]] = iw.get(indices[i], 0.0) + weights[i]
                     elif stride == 36:
                         f.seek(12, 1)
                         weights = [br.uint16(f) / 32767.0 for _ in range(8)]
@@ -597,6 +596,7 @@ class SkeletalMeshAsset(Asset):
             def get_normals(self,raw_mesh_file):
                 normals = []
                 stride = self.parent_mesh.normals_stride
+                color_count = self.parent_mesh.color_count
                 f = raw_mesh_file
                 f.seek(self.vertex_data_offset_b)
                 v = Vector((0.0,0.0,1.0))
@@ -606,6 +606,8 @@ class SkeletalMeshAsset(Asset):
                 for i in range(self.vertex_count):
                     stride_start = f.tell()
                     if self.parent_mesh.normal_type == 0:
+                        # Layout: color(4*color_count) | tangent(4) | normal(4) | UV(4*uv_count)
+                        f.seek(4 * color_count, 1)  # skip color
                         raw_x = br.int8_norm(f)
                         if raw_x < _raw_x_min:
                             _raw_x_min = raw_x
@@ -647,9 +649,9 @@ class SkeletalMeshAsset(Asset):
                 f.seek(self.vertex_data_offset_b)
                 for i in range(self.vertex_count):
                     stride_start = f.tell()
-                    f.seek(self.get_normals_size(), 1) #skip normals
-                    f.seek(4 * color_count, 1) #skip color
-                    f.seek(index * 4, 1)  # skip previous uv
+                    # Layout: color(4*color_count) | normal(4) | tangent(4) | UV(4*uv_count)
+                    f.seek(4 * color_count + 4 + 4, 1)  # skip color + normal + tangent
+                    f.seek(index * 4, 1)  # skip previous uv sets
                     u = br.int16_norm(f)
                     v = br.int16_norm(f)
                     f.seek(stride_start + stride)
@@ -668,8 +670,9 @@ class SkeletalMeshAsset(Asset):
                 f.seek(self.vertex_data_offset_b)
                 for i in range(self.vertex_count):
                     stride_start = f.tell()
-                    f.seek(self.get_normals_size(), 1) #skip normals
-                    f.seek(index * 4, 1) #skip previous color
+                    # Layout: color(4*color_count) | tangent(4) | normal(4) | UV(4*uv_count)
+                    # Color is first - seek past previous color sets only
+                    f.seek(index * 4, 1)
                     r = br.uint8_norm(f)
                     g = br.uint8_norm(f)
                     b = br.uint8_norm(f)
@@ -699,6 +702,7 @@ class SkeletalMeshAsset(Asset):
                     if scale is None or scale == 0:
                         f.seek(stride_start + stride)
                         return
+                    # Auto-expand scale if vertex exceeds original bounds (e.g. after scaling up)
                     max_abs = max(abs(x), abs(y), abs(z))
                     if max_abs >= abs(scale):
                         scale = min(32767, int(max_abs) + 1)
@@ -1034,6 +1038,14 @@ class BlenderMeshImporter:
         bm.to_mesh(obj_data)
         bm.free()
 
+        # Store original MMB vertex index as a named int attribute.
+        # This survives separate/join operations and vertex reordering, allowing
+        # write_normals to look up the correct original tangent/nw for each vertex
+        # without relying on raw-position matching.
+        orig_idx_attr = obj_data.attributes.new(name="mmb_vertex_order", type='INT', domain='POINT')
+        for vi in range(len(obj_data.vertices)):
+            orig_idx_attr.data[vi].value = vi
+
         bm = bmesh.new()
         bm.from_mesh(obj_data)
         bm.faces.ensure_lookup_table()
@@ -1047,15 +1059,20 @@ class BlenderMeshImporter:
                     v_uv = (uvs[v_index][0],uvs[v_index][1]*-1+1)
                     loop[uv_layer].uv = v_uv
 
-        # Import Colors
-        for color_index in range(mesh.color_count):
-            colors = lod.get_color(raw_mesh_file, color_index)
-            color_layer = bm.verts.layers.float_color.new(f"Color_{color_index}")
-            for v in bm.verts:
-                v[color_layer] = colors[v.index]
         bm.to_mesh(obj_data)
         bm.free()
         obj_data.update()
+
+        # Import Colors
+        # Written directly to obj_data.attributes (POINT domain, FLOAT_COLOR type) rather
+        # than via a BMesh float_color layer, because the BMesh vertex-layer -> to_mesh
+        # round-trip corrupts float_color values, causing them to appear white in the viewport.
+        for color_index in range(mesh.color_count):
+            colors = lod.get_color(raw_mesh_file, color_index)
+            attr_name = f"Color_{color_index}"
+            attr = obj_data.attributes.new(name=attr_name, type='FLOAT_COLOR', domain='POINT')
+            for vi, (r, g, b, a) in enumerate(colors):
+                attr.data[vi].color = (r, g, b, a)
 
         # Import Normals
         # Some VAT meshes store animation-texture lookup data in the normals stream
@@ -1117,53 +1134,7 @@ class BlenderMeshImporter:
                 print(f"[AFoPMT] {obj.name}: Degenerate Normals Detected ({', '.join(reasons)}) - Computing Normals")
 
         if degenerate:
-            # Compute Normals against a temp copy of the imported mesh (which will be merged by distance)
-            # and transfer normals back to the original mesh
-            import bmesh as _bmesh
-
-            merge_dist = 1e-4 # (0.0001) world-space units
-
-            # Create merged mesh for computing normals
-            bm_weld = _bmesh.new()
-            bm_weld.from_mesh(obj_data)
-            _bmesh.ops.remove_doubles(bm_weld, verts=bm_weld.verts, dist=merge_dist)
-            bm_weld.faces.ensure_lookup_table()
-            bm_weld.verts.ensure_lookup_table()
-
-            # Compute angle-weighted normals on the merged mesh
-            weld_normals = [Vector((0.0, 0.0, 0.0)) for _ in range(len(bm_weld.verts))]
-            for face in bm_weld.faces:
-                face.normal_update()
-                for loop in face.loops:
-                    angle = loop.calc_angle()
-                    weld_normals[loop.vert.index] += face.normal * angle
-
-            # Create spatial map (by world pos) to reconnect normals from merged mesh to original
-            def _key(co):
-                return (round(co.x, 4), round(co.y, 4), round(co.z, 4))
-
-            pos_to_normal = {}
-            for wv in bm_weld.verts:
-                n = weld_normals[wv.index]
-                length = n.length
-                n = n / length if length > 1e-8 else Vector((0.0, 0.0, 1.0))
-                pos_to_normal[_key(wv.co)] = n
-
-            bm_weld.free()
-
-            # Get original mesh verts and check against spatial map
-            bm_orig = _bmesh.new()
-            bm_orig.from_mesh(obj_data)
-            bm_orig.verts.ensure_lookup_table()
-
-            smooth_normals = []
-            for ov in bm_orig.verts:
-                k = _key(ov.co)
-                smooth_normals.append(pos_to_normal.get(k, Vector((0.0, 0.0, 1.0))))
-
-            bm_orig.free()
-
-            obj_data.normals_split_custom_set_from_vertices(smooth_normals)
+            BME._compute_normals_for_object(obj)
 
         # Import Bone Weights
         weights = lod.get_bone_weights(raw_mesh_file)
@@ -1174,14 +1145,14 @@ class BlenderMeshImporter:
                 bone_name = skeletal_mesh.bones[real_bone_index].name
                 if obj.vertex_groups.get(bone_name) is None:
                     obj.vertex_groups.new(name=bone_name)
-                    
+
         for v_index in range(lod.vertex_count):
             v_bone_weights = weights[v_index]
             for bone_index in v_bone_weights.keys():
                 if bone_index < len(mesh_bones):
                     real_bone_index = mesh_bones[bone_index] # Convert mesh bone index to skeleton bone index
                     bone_name = skeletal_mesh.bones[real_bone_index].name
-                    obj.vertex_groups[bone_name].add([v_index],v_bone_weights[bone_index], "ADD")
+                    obj.vertex_groups[bone_name].add([v_index], v_bone_weights[bone_index], "ADD")
         return obj
 
     @staticmethod
@@ -1280,17 +1251,23 @@ class BlenderMeshExporter:
     @staticmethod
     def _triangulate_object(obj, compute_normals=False):
         """
-        Triangulate all faces of obj in-place using bmesh.
-        Quads and n-gons are converted to tris before export so the face index buffer only contains
-        triangles as the format requires.
+        Triangulate all faces of obj in-place using the Triangulate modifier with
+        Keep Normals enabled, then optionally recompute smooth normals.
         """
-        me = obj.data
-        bm = bmesh.new()
-        bm.from_mesh(me)
-        bmesh.ops.triangulate(bm, faces=bm.faces, quad_method='BEAUTY', ngon_method='BEAUTY')
-        bm.to_mesh(me)
-        bm.free()
-        me.update()
+        import bpy as _bpy
+
+        mod = obj.modifiers.new(name="_tri_export", type='TRIANGULATE')
+        mod.keep_custom_normals = True
+        mod.quad_method = 'BEAUTY'
+        mod.ngon_method = 'BEAUTY'
+
+        dg = _bpy.context.evaluated_depsgraph_get()
+        eval_obj = obj.evaluated_get(dg)
+        me = _bpy.data.meshes.new_from_object(eval_obj)
+
+        obj.data = me
+        obj.modifiers.remove(mod)
+        obj.data.update()
 
         if compute_normals:
             BME._compute_normals_for_object(obj)
@@ -1366,11 +1343,16 @@ class BlenderMeshExporter:
                     mesh.lods[li].data_size
                     for li in range(lod_index + 1, len(mesh.lods))
                 )
-                orig_intra_vob = lod.vertex_data_offset_b - orig_higher_size
-                orig_intra_fb  = lod.face_block_offset    - orig_higher_size
+                with open(SWOMT.AssetPath, 'rb') as orig_src:
+                    orig_file_data = orig_src.read()
+                orig_data_offset = unpack('<I', orig_file_data[lod.data_offset_file_pos:lod.data_offset_file_pos + 4])[0]
+                file_vob_orig = unpack('<I', orig_file_data[lod.start_offset + 16:lod.start_offset + 20])[0]
+                file_fb_orig  = unpack('<I', orig_file_data[lod.start_offset + 20:lod.start_offset + 24])[0]
+                orig_intra_vob = file_vob_orig - orig_higher_size
+                orig_intra_fb  = file_fb_orig  - orig_higher_size
                 orig_normals_size = orig_intra_fb - orig_intra_vob
-                orig_abs_vob = lod.data_offset + orig_intra_vob
-                norms_buf.write(file_data[orig_abs_vob:orig_abs_vob + orig_normals_size])
+                orig_abs_vob = orig_data_offset + orig_intra_vob
+                norms_buf.write(orig_file_data[orig_abs_vob:orig_abs_vob + orig_normals_size])
 
             faces_buf = io.BytesIO()
             BME.write_triangles(faces_buf, mesh, lod_index)
@@ -1595,11 +1577,6 @@ class BlenderMeshExporter:
                 if operator:
                     operator.report({'ERROR'}, f"Failed to patch mesh name in mod file: {e}")
 
-
-
-
-
-
     @staticmethod
     def get_vertex_blend_indices(vertex):
         """
@@ -1705,27 +1682,23 @@ class BlenderMeshExporter:
                     for vi in range(lod.vertex_count):
                         src.seek(abs_voa_w + vi * stride + pos_length)
                         orig_weight_bytes.append(src.read(weight_bytes_per_vert))
-            elif export_weights and len(data.vertices) == lod.vertex_count:
-                if stride == 32:
-                    orig_stride32_data = []
-                    with open(src_path, 'rb') as src:
-                        for vi in range(lod.vertex_count):
-                            src.seek(abs_voa_w + vi * stride + pos_length)
-                            pri_w = unpack('<4H', src.read(8))
-                            sec_i = src.read(8)   # 4×uint16 raw bytes
-                            pri_i = list(src.read(4))  # 4×uint8 primary indices
-                            sec_w = src.read(4)   # 4×uint8 raw bytes
-                            orig_sum = sum(pri_w)
-                            orig_stride32_data.append((orig_sum, sec_i, sec_w, pri_i))
-                elif stride not in (20, 36, 40, 44):
-                    # else branch: wc = (stride - pos_length) / 2
-                    # weights are uint8, indices are uint8
-                    wc = int(weight_bytes_per_vert / 2)
-                    orig_slot_indices = []
-                    with open(src_path, 'rb') as src:
-                        for vi in range(lod.vertex_count):
-                            src.seek(abs_voa_w + vi * stride + pos_length + wc)
-                            orig_slot_indices.append(list(src.read(wc)))
+            elif export_weights and stride == 32:
+                orig_stride32_data = []
+                with open(src_path, 'rb') as src:
+                    for vi in range(lod.vertex_count):
+                        src.seek(abs_voa_w + vi * stride + pos_length)
+                        all_w = unpack('<8H', src.read(16))  # 8 uint16 weights
+                        all_i = list(src.read(8))            # 8 uint8 indices
+                        orig_stride32_data.append((all_w, all_i))
+            elif export_weights and stride not in (20, 36, 40, 44):
+                # else branch strides (12, 16 etc): wc = (stride - pos_length) / 2
+                # weights are uint8, indices are uint8
+                wc = int(weight_bytes_per_vert / 2)
+                orig_slot_indices = []
+                with open(src_path, 'rb') as src:
+                    for vi in range(lod.vertex_count):
+                        src.seek(abs_voa_w + vi * stride + pos_length + wc)
+                        orig_slot_indices.append(list(src.read(wc)))
 
             for vi, v in enumerate(bm.verts):
                 stride_start = f.tell()
@@ -1767,32 +1740,33 @@ class BlenderMeshExporter:
                         f.write(bp.uint8(0))
 
                 elif stride == 32:
-                    if orig_stride32_data is not None:
-                        # Preserve original slot structure (indices) exactly.
-                        # Only update the weight value for each slot based on the
-                        # Blender vertex group weight for that slot's bone index.
-                        orig_sum, sec_i_bytes, sec_w_bytes, orig_pri_i = orig_stride32_data[vi]
+                    vert_count_matches = len(data.vertices) == lod.vertex_count
+                    if orig_stride32_data is not None and vert_count_matches:
+                        # Vert count unchanged: preserve exact slot order from source.
+                        orig_all_w, orig_all_i = orig_stride32_data[vi]
+                        weight_slots = range(8) if sum(orig_all_w) == 32767 else range(4)
                         remaining = {s: w for s, w in raw_weights}
-                        for slot_bone in orig_pri_i:
-                            w = remaining.pop(slot_bone, 0.0)
+                        # Write weights for active slots from Blender groups
+                        for slot in weight_slots:
+                            bone = orig_all_i[slot]
+                            w = remaining.pop(bone, 0.0)
                             f.write(bp.uint16(max(0, min(int(round(w * 32767)), 32767))))
-                        f.write(sec_i_bytes)
-                        for slot_bone in orig_pri_i:
-                            f.write(bp.uint8(slot_bone))
-                        f.write(sec_w_bytes)
+                        # Remaining uint16 slots written verbatim (secondary index data or zeros)
+                        for slot in range(len(weight_slots), 8):
+                            f.write(bp.uint16(orig_all_w[slot]))
+                        # All 8 uint8 indices verbatim
+                        for bone in orig_all_i:
+                            f.write(bp.uint8(bone))
                     else:
-                        primary = raw_weights[:4]
-                        for _, w in primary:
+                        # Vert count changed or no source data: write up to 8 slots by weight desc.
+                        sw = raw_weights[:8]
+                        for _, w in sw:
                             f.write(bp.uint16(max(0, min(int(round(w * 32767)), 32767))))
-                        for _ in range(4 - len(primary)):
+                        for _ in range(8 - len(sw)):
                             f.write(bp.uint16(0))
-                        for _ in range(4): # secondary indices - zeroed
-                            f.write(bp.uint16(0))
-                        for s, _ in primary:
+                        for s, _ in sw:
                             f.write(bp.uint8(s))
-                        for _ in range(4 - len(primary)):
-                            f.write(bp.uint8(0))
-                        for _ in range(4): # secondary weights - zeroed
+                        for _ in range(8 - len(sw)):
                             f.write(bp.uint8(0))
 
                 elif stride == 36:
@@ -1839,7 +1813,7 @@ class BlenderMeshExporter:
                     if orig_slot_indices is not None:
                         # Preserve original slot structure
                         remaining = {s: w for s, w in raw_weights}
-                        slot_idxs = orig_slot_indices[vi]
+                        slot_idxs = orig_slot_indices[min(vi, len(orig_slot_indices) - 1)]
                         for slot_bone in slot_idxs:
                             w = remaining.pop(slot_bone, 0.0)
                             f.write(bp.uint8(max(0, min(int(round(w * 255)), 255))))
@@ -1871,11 +1845,22 @@ class BlenderMeshExporter:
         lod: SkeletalMeshAsset.Mesh.LOD = mesh.lods[lod_index]
         if obj:
             data = obj.data
+
+            # Save custom split normals before calc_tangents() - it resets loop normals
+            # to geometry-derived values, discarding any custom normals on the mesh.
+            saved_loop_normals = None
+            if data.has_custom_normals:
+                saved_loop_normals = [l.normal.copy() for l in data.loops]
+
             bm = bmesh.new()
             bm.from_mesh(data)
             bm.verts.ensure_lookup_table()
             bm.faces.ensure_lookup_table()
             data.loops.data.calc_tangents()
+
+            # Restore custom normals after calc_tangents() reset them
+            if saved_loop_normals is not None:
+                data.normals_split_custom_set(saved_loop_normals)
 
             # Gather per-vertex normal, tangent, bitangent-sign, and UV data from loops
             NTB = [(Vector((1.0, 0.0, 0.0)), Vector((0.0, 1.0, 0.0)), 1.0)] * len(data.vertices)
@@ -1900,58 +1885,109 @@ class BlenderMeshExporter:
             color_layer = bm.verts.layers.float_color.get("Color_0")
 
             if mesh.normal_type == 0:
-                # Read original tangent bytes and nw from source file if vertex count is unchanged.
-                # Blender recomputes tangent space on import and the result differs from the
-                # original, so preserving original tangents gives better fidelity.
-                # nw also varies per vertex (not always -1) and must be preserved.
+                # int8_norm format:
+                #   4 bytes: normal as (x, y, z) int8_norm + w int8 sign (always -1)
+                #   4 bytes: tangent packed as X10Y10Z10W2
+                #   color_count * 4 bytes: vertex colors as uint8_norm RGBA
+                #   uv_count * 4 bytes: UVs as pairs of int16_norm
+
+                # Read original nw and tangent bytes from source for all vertices.
                 SWOMT = bpy.context.scene.SWOMT
-                src_path_n = SWOMT.AssetPath
-                mod_candidate_n = os.path.splitext(src_path_n)[0] + "_MOD.mmb"
-                if os.path.isfile(mod_candidate_n):
-                    src_path_n = mod_candidate_n
-                orig_tangents = None
-                orig_nw = None
-                if len(data.vertices) == lod.vertex_count:
-                    higher_size = sum(
-                        mesh.lods[li].data_size
-                        for li in range(lod_index + 1, len(mesh.lods))
-                    )
-                    intra_vob = lod.vertex_data_offset_b - higher_size
-                    abs_vob = lod.data_offset + intra_vob
-                    orig_tangents = []
-                    orig_nw = []
-                    with open(src_path_n, 'rb') as src:
-                        for _ in range(lod.vertex_count):
-                            src.seek(abs_vob + _ * mesh.normals_stride)
-                            src.seek(3, 1)              # skip nx, ny, nz
-                            orig_nw.append(unpack('<b', src.read(1))[0])
-                            orig_tangents.append(src.read(4))  # tangent bytes
+                # Always read nw and tangent bytes from the original asset file.
+                higher_size = sum(
+                    mesh.lods[li].data_size
+                    for li in range(lod_index + 1, len(mesh.lods))
+                )
+                vert_count_unchanged = len(data.vertices) == lod.vertex_count
+                with open(SWOMT.AssetPath, 'rb') as orig_src:
+                    orig_file_bytes = orig_src.read()
+                orig_do  = unpack('<I', orig_file_bytes[lod.data_offset_file_pos:lod.data_offset_file_pos+4])[0]
+                orig_vob = unpack('<I', orig_file_bytes[lod.start_offset+16:lod.start_offset+20])[0]
+                orig_voa = unpack('<I', orig_file_bytes[lod.start_offset+12:lod.start_offset+16])[0]
+                abs_vob_src = orig_do + (orig_vob - higher_size)
+                abs_voa_src = orig_do + (orig_voa - higher_size)
+                orig_vc_src = unpack('<I', orig_file_bytes[lod.start_offset:lod.start_offset+4])[0]
+                ns = mesh.normals_stride
+                vs = mesh.vertex_stride
+
+                # Read all original nw, tangent, and color bytes.
+                orig_nw       = []
+                orig_tangents = []
+                orig_colors   = []  # list of raw 4*color_count byte chunks per vertex
+                normals_base  = 8 if mesh.normal_type == 0 else 28
+                cc = mesh.color_count if mesh.normal_type == 0 else 0
+                for ni in range(orig_vc_src):
+                    off = abs_vob_src + ni * ns
+                    # Layout (normal_type=0): color(4*cc) | normal(4) | tangent(4) | UV
+                    normal_off  = off + 4 * cc
+                    tangent_off = normal_off + 4
+                    orig_nw.append(unpack('<b', orig_file_bytes[normal_off+3:normal_off+4])[0])
+                    orig_tangents.append(orig_file_bytes[tangent_off:tangent_off+4])
+                    if mesh.color_count > 0:
+                        orig_colors.append(orig_file_bytes[off:off + 4 * mesh.color_count])
+
+                # Build per-vertex source index using mmb_vertex_order attribute if present
+                orig_idx_attr = data.attributes.get("mmb_vertex_order")
+                if orig_idx_attr is not None:
+                    orig_idx_for_vi = {vi: orig_idx_attr.data[vi].value
+                                       for vi in range(len(data.vertices))}
+                else:
+                    orig_idx_for_vi = None
+
+                # Build position -> source index map as fallback for meshes
+                orig_pos_to_ni = {}
+                if orig_idx_for_vi is None:
+                    for ni in range(orig_vc_src):
+                        pos_key = orig_file_bytes[abs_voa_src + ni*vs : abs_voa_src + ni*vs + 6]
+                        if pos_key not in orig_pos_to_ni:
+                            orig_pos_to_ni[pos_key] = ni
 
                 for vi, v in enumerate(data.vertices):
                     normal  = NTB[v.index][0]
                     tangent = NTB[v.index][1]
                     flip    = NTB[v.index][2]
 
-                    # Write normal as int8
-                    # nw varies per vertex - preserve from source when available
+                    # Determine source vertex index for nw/tangent lookup
+                    if orig_idx_for_vi is not None:
+                        # Use stored original index directly (survives separate/join)
+                        orig_vi = orig_idx_for_vi.get(vi, vi)
+                        src_vi = min(orig_vi, orig_vc_src - 1)
+                    else:
+                        # Fallback
+                        src_vi = min(vi, orig_vc_src - 1)
+
+                    read_orig_nw = vert_count_unchanged
+
+                    # Layout: color(4*color_count) | normal(4) | tangent(4) | UV(4*uv_count)
+
+                    # Write vertex color: preserve original bytes unless Export Vertex Colors is on.
+                    if mesh.color_count > 0:
+                        if SWOMT.export_vertex_colors and color_layer is not None:
+                            # Export from Blender color layer
+                            vertex_color = bm.verts[v.index][color_layer]
+                            for c in vertex_color:
+                                f.write(bp.uint8_norm(c))
+                        elif orig_colors and src_vi < len(orig_colors):
+                            # Preserve original bytes verbatim
+                            f.write(orig_colors[src_vi])
+                        else:
+                            # No source - write zeros
+                            f.write(b'\x00' * (4 * mesh.color_count))
+
+                    # Write normal as int8 (scale to [-127,127], flip x)
                     def clamp_i8(val):
                         return max(-127, min(127, int(round(val * 127))))
                     f.write(bp.int8(clamp_i8(normal[0] * -1)))
                     f.write(bp.int8(clamp_i8(normal[1])))
                     f.write(bp.int8(clamp_i8(normal[2])))
-                    f.write(bp.int8(orig_nw[vi] if orig_nw is not None else -1))
+                    nw_val = orig_nw[src_vi] if read_orig_nw else -1
+                    f.write(bp.int8(nw_val))
 
-                    # Write tangent: use original bytes if available, else recompute
-                    if orig_tangents is not None:
-                        f.write(orig_tangents[vi])
+                    # Write tangent
+                    if orig_tangents:
+                        f.write(orig_tangents[src_vi])
                     else:
                         f.write(bp.X10Y10Z10W2(tangent[0] * -1, tangent[1], tangent[2], max(0, int(flip))))
-
-                    # Write vertex color (before UVs, matching reader order)
-                    if color_layer is not None:
-                        vertex_color = bm.verts[v.index][color_layer]
-                        for c in vertex_color:
-                            f.write(bp.uint8_norm(c))
 
                     # Write UVs
                     for ui in range(mesh.uv_count):
@@ -1960,6 +1996,12 @@ class BlenderMeshExporter:
                         f.write(bp.int16_norm(max(-1.0, min(1.0, v_uv))))
 
             else:
+                # float format (normal_type == 1):
+                #   12 bytes: normal as 3 floats
+                #   12 bytes: tangent as 3 floats
+                #    4 bytes: bitangent sign as float
+                #   color_count * 4 bytes: vertex colors as uint8_norm RGBA
+                #   uv_count * 4 bytes: UVs as pairs of int16_norm
                 for v in data.vertices:
                     normal  = NTB[v.index][0]
                     tangent = NTB[v.index][1]
@@ -2145,7 +2187,7 @@ class SWOMTSettings(bpy.types.PropertyGroup):
     compute_normals_on_export: bpy.props.BoolProperty(
         name="Compute Normals on Export",
         default=False,
-        description="Recompute normals after on export.",
+        description="Recompute normals on export.",
         update=_on_compute_normals_on_export_update,
     )
     export_normals: bpy.props.BoolProperty(
@@ -2158,6 +2200,11 @@ class SWOMTSettings(bpy.types.PropertyGroup):
         name="Export Weights",
         default=False,
         description="Write bone weights into the exported file. When unchecked, the original weights from the .mmb are preserved. Automatically forced on when vert count has changed.",
+    )
+    export_vertex_colors: bpy.props.BoolProperty(
+        name="Export Vertex Colors",
+        default=False,
+        description="Write vertex colors from Blender into the exported file. When unchecked, the original vertex colors from the .mmb are preserved.",
     )
 
 # OPERATORS #
@@ -2253,7 +2300,8 @@ class ExportLOD(bpy.types.Operator):
 
         # Triangulate the Blender mesh before export so all faces are tris
         mesh = asset.meshes[self.mesh_index]
-        lod_obj_name = mesh.lods[self.lod_index].blender_obj_name or f"{mesh.name}_LOD{self.lod_index}"
+        lod  = mesh.lods[self.lod_index]
+        lod_obj_name = lod.blender_obj_name or f"{mesh.name}_LOD{self.lod_index}"
         tri_obj = BME.find_object_by_name(lod_obj_name)
         if tri_obj:
             BME._triangulate_object(tri_obj, compute_normals=context.scene.SWOMT.compute_normals_on_export)
@@ -2963,7 +3011,6 @@ class SelectMGraphObjectFilePatch(bpy.types.Operator):
         self.report({'INFO'}, f"Updated {count} .mmb reference(s): '{old_stem}.mmb' -> '{new_stem}.mmb' in {os.path.basename(self.filepath)} (backup: {os.path.basename(backup_path)})")
         return {'FINISHED'}
 
-
 def _import_all_lods(context, lod_n):
     """Shared import logic for ImportAllLODNs operators."""
     sk_mesh = asset
@@ -2985,7 +3032,6 @@ def _import_all_lods(context, lod_n):
     if is_new_armature and last_obj is not None:
         BMI.rotate_model(last_obj, armature)
     return {'FINISHED'}
-
 
 class ImportAllLOD0s(bpy.types.Operator):
     """Imports LOD0 for every mesh in the asset"""
@@ -3095,7 +3141,6 @@ class ExportAllLODs(bpy.types.Operator):
         for mesh in asset.meshes:
             BME._apply_header_patches(mod_file, mesh, asset, operator=self)
 
-        # Apply staged file rename
         if asset.pending_file_rename_new:
             new_file = str(Path(mod_file).parent / (asset.pending_file_rename_new + '.mmb'))
             try:
@@ -3106,7 +3151,6 @@ class ExportAllLODs(bpy.types.Operator):
             self.report({'INFO'}, f"Exported -> {os.path.basename(new_file)}")
 
         return {'FINISHED'}
-
 
 # PANELS #
 class SWOMTPanel(bpy.types.Panel):
@@ -3208,6 +3252,17 @@ class MeshPanel(bpy.types.Panel):
         if asset:
             row.label(text=asset.name)
             row.operator("object.rename_mmb_file", text="Rename File")
+            any_imported = any(
+                len(m.lods) > lod_n and bpy.data.objects.get(
+                    m.lods[lod_n].blender_obj_name if m.lods[lod_n].blender_obj_name else f"{m.name}_LOD{lod_n}"
+                ) is not None
+                for m in asset.meshes if m.lods
+                for lod_n in range(len(m.lods))
+            )
+            # TODO: Need to fix for added verts - Currently exports incorrectly if vert count has changed
+            #gen_lods_row = layout.row()
+            #gen_lods_row.enabled = any_imported
+            #gen_lods_row.operator("object.generate_lods", text="Generate LODs", icon="MOD_DECIM")
             layout.separator()
             layout.label(text="Import", icon='IMPORT')
             imp_row = layout.row(align=True)
@@ -3216,13 +3271,6 @@ class MeshPanel(bpy.types.Panel):
                 btn = imp_row.row(align=True)
                 btn.enabled = any_lod_exists
                 btn.operator(f"object.import_all_lod{lod_n}s", text=f"LOD{lod_n}")
-            any_imported = any(
-                len(m.lods) > lod_n and bpy.data.objects.get(
-                    m.lods[lod_n].blender_obj_name if m.lods[lod_n].blender_obj_name else f"{m.name}_LOD{lod_n}"
-                ) is not None
-                for m in asset.meshes if m.lods
-                for lod_n in range(len(m.lods))
-            )
             layout.separator()
             layout.label(text="Export", icon='EXPORT')
             exp_row = layout.row()
@@ -3245,6 +3293,11 @@ class MeshPanel(bpy.types.Panel):
                 weights_row.label(text="", icon='LOCKED')
             else:
                 weights_row.prop(SWOMT, "export_weights")
+            layout.prop(SWOMT, "export_vertex_colors")
+            # Warn if vert count changed - The user should transfer weights from the original mesh before exporting.
+            if forced:
+                warn_row = layout.row()
+                warn_row.label(text="Tip: Transfer Weights from original mesh", icon='INFO')
             for mi, m in enumerate(asset.meshes):
                 expanded = SWOMT.mesh_expanded[mi] if mi < 32 else True
                 mesh_row = layout.row()
@@ -3269,12 +3322,10 @@ class MeshPanel(bpy.types.Panel):
                         lod_import_button = row.operator("object.import_lod")
                         lod_import_button.lod_index = li
                         lod_import_button.mesh_index = mi
-                        # TODO: Improve check for export button
-                        # obj_name = l.blender_obj_name if l.blender_obj_name else f"{m.name}_LOD{li}"
-                        # lod_export_row = row.row()
-                        # lod_export_row.enabled = bpy.data.objects.get(obj_name) is not None
-                        # lod_export_button = lod_export_row.operator("object.export_lod")
-                        lod_export_button = row.operator("object.export_lod")
+                        obj_name = l.blender_obj_name if l.blender_obj_name else f"{m.name}_LOD{li}"
+                        lod_export_row = row.row()
+                        lod_export_row.enabled = bpy.data.objects.get(obj_name) is not None
+                        lod_export_button = lod_export_row.operator("object.export_lod")
                         lod_export_button.lod_index = li
                         lod_export_button.mesh_index = mi
                     # Bone slot remap section
@@ -3354,6 +3405,146 @@ class ApplyUpdate(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class GenerateLODs(bpy.types.Operator):
+    """Generate LODs for all imported LOD0 meshes by decimating from LOD0"""
+    bl_idname = 'object.generate_lods'
+    bl_label = "Generate LODs"
+
+    @classmethod
+    def poll(cls, context):
+        if asset is None:
+            return False
+        return any(
+            bpy.data.objects.get(
+                m.lods[0].blender_obj_name if m.lods and m.lods[0].blender_obj_name else f"{m.name}_LOD0"
+            ) is not None
+            for m in asset.meshes if m.lods
+        )
+
+    def execute(self, context):
+        import bpy as _bpy
+        import bmesh as _bmesh
+
+        # Helper to find a VIEW_3D area for operator context overrides
+        def get_view3d_override(obj):
+            for window in _bpy.context.window_manager.windows:
+                for area in window.screen.areas:
+                    if area.type == 'VIEW_3D':
+                        return _bpy.context.temp_override(
+                            window=window, area=area,
+                            active_object=obj,
+                            selected_objects=[obj],
+                            object=obj,
+                        )
+            return None
+
+        for mesh in asset.meshes:
+            if not mesh.lods or len(mesh.lods) < 2:
+                continue
+
+            lod0_name = mesh.lods[0].blender_obj_name or f"{mesh.name}_LOD0"
+            lod0_obj = bpy.data.objects.get(lod0_name)
+            if lod0_obj is None:
+                continue
+
+            lod0_vc = len(lod0_obj.data.vertices)
+            if lod0_vc == 0:
+                continue
+
+            # Find the collection(s) LOD0 belongs to (excluding the scene master collection)
+            lod0_collections = [c for c in lod0_obj.users_collection
+                                 if c != context.scene.collection]
+
+            # Determine max weights per vertex from the mesh's vertex stride.
+            stride = mesh.vertex_stride
+            if stride == 20:
+                max_weights = 4
+            elif stride == 32:
+                max_weights = 8   # 4 primary + 4 secondary
+            elif stride == 36:
+                max_weights = 8
+            elif stride == 40:
+                max_weights = 8
+            elif stride == 44:
+                max_weights = 12
+            else:
+                pos_length = 12 if mesh.position_type == 1 else 8
+                max_weights = int((stride - pos_length) / 2)
+            print(f"[AFoPMT] {mesh.name}: max weights per vertex = {max_weights} (stride={stride})")
+
+            for lod_index in range(1, len(mesh.lods)):
+                lod = mesh.lods[lod_index]
+                orig_vc = lod.vertex_count
+                if orig_vc == 0:
+                    continue
+
+                ratio = orig_vc / lod0_vc
+
+                # Duplicate LOD0 as the base for this LOD
+                new_obj = lod0_obj.copy()
+                new_obj.data = lod0_obj.data.copy()
+                new_obj.name = f"{mesh.name}_LOD{lod_index}"
+
+                # Link into the same collections as LOD0 (or scene collection as fallback)
+                if lod0_collections:
+                    for col in lod0_collections:
+                        col.objects.link(new_obj)
+                else:
+                    context.scene.collection.objects.link(new_obj)
+
+                context.view_layer.objects.active = new_obj
+                new_obj.select_set(True)
+
+                # Merge by distance before decimating to clean up seam splits
+                bm = _bmesh.new()
+                bm.from_mesh(new_obj.data)
+                _bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=1e-4)
+                bm.to_mesh(new_obj.data)
+                bm.free()
+                new_obj.data.update()
+
+                # Apply Decimate modifier
+                dec = new_obj.modifiers.new(name="Decimate", type='DECIMATE')
+                dec.ratio = max(0.001, min(1.0, ratio))
+
+                dg = _bpy.context.evaluated_depsgraph_get()
+                eval_obj = new_obj.evaluated_get(dg)
+                me = _bpy.data.meshes.new_from_object(eval_obj)
+                new_obj.modifiers.remove(dec)
+                new_obj.data = me
+
+                # Limit weights per vertex to match LOD0.
+                override = get_view3d_override(new_obj)
+                if override:
+                    with override:
+                        if _bpy.context.active_object and _bpy.context.active_object.mode != 'OBJECT':
+                            _bpy.ops.object.mode_set(mode='OBJECT')
+                        _bpy.ops.object.vertex_group_limit_total(
+                            group_select_mode='ALL',
+                            limit=max_weights
+                        )
+
+                # Compute smooth normals on the decimated mesh
+                BME._compute_normals_for_object(new_obj)
+
+                new_obj.select_set(False)
+
+                # Parent to armature if LOD0 has one
+                if lod0_obj.parent and lod0_obj.parent.type == 'ARMATURE':
+                    new_obj.parent = lod0_obj.parent
+                    new_obj.parent_type = lod0_obj.parent_type
+                    new_obj.matrix_parent_inverse = lod0_obj.matrix_parent_inverse.copy()
+                    for mod in lod0_obj.modifiers:
+                        if mod.type == 'ARMATURE':
+                            arm_mod = new_obj.modifiers.new(name=mod.name, type='ARMATURE')
+                            arm_mod.object = mod.object
+                            break
+
+                self.report({'INFO'}, f"Generated {new_obj.name} ({len(new_obj.data.vertices)} verts, ratio {ratio:.3f})")
+
+        return {'FINISHED'}
+
+
 classes=[SWOMTSettings,
          BrowseMMBFile,
          ComputeNormals,
@@ -3363,6 +3554,7 @@ classes=[SWOMTSettings,
          ImportAllLOD2s,
          ImportAllLOD3s,
          ExportAllLODs,
+         GenerateLODs,
          ZeroOutMesh,
          RevertMesh,
          RemapMeshBone,
