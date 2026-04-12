@@ -497,27 +497,9 @@ class SkeletalMeshAsset(Asset):
 
                 f.seek(offset)
 
-            def get_vertex_positions(self, raw_mesh_file, original_file=None):
+            def get_vertex_positions(self, raw_mesh_file):
                 vertices = []
                 mesh = self.parent_mesh
-
-                # lod_info_type=0x0100: positions are float32 xyz in the extra vertex buffer
-                if mesh.lod_info_type == 0x0100:
-                    f = original_file
-                    file_size = f.seek(0, 2)
-                    stride = self.extra_vert_stride
-                    need = self.extra_vert_offset + self.vertex_count * stride
-                    if self.extra_vert_offset == 0 or need > file_size:
-                        print(f"[MMB] WARNING: extra vertex buffer for '{mesh.name}' LOD{self.index} "
-                              f"is outside the file (offset 0x{self.extra_vert_offset:X}, "
-                              f"file size 0x{file_size:X}). Positions will be zero.")
-                        return [(0.0, 0.0, 0.0)] * self.vertex_count
-                    for i in range(self.vertex_count):
-                        f.seek(self.extra_vert_offset + i * stride)
-                        x, y, z = unpack('<fff', f.read(12))
-                        vertices.append((x, y, z))
-                    return vertices
-
                 stride = mesh.vertex_stride
                 f = raw_mesh_file
                 f.seek(self.vertex_data_offset_a)
@@ -759,12 +741,12 @@ class SkeletalMeshAsset(Asset):
                     if scale is None or scale == 0:
                         f.seek(stride_start + stride)
                         return
-                    # Invert: world = int16_norm(raw) * w => raw = round(world / w * 32767)
-                    def to_raw(v, w):
-                        return max(-32768, min(32767, int(round(v / w * 32767))))
-                    f.write(bp.int16(to_raw(x, scale)))
-                    f.write(bp.int16(to_raw(y, scale)))
-                    f.write(bp.int16(to_raw(z, scale)))
+                    max_abs = max(abs(x), abs(y), abs(z))
+                    if max_abs >= abs(scale):
+                        scale = min(32767, int(max_abs) + 1)
+                    f.write(bp.int16_norm(x / scale))
+                    f.write(bp.int16_norm(y / scale))
+                    f.write(bp.int16_norm(z / scale))
                     f.write(bp.int16(scale))
                 elif self.parent_mesh.position_type == 1:
                     f.write(bp.float(x))
@@ -900,13 +882,7 @@ class SkeletalMeshAsset(Asset):
             #   v13, u==0:      (no root_bone_index, no lod_info_type)
             #   v15/16/17, u>0: root_bone_index[2]  lod_info_type[1]
             #   v15/16/17, u==0: lod_info_type[1]
-            if version == 19:
-                # v19: root_bone_index[2] always present regardless of u_count; lod_info_type is uint16
-                f.seek(2, 1)  # root_bone_index[2]
-                lod_info_type = br.uint16(f)
-                if lod_info_type == 0x0100:
-                    f.seek(3, 1)  # 3 extra bytes for lod_info_type=0x0100
-            elif u_count > 0 and version != 12:
+            if u_count > 0 and version != 12:
                 if version == 13:
                     f.seek(1, 1)  # v13: 1-byte root_bone_index
                 else:             # v15, v16, v17
@@ -918,40 +894,28 @@ class SkeletalMeshAsset(Asset):
                 else:                  # v15, v16, v17 with u_count == 0
                     lod_info_type = br.uint8(f)
 
-            self.lod_info_type = lod_info_type  # store for LOD.parse() and get_vertex_positions
             self.lod_count = br.uint8(f)
             f.seek(4, 1)  # unknown 4 bytes before LOD list
 
             # --- LOD list ---
             # Each LOD is 36 bytes.
-            # lod_info_type == 2:      28 extra bytes per LOD (v15/v16/v17)
-            # lod_info_type == 0x0100: 24 extra bytes per LOD (v19) — 6×uint32 buffer descriptors
+            # lod_info_type == 2: 28 extra bytes per LOD (v15/v16/v17)
             for l in range(self.lod_count):
                 lod = self.LOD(self,l)
                 lod.parse(f)
                 if lod_info_type == 2:
                     f.seek(28, 1)
-                elif lod_info_type == 0x0100:
-                    # 6 uint32s: e1_A, e2_A, sA, e1_B, e2_B, sB
-                    # Buffer B (float32 xyz): base = e2_B, stride = sB / vc
-                    f.seek(8, 1)  # skip e1_A, e2_A (Buffer A, not needed for positions)
-                    f.seek(4, 1)  # skip sA
-                    f.seek(4, 1)  # skip e1_B (cumulative offset, not needed)
-                    e2_B = br.uint32(f)
-                    sB   = br.uint32(f)
-                    lod.extra_vert_offset = e2_B
-                    lod.extra_vert_stride = sB // lod.vertex_count if lod.vertex_count > 0 else 48
                 self.lods.append(lod)
 
             # --- Tail section: UV hashes, color hashes, strides ---
             # UV hashes are 4 bytes each on all versions.
             #
             # v12/v13/v15 layout:  uv_count  uv_hashes  unk[4]  color_count  color_hashes
-            # v16/v17/v19 layout:  uv_count  uv_hashes  color_count  color_hashes  unk[4]  count_c  c_data
+            # v16/v17 layout:      uv_count  uv_hashes  color_count  color_hashes  unk[4]  count_c  c_data
             self.uv_count = br.uint8(f)
             f.seek(4 * self.uv_count, 1)
 
-            if version in (16, 17, 19):
+            if version in (16, 17):
                 self.color_count = br.uint8(f)
                 f.seek(4 * self.color_count, 1)
                 f.seek(4, 1)               # unk after color (v16/v17/v19)
@@ -997,17 +961,7 @@ class SkeletalMeshAsset(Asset):
                   f'\nColor Count: {self.color_count}')
 
             # --- Post-stride skip ---
-            # v17: 20-byte skip.
-            # v19: 16-byte skip, then pca_count uint32, then pca_count entries of
-            #      name_len[2] + name[name_len] + 4 bytes.
-            # When pca_count == 0 (e.g. arms, dlc1), v19 skip totals 20 bytes like v17.
-            if version == 19:
-                f.seek(16, 1)
-                pca_count = br.uint32(f)
-                for _ in range(pca_count):
-                    pca_name_len = br.uint16(f)
-                    f.seek(pca_name_len + 4, 1)
-            elif version == 17:
+            if version == 17:
                 f.seek(20, 1)
             else:
                 f.seek(16, 1)
@@ -1041,8 +995,8 @@ class SkeletalMeshAsset(Asset):
         self.pending_file_rename_new = ""
     def parse(self,f):
         super().parse(f)
-        if self.version not in (12, 13, 15, 16, 17, 19):
-            raise Exception(f'Unsupported .mmb version: {self.version}. Supported versions: 12, 13, 15, 16, 17, 19.')
+        if self.version not in (12, 13, 15, 16, 17):
+            raise Exception(f'Unsupported .mmb version: {self.version}. Supported versions: 12, 13, 15, 16, 17.')
         self.bone_count = br.uint32(f)
         for b in range(self.bone_count):
             self.bones.append(self.Bone(f))
@@ -1101,7 +1055,7 @@ class BlenderMeshImporter:
         lod = mesh.lods[lod_index]
         lod.blender_obj_name = obj.name  # record actual Blender name (may differ from obj_name if Blender de-duped it)
         # Import vertices
-        verts = lod.get_vertex_positions(raw_mesh_file, file)
+        verts = lod.get_vertex_positions(raw_mesh_file)
         for v in verts:
             bmv = bm.verts.new()
             v_co = (v[0]*-1,v[1],v[2])
@@ -1121,6 +1075,11 @@ class BlenderMeshImporter:
             bm_face.normal_flip() #this is required because the *-1 on x vertex co flips the mesh normals
         bm.to_mesh(obj_data)
         bm.free()
+
+        # Stamp original MMB vertex index so order survives Separate by Loose Parts
+        attr = obj_data.attributes.new(name='mmb_vertex_order', type='INT', domain='POINT')
+        for i in range(lod.vertex_count):
+            attr.data[i].value = i
 
         bm = bmesh.new()
         bm.from_mesh(obj_data)
@@ -1815,20 +1774,32 @@ class BlenderMeshExporter:
                             src.seek(abs_voa_w + vi * stride + pos_length + wc)
                             orig_slot_indices.append(list(src.read(wc)))
 
+            # Build blender→mmb index remapping from mmb_vertex_order attribute
+            mmb_attr = data.attributes.get('mmb_vertex_order')
+            if mmb_attr is not None and len(mmb_attr.data) == len(data.vertices):
+                blender_to_mmb = {bv_idx: mmb_attr.data[bv_idx].value for bv_idx in range(len(data.vertices))}
+                use_mmb_mapping = (len(blender_to_mmb) == lod.vertex_count and
+                                   all(0 <= idx < lod.vertex_count for idx in blender_to_mmb.values()))
+            else:
+                blender_to_mmb = {}
+                use_mmb_mapping = False
+
             for vi, v in enumerate(bm.verts):
+                mmb_idx = blender_to_mmb[vi] if use_mmb_mapping else vi
+                f.seek(mmb_idx * stride)
                 stride_start = f.tell()
 
                 # Write position
                 lod.write_vertex_position(
                     f,
                     pos=BME.convert_coordinate(v.co),
-                    scale=original_w[vi],
+                    scale=original_w[mmb_idx],
                 )
                 f.seek(stride_start + pos_length)
 
                 # Write bone weights - use original bytes if vert count is unchanged
                 if orig_weight_bytes is not None:
-                    f.write(orig_weight_bytes[vi])
+                    f.write(orig_weight_bytes[mmb_idx])
                     f.seek(stride_start + stride)
                     continue
 
@@ -1859,7 +1830,7 @@ class BlenderMeshExporter:
                         # Preserve original slot structure (indices) exactly.
                         # Only update the weight value for each slot based on the
                         # Blender vertex group weight for that slot's bone index.
-                        orig_sum, sec_i_bytes, sec_w_bytes, orig_pri_i = orig_stride32_data[vi]
+                        orig_sum, sec_i_bytes, sec_w_bytes, orig_pri_i = orig_stride32_data[mmb_idx]
                         remaining = {s: w for s, w in raw_weights}
                         for slot_bone in orig_pri_i:
                             w = remaining.pop(slot_bone, 0.0)
@@ -1927,7 +1898,7 @@ class BlenderMeshExporter:
                     if orig_slot_indices is not None:
                         # Preserve original slot structure
                         remaining = {s: w for s, w in raw_weights}
-                        slot_idxs = orig_slot_indices[vi]
+                        slot_idxs = orig_slot_indices[mmb_idx]
                         for slot_bone in slot_idxs:
                             w = remaining.pop(slot_bone, 0.0)
                             f.write(bp.uint8(max(0, min(int(round(w * 255)), 255))))
@@ -2867,7 +2838,7 @@ class RevertMesh(bpy.types.Operator):
             obj_name = lod.blender_obj_name if lod.blender_obj_name else f"{mesh.name}_LOD{li}"
             obj = bpy.data.objects.get(obj_name)
             if obj is not None:
-                verts = lod.get_vertex_positions(raw_mesh_file, original_file)
+                verts = lod.get_vertex_positions(raw_mesh_file)
                 for i, vert in enumerate(obj.data.vertices):
                     vert.co = (-verts[i][0], verts[i][1], verts[i][2])
                 obj.data.update()
