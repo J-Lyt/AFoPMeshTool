@@ -11,9 +11,9 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 30),
+    "version": (0, 1, 34),
     "blender": (5, 0, 0),
-    "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 12, 13, 15, 16, 17.",
+    "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 12, 13, 15, 16, 17, 19.",
     "category": "Import-Export"
     }
 
@@ -459,21 +459,22 @@ class SkeletalMeshAsset(Asset):
 
                 f.seek(offset)
 
-            def get_vertex_positions(self,raw_mesh_file):
+            def get_vertex_positions(self, raw_mesh_file):
                 vertices = []
-                stride = self.parent_mesh.vertex_stride
+                mesh = self.parent_mesh
+                stride = mesh.vertex_stride
                 f = raw_mesh_file
                 f.seek(self.vertex_data_offset_a)
                 pos = (0.0,0.0,0.0)
                 for v in range(self.vertex_count):
                     stride_start = f.tell()
-                    if self.parent_mesh.position_type == 0:
+                    if mesh.position_type == 0:
                         x = br.int16_norm(f)
                         y = br.int16_norm(f)
                         z = br.int16_norm(f)
                         w = br.int16(f)
                         pos = (x*w,y*w,z*w)
-                    elif self.parent_mesh.position_type == 1:
+                    elif mesh.position_type == 1:
                         x = br.float(f)
                         y = br.float(f)
                         z = br.float(f)
@@ -698,12 +699,12 @@ class SkeletalMeshAsset(Asset):
                     if scale is None or scale == 0:
                         f.seek(stride_start + stride)
                         return
-                    # Invert: world = int16_norm(raw) * w => raw = round(world / w * 32767)
-                    def to_raw(v, w):
-                        return max(-32768, min(32767, int(round(v / w * 32767))))
-                    f.write(bp.int16(to_raw(x, scale)))
-                    f.write(bp.int16(to_raw(y, scale)))
-                    f.write(bp.int16(to_raw(z, scale)))
+                    max_abs = max(abs(x), abs(y), abs(z))
+                    if max_abs >= abs(scale):
+                        scale = min(32767, int(max_abs) + 1)
+                    f.write(bp.int16_norm(x / scale))
+                    f.write(bp.int16_norm(y / scale))
+                    f.write(bp.int16_norm(z / scale))
                     f.write(bp.int16(scale))
                 elif self.parent_mesh.position_type == 1:
                     f.write(bp.float(x))
@@ -854,7 +855,8 @@ class SkeletalMeshAsset(Asset):
             f.seek(4, 1)  # unknown 4 bytes before LOD list
 
             # --- LOD list ---
-            # Each LOD is 36 bytes. When lod_info_type == 2, an extra 28 bytes follow each LOD.
+            # Each LOD is 36 bytes.
+            # lod_info_type == 2: 28 extra bytes per LOD (v15/v16/v17)
             for l in range(self.lod_count):
                 lod = self.LOD(self,l)
                 lod.parse(f)
@@ -2962,6 +2964,29 @@ class SelectMGraphObjectFilePatch(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def _import_all_lods(context, lod_n):
+    """Shared import logic for ImportAllLODNs operators."""
+    sk_mesh = asset
+    SWOMT = context.scene.SWOMT
+    merged_mmb = get_merged_mmb(SWOMT["AssetPath"])
+    is_new_armature = bpy.data.objects.find(sk_mesh.name) == -1
+    armature = BMI.find_or_create_skeleton(sk_mesh)
+    last_obj = None
+    for mi, mesh in enumerate(sk_mesh.meshes):
+        if len(mesh.lods) <= lod_n:
+            continue
+        lod = mesh.lods[lod_n]
+        obj = BMI.import_mesh(merged_mmb,
+                              skeletal_mesh=sk_mesh,
+                              mesh=mesh,
+                              lod_index=lod.index)
+        BMI.parent_obj_to_armature(obj, armature)
+        last_obj = obj
+    if is_new_armature and last_obj is not None:
+        BMI.rotate_model(last_obj, armature)
+    return {'FINISHED'}
+
+
 class ImportAllLOD0s(bpy.types.Operator):
     """Imports LOD0 for every mesh in the asset"""
     bl_idname = 'object.import_all_lod0s'
@@ -2972,29 +2997,48 @@ class ImportAllLOD0s(bpy.types.Operator):
         return asset is not None
 
     def execute(self, context):
-        sk_mesh = asset
-        SWOMT = context.scene.SWOMT
-        merged_mmb = get_merged_mmb(SWOMT["AssetPath"])
-        is_new_armature = bpy.data.objects.find(sk_mesh.name) == -1
-        armature = BMI.find_or_create_skeleton(sk_mesh)
-        for mi, mesh in enumerate(sk_mesh.meshes):
-            if not mesh.lods:
-                continue
-            lod = mesh.lods[0]
-            obj = BMI.import_mesh(merged_mmb,
-                                  skeletal_mesh=sk_mesh,
-                                  mesh=mesh,
-                                  lod_index=lod.index)
-            BMI.parent_obj_to_armature(obj, armature)
-        if is_new_armature:
-            BMI.rotate_model(obj, armature)
-        return {'FINISHED'}
+        return _import_all_lods(context, 0)
 
+class ImportAllLOD1s(bpy.types.Operator):
+    """Imports LOD1 for every mesh in the asset"""
+    bl_idname = 'object.import_all_lod1s'
+    bl_label = "Import All LOD1's"
 
-class ExportAllLOD0s(bpy.types.Operator):
-    """Exports LOD0 for every mesh in the asset"""
-    bl_idname = 'object.export_all_lod0s'
-    bl_label = "Export All LOD0's"
+    @classmethod
+    def poll(cls, context):
+        return asset is not None
+
+    def execute(self, context):
+        return _import_all_lods(context, 1)
+
+class ImportAllLOD2s(bpy.types.Operator):
+    """Imports LOD2 for every mesh in the asset"""
+    bl_idname = 'object.import_all_lod2s'
+    bl_label = "Import All LOD2's"
+
+    @classmethod
+    def poll(cls, context):
+        return asset is not None
+
+    def execute(self, context):
+        return _import_all_lods(context, 2)
+
+class ImportAllLOD3s(bpy.types.Operator):
+    """Imports LOD3 for every mesh in the asset"""
+    bl_idname = 'object.import_all_lod3s'
+    bl_label = "Import All LOD3's"
+
+    @classmethod
+    def poll(cls, context):
+        return asset is not None
+
+    def execute(self, context):
+        return _import_all_lods(context, 3)
+
+class ExportAllLODs(bpy.types.Operator):
+    """Exports every LOD that has a Blender object in the scene"""
+    bl_idname = 'object.export_all_lods'
+    bl_label = "Export All LODs"
 
     @classmethod
     def poll(cls, context):
@@ -3013,28 +3057,41 @@ class ExportAllLOD0s(bpy.types.Operator):
         src_path = SWOMT.AssetPath
         mod_file = os.path.splitext(src_path)[0] + "_MOD.mmb"
 
-        # Triangulate mesh before export
+        # Triangulate every LOD object that exists in the scene
         for m in asset.meshes:
-            if not m.lods:
+            for li, lod in enumerate(m.lods):
+                lod_obj_name = lod.blender_obj_name or f"{m.name}_LOD{li}"
+                tri_obj = BME.find_object_by_name(lod_obj_name)
+                if tri_obj:
+                    BME._triangulate_object(tri_obj, compute_normals=context.scene.SWOMT.compute_normals_on_export)
+
+        # Export each LOD level in order (0 -> 3). _write_mod_file accumulates on
+        # top of _MOD.mmb when it already exists, so each pass layers on top of
+        # the previous one correctly.
+        exported_any = False
+        for lod_n in range(4):
+            edited = {}
+            for m in asset.meshes:
+                if len(m.lods) <= lod_n:
+                    continue
+                lod = m.lods[lod_n]
+                obj_name = lod.blender_obj_name or f"{m.name}_LOD{lod_n}"
+                if BME.find_object_by_name(obj_name) is not None:
+                    edited[m.index] = lod_n
+            if not edited:
                 continue
-            lod_obj_name = m.lods[0].blender_obj_name or f"{m.name}_LOD0"
-            tri_obj = BME.find_object_by_name(lod_obj_name)
-            if tri_obj:
-                BME._triangulate_object(tri_obj, compute_normals=context.scene.SWOMT.compute_normals_on_export)
+            try:
+                BME._write_mod_file(edited_lod_index_per_mesh=edited, out_path=mod_file)
+                exported_any = True
+            except Exception as e:
+                self.report({'ERROR'}, f"Export LOD{lod_n} failed: {e}")
+                return {'CANCELLED'}
 
-        # Export LOD0 as the edited LOD for every mesh that has LODs
-        edited = {m.index: 0 for m in asset.meshes if m.lods}
-
-        try:
-            BME._write_mod_file(
-                edited_lod_index_per_mesh=edited,
-                out_path=mod_file,
-            )
-        except Exception as e:
-            self.report({'ERROR'}, f"Export failed: {e}")
+        if not exported_any:
+            self.report({'WARNING'}, "No LOD objects found in scene to export.")
             return {'CANCELLED'}
 
-        # Apply header-level patches for every mesh
+        # Apply header-level patches once after all LODs are written
         for mesh in asset.meshes:
             BME._apply_header_patches(mod_file, mesh, asset, operator=self)
 
@@ -3151,17 +3208,27 @@ class MeshPanel(bpy.types.Panel):
         if asset:
             row.label(text=asset.name)
             row.operator("object.rename_mmb_file", text="Rename File")
-            all_row = layout.row()
-            all_row.operator("object.import_all_lod0s", text="Import All LOD0's")
-            any_lod0_imported = any(
-                bpy.data.objects.get(
-                    m.lods[0].blender_obj_name if m.lods[0].blender_obj_name else f"{m.name}_LOD0"
+            layout.separator()
+            layout.label(text="Import", icon='IMPORT')
+            imp_row = layout.row(align=True)
+            for lod_n in range(4):
+                any_lod_exists = any(len(m.lods) > lod_n for m in asset.meshes if m.lods)
+                btn = imp_row.row(align=True)
+                btn.enabled = any_lod_exists
+                btn.operator(f"object.import_all_lod{lod_n}s", text=f"LOD{lod_n}")
+            any_imported = any(
+                len(m.lods) > lod_n and bpy.data.objects.get(
+                    m.lods[lod_n].blender_obj_name if m.lods[lod_n].blender_obj_name else f"{m.name}_LOD{lod_n}"
                 ) is not None
                 for m in asset.meshes if m.lods
+                for lod_n in range(len(m.lods))
             )
-            export_all_row = all_row.row()
-            export_all_row.enabled = any_lod0_imported
-            export_all_row.operator("object.export_all_lod0s", text="Export All LOD0's")
+            layout.separator()
+            layout.label(text="Export", icon='EXPORT')
+            exp_row = layout.row()
+            exp_row.scale_y = 1.5
+            exp_row.enabled = any_imported
+            exp_row.operator("object.export_all_lods", text="Export All LODs")
             layout.prop(SWOMT, "compute_normals_on_export")
             normals_row = layout.row()
             forced = _vert_count_changed()
@@ -3292,7 +3359,10 @@ classes=[SWOMTSettings,
          ComputeNormals,
          ClearNormals,
          ImportAllLOD0s,
-         ExportAllLOD0s,
+         ImportAllLOD1s,
+         ImportAllLOD2s,
+         ImportAllLOD3s,
+         ExportAllLODs,
          ZeroOutMesh,
          RevertMesh,
          RemapMeshBone,
