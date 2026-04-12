@@ -3057,28 +3057,41 @@ class ExportAllLODs(bpy.types.Operator):
         src_path = SWOMT.AssetPath
         mod_file = os.path.splitext(src_path)[0] + "_MOD.mmb"
 
-        # Triangulate mesh before export
+        # Triangulate every LOD object that exists in the scene
         for m in asset.meshes:
-            if not m.lods:
+            for li, lod in enumerate(m.lods):
+                lod_obj_name = lod.blender_obj_name or f"{m.name}_LOD{li}"
+                tri_obj = BME.find_object_by_name(lod_obj_name)
+                if tri_obj:
+                    BME._triangulate_object(tri_obj, compute_normals=context.scene.SWOMT.compute_normals_on_export)
+
+        # Export each LOD level in order (0 -> 3). _write_mod_file accumulates on
+        # top of _MOD.mmb when it already exists, so each pass layers on top of
+        # the previous one correctly.
+        exported_any = False
+        for lod_n in range(4):
+            edited = {}
+            for m in asset.meshes:
+                if len(m.lods) <= lod_n:
+                    continue
+                lod = m.lods[lod_n]
+                obj_name = lod.blender_obj_name or f"{m.name}_LOD{lod_n}"
+                if BME.find_object_by_name(obj_name) is not None:
+                    edited[m.index] = lod_n
+            if not edited:
                 continue
-            lod_obj_name = m.lods[0].blender_obj_name or f"{m.name}_LOD0"
-            tri_obj = BME.find_object_by_name(lod_obj_name)
-            if tri_obj:
-                BME._triangulate_object(tri_obj, compute_normals=context.scene.SWOMT.compute_normals_on_export)
+            try:
+                BME._write_mod_file(edited_lod_index_per_mesh=edited, out_path=mod_file)
+                exported_any = True
+            except Exception as e:
+                self.report({'ERROR'}, f"Export LOD{lod_n} failed: {e}")
+                return {'CANCELLED'}
 
-        # Export LOD0 as the edited LOD for every mesh that has LODs
-        edited = {m.index: 0 for m in asset.meshes if m.lods}
-
-        try:
-            BME._write_mod_file(
-                edited_lod_index_per_mesh=edited,
-                out_path=mod_file,
-            )
-        except Exception as e:
-            self.report({'ERROR'}, f"Export failed: {e}")
+        if not exported_any:
+            self.report({'WARNING'}, "No LOD objects found in scene to export.")
             return {'CANCELLED'}
 
-        # Apply header-level patches for every mesh
+        # Apply header-level patches once after all LODs are written
         for mesh in asset.meshes:
             BME._apply_header_patches(mod_file, mesh, asset, operator=self)
 
