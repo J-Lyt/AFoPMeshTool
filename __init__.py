@@ -11,11 +11,21 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 35),
+    "version": (0, 1, 36),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 12, 13, 15, 16, 17.",
     "category": "Import-Export"
     }
+
+import shutil
+import os
+# Delete __pycache__ on load to prevent stale cache issues
+_cache_dir = os.path.join(os.path.dirname(__file__), "__pycache__")
+try:
+    if os.path.exists(_cache_dir):
+        shutil.rmtree(_cache_dir)
+except OSError:
+    pass
 
 import bpy
 import bmesh
@@ -24,7 +34,6 @@ import numpy as np
 import math
 from mathutils import Matrix, Euler, Vector
 from pathlib import Path
-import os
 import io
 import urllib.request
 import threading
@@ -1659,7 +1668,7 @@ class BlenderMeshExporter:
                 original_w = [None] * len(data.vertices)
 
             # Read original weight+index bytes per vertex when vert count is unchanged and export_weights is unchecked.
-            export_weights = bpy.context.scene.SWOMT.export_weights or (len(data.vertices) != lod.vertex_count)
+            export_weights = bpy.context.scene.SWOMT.export_weights or _vert_count_changed()
             weight_bytes_per_vert = stride - pos_length
 
             # Compute abs_voa once for weight reading
@@ -1682,23 +1691,24 @@ class BlenderMeshExporter:
                     for vi in range(lod.vertex_count):
                         src.seek(abs_voa_w + vi * stride + pos_length)
                         orig_weight_bytes.append(src.read(weight_bytes_per_vert))
-            elif export_weights and stride == 32:
-                orig_stride32_data = []
-                with open(src_path, 'rb') as src:
-                    for vi in range(lod.vertex_count):
-                        src.seek(abs_voa_w + vi * stride + pos_length)
-                        all_w = unpack('<8H', src.read(16))  # 8 uint16 weights
-                        all_i = list(src.read(8))            # 8 uint8 indices
-                        orig_stride32_data.append((all_w, all_i))
-            elif export_weights and stride not in (20, 36, 40, 44):
-                # else branch strides (12, 16 etc): wc = (stride - pos_length) / 2
-                # weights are uint8, indices are uint8
-                wc = int(weight_bytes_per_vert / 2)
-                orig_slot_indices = []
-                with open(src_path, 'rb') as src:
-                    for vi in range(lod.vertex_count):
-                        src.seek(abs_voa_w + vi * stride + pos_length + wc)
-                        orig_slot_indices.append(list(src.read(wc)))
+            elif export_weights and len(data.vertices) == lod.vertex_count:
+                if stride == 32:
+                    orig_stride32_data = []
+                    with open(src_path, 'rb') as src:
+                        for vi in range(lod.vertex_count):
+                            src.seek(abs_voa_w + vi * stride + pos_length)
+                            all_w = unpack('<8H', src.read(16))  # 8 uint16 weights
+                            all_i = list(src.read(8))            # 8 uint8 indices
+                            orig_stride32_data.append((all_w, all_i))
+                elif stride not in (20, 36, 40, 44):
+                    # else branch strides (12, 16 etc): wc = (stride - pos_length) / 2
+                    # weights are uint8, indices are uint8
+                    wc = int(weight_bytes_per_vert / 2)
+                    orig_slot_indices = []
+                    with open(src_path, 'rb') as src:
+                        for vi in range(lod.vertex_count):
+                            src.seek(abs_voa_w + vi * stride + pos_length + wc)
+                            orig_slot_indices.append(list(src.read(wc)))
 
             for vi, v in enumerate(bm.verts):
                 stride_start = f.tell()
@@ -1813,7 +1823,7 @@ class BlenderMeshExporter:
                     if orig_slot_indices is not None:
                         # Preserve original slot structure
                         remaining = {s: w for s, w in raw_weights}
-                        slot_idxs = orig_slot_indices[min(vi, len(orig_slot_indices) - 1)]
+                        slot_idxs = orig_slot_indices[vi]
                         for slot_bone in slot_idxs:
                             w = remaining.pop(slot_bone, 0.0)
                             f.write(bp.uint8(max(0, min(int(round(w * 255)), 255))))
@@ -1914,6 +1924,7 @@ class BlenderMeshExporter:
                 orig_nw       = []
                 orig_tangents = []
                 orig_colors   = []  # list of raw 4*color_count byte chunks per vertex
+                orig_uvs      = []  # list of raw 4*uv_count byte chunks per vertex
                 normals_base  = 8 if mesh.normal_type == 0 else 28
                 cc = mesh.color_count if mesh.normal_type == 0 else 0
                 for ni in range(orig_vc_src):
@@ -1921,10 +1932,13 @@ class BlenderMeshExporter:
                     # Layout (normal_type=0): color(4*cc) | normal(4) | tangent(4) | UV
                     normal_off  = off + 4 * cc
                     tangent_off = normal_off + 4
+                    uv_off      = tangent_off + 4
                     orig_nw.append(unpack('<b', orig_file_bytes[normal_off+3:normal_off+4])[0])
                     orig_tangents.append(orig_file_bytes[tangent_off:tangent_off+4])
                     if mesh.color_count > 0:
                         orig_colors.append(orig_file_bytes[off:off + 4 * mesh.color_count])
+                    if mesh.uv_count > 0:
+                        orig_uvs.append(orig_file_bytes[uv_off:uv_off + 4 * mesh.uv_count])
 
                 # Build per-vertex source index using mmb_vertex_order attribute if present
                 orig_idx_attr = data.attributes.get("mmb_vertex_order")
@@ -1990,10 +2004,16 @@ class BlenderMeshExporter:
                         f.write(bp.X10Y10Z10W2(tangent[0] * -1, tangent[1], tangent[2], max(0, int(flip))))
 
                     # Write UVs
-                    for ui in range(mesh.uv_count):
-                        u, v_uv = all_uvs[ui][v.index]
-                        f.write(bp.int16_norm(max(-1.0, min(1.0, u))))
-                        f.write(bp.int16_norm(max(-1.0, min(1.0, v_uv))))
+                    if mesh.uv_count > 0:
+                        if SWOMT.export_uvs:
+                            for ui in range(mesh.uv_count):
+                                u, v_uv = all_uvs[ui][v.index]
+                                f.write(bp.int16_norm(max(-1.0, min(1.0, u))))
+                                f.write(bp.int16_norm(max(-1.0, min(1.0, v_uv))))
+                        elif orig_uvs and src_vi < len(orig_uvs):
+                            f.write(orig_uvs[src_vi])
+                        else:
+                            f.write(b'\x00' * (4 * mesh.uv_count))
 
             else:
                 # float format (normal_type == 1):
@@ -2020,10 +2040,16 @@ class BlenderMeshExporter:
                         for c in vertex_color:
                             f.write(bp.uint8_norm(c))
 
-                    for ui in range(mesh.uv_count):
-                        u, v_uv = all_uvs[ui][v.index]
-                        f.write(bp.int16_norm(max(-1.0, min(1.0, u))))
-                        f.write(bp.int16_norm(max(-1.0, min(1.0, v_uv))))
+                    if mesh.uv_count > 0:
+                        if SWOMT.export_uvs:
+                            for ui in range(mesh.uv_count):
+                                u, v_uv = all_uvs[ui][v.index]
+                                f.write(bp.int16_norm(max(-1.0, min(1.0, u))))
+                                f.write(bp.int16_norm(max(-1.0, min(1.0, v_uv))))
+                        elif orig_uvs and src_vi < len(orig_uvs):
+                            f.write(orig_uvs[src_vi])
+                        else:
+                            f.write(b'\x00' * (4 * mesh.uv_count))
 
             bm.free()
 
@@ -2157,17 +2183,17 @@ def _auto_load_mmb(self, context):
         print(f"MMB auto-load failed: {e}")
 
 def _vert_count_changed():
-    """Return True if any imported LOD0 Blender object has a different vert count than the MMB."""
+    """Return True if any imported LOD Blender object has a different vert count than the MMB."""
     if asset is None:
         return False
     for m in asset.meshes:
-        if not m.lods:
-            continue
-        lod = m.lods[0]
-        obj_name = lod.blender_obj_name or f"{m.name}_LOD0"
-        obj = bpy.data.objects.get(obj_name)
-        if obj is not None and len(obj.data.vertices) != lod.vertex_count:
-            return True
+        for li, lod in enumerate(m.lods):
+            if lod.vertex_count == 0:
+                continue
+            obj_name = lod.blender_obj_name or f"{m.name}_LOD{li}"
+            obj = bpy.data.objects.get(obj_name)
+            if obj is not None and len(obj.data.vertices) != lod.vertex_count:
+                return True
     return False
 
 def _on_compute_normals_on_export_update(self, context):
@@ -2176,8 +2202,23 @@ def _on_compute_normals_on_export_update(self, context):
         self.export_normals = True
 
 def _on_export_normals_update(self, context):
-    """Prevent unchecking export_normals when vert count has changed."""
-    if not self.export_normals and _vert_count_changed():
+    """Auto-uncheck compute_normals_on_export, export_vertex_colors and export_uvs when export_normals is unchecked."""
+    if not self.export_normals:
+        if self.compute_normals_on_export:
+            self.compute_normals_on_export = False
+        if self.export_vertex_colors:
+            self.export_vertex_colors = False
+        if self.export_uvs:
+            self.export_uvs = False
+
+def _on_export_vertex_colors_update(self, context):
+    """Auto-enable export_normals when export_vertex_colors is checked."""
+    if self.export_vertex_colors:
+        self.export_normals = True
+
+def _on_export_uvs_update(self, context):
+    """Auto-enable export_normals when export_uvs is checked."""
+    if self.export_uvs:
         self.export_normals = True
 
 class SWOMTSettings(bpy.types.PropertyGroup):
@@ -2192,19 +2233,32 @@ class SWOMTSettings(bpy.types.PropertyGroup):
     )
     export_normals: bpy.props.BoolProperty(
         name="Export Normals",
-        default=False,
+        default=True,
         description="Write normals into the exported file. When unchecked, the original normals from the .mmb are preserved. Automatically forced on when vert count has changed.",
         update=_on_export_normals_update,
     )
     export_weights: bpy.props.BoolProperty(
         name="Export Weights",
-        default=False,
+        default=True,
         description="Write bone weights into the exported file. When unchecked, the original weights from the .mmb are preserved. Automatically forced on when vert count has changed.",
     )
     export_vertex_colors: bpy.props.BoolProperty(
         name="Export Vertex Colors",
-        default=False,
+        default=True,
         description="Write vertex colors from Blender into the exported file. When unchecked, the original vertex colors from the .mmb are preserved.",
+        update=_on_export_vertex_colors_update,
+    )
+
+    export_uvs: bpy.props.BoolProperty(
+        name="Export UVs",
+        default=True,
+        description="Write UV coordinates from Blender into the exported file. When unchecked, the original UVs from the .mmb are preserved.",
+        update=_on_export_uvs_update,
+    )
+
+    export_options_expanded: bpy.props.BoolProperty(
+        name="Export Options",
+        default=True,
     )
 
 # OPERATORS #
@@ -3197,57 +3251,7 @@ class SWOMTPanel(bpy.types.Panel):
         row.operator("object.compute_normals", text="Compute Normals", icon="NORMALS_FACE")
         row.operator("object.clear_custom_normals", text="Clear Normals", icon="REMOVE")
 
-class ComputeNormals(bpy.types.Operator):
-    """Compute normals for the selected mesh object (Original normals are preserved on export)"""
-    bl_idname = "object.compute_normals"
-    bl_label = "Compute Normals"
-
-    @classmethod
-    def poll(cls, context):
-        obj = context.active_object
-        return (
-                obj is not None and
-                obj.type == 'MESH' and
-                obj.select_get()
-        )
-
-    def execute(self, context):
-        obj = context.active_object
-        BME._compute_normals_for_object(obj)
-        self.report({'INFO'}, f"Computed normals for {obj.name}.")
-        return {'FINISHED'}
-
-class ClearNormals(bpy.types.Operator):
-    """Clear normals for the selected mesh object (Original normals are preserved on export)"""
-    bl_idname = "object.clear_custom_normals"
-    bl_label = "Clear Normals"
-
-    @classmethod
-    def poll(cls, context):
-        obj = context.active_object
-        return (
-                obj is not None and
-                obj.type == 'MESH' and
-                obj.select_get() and
-                obj.data.has_custom_normals
-        )
-
-    def execute(self, context):
-        bpy.ops.mesh.customdata_custom_splitnormals_clear()
-        return {'FINISHED'}
-
-class MeshPanel(bpy.types.Panel):
-    bl_label = "Mesh"
-    bl_idname = "OBJECT_PT_meshpanel"
-    bl_space_type = "PROPERTIES"
-    bl_region_type = "WINDOW"
-    bl_context = "scene"
-    bl_parent_id = "OBJECT_PT_swomtpanel"
-
-    def draw(self,context):
-        SWOMT = context.scene.SWOMT
-
-        layout = self.layout
+        layout.separator()
         row = layout.row()
         if asset:
             row.label(text=asset.name)
@@ -3259,10 +3263,9 @@ class MeshPanel(bpy.types.Panel):
                 for m in asset.meshes if m.lods
                 for lod_n in range(len(m.lods))
             )
-            # TODO: Need to fix for added verts - Currently exports incorrectly if vert count has changed
-            #gen_lods_row = layout.row()
-            #gen_lods_row.enabled = any_imported
-            #gen_lods_row.operator("object.generate_lods", text="Generate LODs", icon="MOD_DECIM")
+            gen_lods_row = layout.row()
+            gen_lods_row.enabled = any_imported
+            gen_lods_row.operator("object.generate_lods", text="Generate LODs", icon="MOD_DECIM")
             layout.separator()
             layout.label(text="Import", icon='IMPORT')
             imp_row = layout.row(align=True)
@@ -3277,24 +3280,33 @@ class MeshPanel(bpy.types.Panel):
             exp_row.scale_y = 1.5
             exp_row.enabled = any_imported
             exp_row.operator("object.export_all_lods", text="Export All LODs")
-            layout.prop(SWOMT, "compute_normals_on_export")
-            normals_row = layout.row()
+
+            # Export Options collapsible box
             forced = _vert_count_changed()
-            if forced:
-                normals_row.enabled = False
-                normals_row.prop(SWOMT, "export_normals")
-                normals_row.label(text="", icon='LOCKED')
-            else:
-                normals_row.prop(SWOMT, "export_normals")
-            weights_row = layout.row()
-            if forced:
-                weights_row.enabled = False
-                weights_row.prop(SWOMT, "export_weights")
-                weights_row.label(text="", icon='LOCKED')
-            else:
-                weights_row.prop(SWOMT, "export_weights")
-            layout.prop(SWOMT, "export_vertex_colors")
-            # Warn if vert count changed - The user should transfer weights from the original mesh before exporting.
+            box = layout.box()
+            row = box.row()
+            row.prop(SWOMT, "export_options_expanded",
+                     icon='TRIA_DOWN' if SWOMT.export_options_expanded else 'TRIA_RIGHT',
+                     icon_only=True, emboss=False)
+            row.label(text="Export Options")
+            if SWOMT.export_options_expanded:
+                box.prop(SWOMT, "compute_normals_on_export")
+                normals_row = box.row()
+                if forced:
+                    normals_row.enabled = False
+                    normals_row.prop(SWOMT, "export_normals")
+                    normals_row.label(text="", icon='LOCKED')
+                else:
+                    normals_row.prop(SWOMT, "export_normals")
+                weights_row = box.row()
+                if forced:
+                    weights_row.enabled = False
+                    weights_row.prop(SWOMT, "export_weights")
+                    weights_row.label(text="", icon='LOCKED')
+                else:
+                    weights_row.prop(SWOMT, "export_weights")
+                box.prop(SWOMT, "export_vertex_colors")
+                box.prop(SWOMT, "export_uvs")
             if forced:
                 warn_row = layout.row()
                 warn_row.label(text="Tip: Transfer Weights from original mesh", icon='INFO')
@@ -3358,6 +3370,45 @@ class MeshPanel(bpy.types.Panel):
                                 remap_op.slot_index = si
                                 if is_added:
                                     slot_row.enabled = False
+
+class ComputeNormals(bpy.types.Operator):
+    """Compute normals for the selected mesh object (Original normals are preserved on export)"""
+    bl_idname = "object.compute_normals"
+    bl_label = "Compute Normals"
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return (
+                obj is not None and
+                obj.type == 'MESH' and
+                obj.select_get()
+        )
+
+    def execute(self, context):
+        obj = context.active_object
+        BME._compute_normals_for_object(obj)
+        self.report({'INFO'}, f"Computed normals for {obj.name}.")
+        return {'FINISHED'}
+
+class ClearNormals(bpy.types.Operator):
+    """Clear normals for the selected mesh object (Original normals are preserved on export)"""
+    bl_idname = "object.clear_custom_normals"
+    bl_label = "Clear Normals"
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return (
+                obj is not None and
+                obj.type == 'MESH' and
+                obj.select_get() and
+                obj.data.has_custom_normals
+        )
+
+    def execute(self, context):
+        bpy.ops.mesh.customdata_custom_splitnormals_clear()
+        return {'FINISHED'}
 
 class CheckForUpdates(bpy.types.Operator):
     """Check GitHub for plugin updates"""
@@ -3562,7 +3613,6 @@ classes=[SWOMTSettings,
          CheckForUpdates,
          ApplyUpdate,
          SWOMTPanel,
-         MeshPanel,
          LoadMMB,
          ImportLOD,
          ExportLOD,
