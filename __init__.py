@@ -11,7 +11,7 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 38),
+    "version": (0, 1, 39),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 12, 13, 15, 16, 17.",
     "category": "Import-Export"
@@ -679,13 +679,13 @@ class SkeletalMeshAsset(Asset):
                     else:  # normal_type == 1
                         uv_field_off = 4 * color_count + 12 + 12 + 4 + index * 4
                     start_pos = f.tell()
-                    max_u_raw = 0
+                    use_compact = True
                     for i in range(self.vertex_count):
                         f.seek(start_pos + i * stride + uv_field_off)
-                        raw_u = unpack('<H', f.read(2))[0]
-                        if raw_u > max_u_raw:
-                            max_u_raw = raw_u
-                    use_compact = max_u_raw <= 8191
+                        raw_u = unpack('<h', f.read(2))[0]  # signed
+                        if abs(raw_u) > 8191:
+                            use_compact = False
+                            break
                     f.seek(start_pos)
 
                 for i in range(self.vertex_count):
@@ -1148,6 +1148,20 @@ class BlenderMeshImporter:
         bm.to_mesh(obj_data)
         bm.free()
         obj_data.update()
+
+        # Store per-UV-layer centred flags as mesh attributes so export can
+        # reverse the correct transform without re-detecting from Blender values.
+        for uv_index in range(mesh.uv_count):
+            uvs = lod.get_uvs(raw_mesh_file, uv_index)
+            v_vals = [uvs[i][1] for i in range(len(uvs))]
+            u_vals = [uvs[i][0] for i in range(len(uvs))]
+            centred_v = min(v_vals) < 0 and max(v_vals) > 0 and abs(min(v_vals) + max(v_vals)) < 0.15
+            centred_u = min(u_vals) < -0.1 and abs(min(u_vals) + max(u_vals)) < 0.15
+            cu_attr = obj_data.attributes.new(name=f'mmb_uv{uv_index}_centred_u', type='INT', domain='POINT')
+            cv_attr = obj_data.attributes.new(name=f'mmb_uv{uv_index}_centred_v', type='INT', domain='POINT')
+            for vi in range(len(obj_data.vertices)):
+                cu_attr.data[vi].value = 1 if centred_u else 0
+                cv_attr.data[vi].value = 1 if centred_v else 0
 
         # Import Colors
         # Written directly to obj_data.attributes (POINT domain, FLOAT_COLOR type) rather
@@ -1986,13 +2000,20 @@ class BlenderMeshExporter:
             uv_centred_u = []
             uv_centred_v = []
             for ui in range(mesh.uv_count):
-                if ui < len(uv_layers):
+                # Prefer attributes
+                cu_attr = data.attributes.get(f'mmb_uv{ui}_centred_u')
+                cv_attr = data.attributes.get(f'mmb_uv{ui}_centred_v')
+                if cu_attr is not None and cv_attr is not None:
+                    uv_centred_u.append(bool(cu_attr.data[0].value))
+                    uv_centred_v.append(bool(cv_attr.data[0].value))
+                elif ui < len(uv_layers):
+                    # Fallback
                     u_vals = [loop[uv_layers[ui]].uv[0] for bface in bm.faces for loop in bface.loops]
                     v_vals = [loop[uv_layers[ui]].uv[1] for bface in bm.faces for loop in bface.loops]
                     u_min, u_max = min(u_vals), max(u_vals)
                     v_min, v_max = min(v_vals), max(v_vals)
-                    uv_centred_u.append(abs((u_min + u_max) / 2.0 - 0.5) < 0.15 and u_min < 0.15 and (u_max - u_min) > 0.5)
-                    uv_centred_v.append(abs((v_min + v_max) / 2.0 - 0.5) < 0.1 and v_min < 0.15)
+                    uv_centred_u.append(u_min < -0.05 and abs((u_min + u_max) / 2.0) < 0.15)
+                    uv_centred_v.append(v_min < -0.05 and abs((v_min + v_max) / 2.0 - 0.5) < 0.15)
                 else:
                     uv_centred_u.append(False)
                     uv_centred_v.append(False)
@@ -2046,45 +2067,36 @@ class BlenderMeshExporter:
                 orig_colors   = []  # list of raw 4*color_count byte chunks per vertex
                 orig_uvs      = []  # list of raw 4*uv_count byte chunks per vertex
                 orig_trailing = []  # any extra bytes after color+normal+tangent+UVs
-                if mesh.normal_type == 0:
-                    # color(4*cc) | normal(4) | tangent(4) | UV
-                    cc = mesh.color_count
-                    uv_off_in_stride = 4 * cc + 4 + 4
-                    written_per_vert = 4 * cc + 4 + 4 + 4 * mesh.uv_count
-                    trailing_per_vert = ns - written_per_vert  # extra bytes beyond known fields
-                    for ni in range(orig_vc_src):
-                        off = abs_vob_src + ni * ns
-                        normal_off  = off + 4 * cc
-                        tangent_off = normal_off + 4
-                        uv_off      = tangent_off + 4
-                        orig_nw.append(unpack('<b', orig_file_bytes[normal_off+3:normal_off+4])[0])
-                        orig_tangents.append(orig_file_bytes[tangent_off:tangent_off+4])
-                        if mesh.color_count > 0:
-                            orig_colors.append(orig_file_bytes[off:off + 4 * mesh.color_count])
-                        if mesh.uv_count > 0:
-                            orig_uvs.append(orig_file_bytes[uv_off:uv_off + 4 * mesh.uv_count])
-                        if trailing_per_vert > 0:
-                            trail_off = off + written_per_vert
-                            orig_trailing.append(orig_file_bytes[trail_off:trail_off + trailing_per_vert])
-                else:
-                    # normal_type 1: color(4*cc) | normal(12) | tangent(12) | sign(4) | UV
-                    color_off_in_stride = 0
-                    uv_off_in_stride = 4 * mesh.color_count + 12 + 12 + 4
-                    for ni in range(orig_vc_src):
-                        off = abs_vob_src + ni * ns
-                        if mesh.color_count > 0:
-                            orig_colors.append(orig_file_bytes[off + color_off_in_stride:off + color_off_in_stride + 4 * mesh.color_count])
-                        if mesh.uv_count > 0:
-                            orig_uvs.append(orig_file_bytes[off + uv_off_in_stride:off + uv_off_in_stride + 4 * mesh.uv_count])
 
-                # Detect compact UV encoding
+                # color(4*cc) | normal(4) | tangent(4) | UV
+                cc = mesh.color_count
+                uv_off_in_stride = 4 * cc + 4 + 4
+                written_per_vert = 4 * cc + 4 + 4 + 4 * mesh.uv_count
+                trailing_per_vert = ns - written_per_vert
+                for ni in range(orig_vc_src):
+                    off = abs_vob_src + ni * ns
+                    normal_off = off + 4 * cc
+                    tangent_off = normal_off + 4
+                    uv_off = tangent_off + 4
+                    orig_nw.append(unpack('<b', orig_file_bytes[normal_off + 3:normal_off + 4])[0])
+                    orig_tangents.append(orig_file_bytes[tangent_off:tangent_off + 4])
+                    if mesh.color_count > 0:
+                        orig_colors.append(orig_file_bytes[off:off + 4 * mesh.color_count])
+                    if mesh.uv_count > 0:
+                        orig_uvs.append(orig_file_bytes[uv_off:uv_off + 4 * mesh.uv_count])
+                    if trailing_per_vert > 0:
+                        trail_off = off + written_per_vert
+                        orig_trailing.append(orig_file_bytes[trail_off:trail_off + trailing_per_vert])
+                # Detect compact UVs
                 uv_compact = False
                 if mesh.uv_count > 0 and orig_vc_src > 0:
-                    max_u_raw = max(
-                        unpack('<H', orig_file_bytes[abs_vob_src + ni*ns + uv_off_in_stride : abs_vob_src + ni*ns + uv_off_in_stride + 2])[0]
-                        for ni in range(orig_vc_src)
-                    )
-                    uv_compact = max_u_raw <= 8191
+                    uv_compact = True
+                    for ni in range(orig_vc_src):
+                        raw_u = unpack('<h', orig_file_bytes[abs_vob_src + ni * ns + uv_off_in_stride: abs_vob_src + ni * ns + uv_off_in_stride + 2])[0]
+                        if abs(raw_u) > 8191:
+                            uv_compact = False
+                            break
+                print(f"[AFoPMT] {mesh.name} LOD{lod_index} (nt=0): uv_compact={uv_compact} uv_off={uv_off_in_stride} ns={ns} cc={cc} first_raw_u={unpack('<h', orig_file_bytes[abs_vob_src + uv_off_in_stride : abs_vob_src + uv_off_in_stride + 2])[0] if orig_vc_src > 0 else 'N/A'}")
 
                 # Build per-vertex source index using mmb_vertex_order attribute if present
                 orig_idx_attr = data.attributes.get("mmb_vertex_order")
@@ -2196,11 +2208,12 @@ class BlenderMeshExporter:
                 # Detect compact UV encoding
                 uv_compact = False
                 if mesh.uv_count > 0 and orig_vc_src > 0:
-                    max_u_raw = max(
-                        unpack('<H', orig_file_bytes[abs_vob_src + ni*ns + uv_off_in_stride : abs_vob_src + ni*ns + uv_off_in_stride + 2])[0]
-                        for ni in range(orig_vc_src)
-                    )
-                    uv_compact = max_u_raw <= 8191
+                    uv_compact = True
+                    for ni in range(orig_vc_src):
+                        raw_u = unpack('<h', orig_file_bytes[abs_vob_src + ni*ns + uv_off_in_stride : abs_vob_src + ni*ns + uv_off_in_stride + 2])[0]
+                        if abs(raw_u) > 8191:
+                            uv_compact = False
+                            break
                 for ni in range(orig_vc_src):
                     off = abs_vob_src + ni * ns
                     if mesh.color_count > 0:
