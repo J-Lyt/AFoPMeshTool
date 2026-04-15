@@ -11,7 +11,7 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 36),
+    "version": (0, 1, 37),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 12, 13, 15, 16, 17.",
     "category": "Import-Export"
@@ -629,6 +629,8 @@ class SkeletalMeshAsset(Asset):
                         v = Vector((x*w, y*w, z*w)).normalized()
                         v.negate()  # TODO not sure about this
                     elif self.parent_mesh.normal_type == 1:
+                        # Layout: color(4*cc) | normal(12f) | tangent(12f) | sign(4f) | UV
+                        f.seek(4 * color_count, 1)  # skip colors before float normal
                         self._all_w_zero = False
                         raw_x = br.float(f)
                         if raw_x < _raw_x_min:
@@ -654,12 +656,17 @@ class SkeletalMeshAsset(Asset):
                 uvs = []
                 stride = self.parent_mesh.normals_stride
                 color_count = self.parent_mesh.color_count
+                normal_type = self.parent_mesh.normal_type
                 f = raw_mesh_file
                 f.seek(self.vertex_data_offset_b)
                 for i in range(self.vertex_count):
                     stride_start = f.tell()
-                    # Layout: color(4*color_count) | normal(4) | tangent(4) | UV(4*uv_count)
-                    f.seek(4 * color_count + 4 + 4, 1)  # skip color + normal + tangent
+                    if normal_type == 0:
+                        # color(4*cc) | normal(4) | tangent(4) | UV(4*uv)
+                        f.seek(4 * color_count + 4 + 4, 1)
+                    elif normal_type == 1:
+                        # color(4*cc) | normal(12) | tangent(12) | sign(4) | UV(4*uv)
+                        f.seek(4 * color_count + 12 + 12 + 4, 1)
                     f.seek(index * 4, 1)  # skip previous uv sets
                     u = br.int16_norm(f)
                     v = br.int16_norm(f)
@@ -675,13 +682,17 @@ class SkeletalMeshAsset(Asset):
                """
                 colors = []
                 stride = self.parent_mesh.normals_stride
+                normal_type = self.parent_mesh.normal_type
                 f = raw_mesh_file
                 f.seek(self.vertex_data_offset_b)
                 for i in range(self.vertex_count):
                     stride_start = f.tell()
-                    # Layout: color(4*color_count) | tangent(4) | normal(4) | UV(4*uv_count)
-                    # Color is first - seek past previous color sets only
-                    f.seek(index * 4, 1)
+                    if normal_type == 0:
+                        # color(4*cc) | normal | tangent | UV
+                        f.seek(index * 4, 1)
+                    elif normal_type == 1:
+                        # color(4*cc) | normal(12) | tangent(12) | sign(4) | UV
+                        f.seek(index * 4, 1)
                     r = br.uint8_norm(f)
                     g = br.uint8_norm(f)
                     b = br.uint8_norm(f)
@@ -901,10 +912,15 @@ class SkeletalMeshAsset(Asset):
 
             # --- Normal type detection ---
             # normals_base = normals_stride - 4*uv_count - 4*color_count
-            # normals_base > 8 -> normal_type 1 (float normals, 28-byte block)
+            # normals_base > 8 -> normal_type 1 or 2 (float normals)
             # normals_base <= 8 -> normal_type 0 (int8_norm, 4-byte block)
+            # normal_type 1: float normal(12) + tangent(12) + sign(4) = 28 bytes
             _normals_base = self.normals_stride - 4 * self.uv_count - 4 * self.color_count
-            self.normal_type = 1 if _normals_base > 8 else 0
+            if _normals_base == 28:
+                self.normal_type = 1  # float normal(12) + tangent(12) + sign(4) = 28 bytes fixed
+            else:
+                self.normal_type = 0  # int8_norm normal(4) + tangent(4) = 8 bytes fixed
+            # Layout for both types: color(4*cc) first, then normal block, then UV(4*uv)
 
             # --- Position type detection ---
             # Uses the same normals_base formula:
@@ -928,7 +944,8 @@ class SkeletalMeshAsset(Asset):
                   f'\nVertex Stride: {self.vertex_stride}'
                   f'\nNormals Stride: {self.normals_stride}'
                   f'\nUV Count: {self.uv_count}'
-                  f'\nColor Count: {self.color_count}')
+                  f'\nColor Count: {self.color_count}'
+                  f'\nNormal Type: {self.normal_type}')
 
             # --- Post-stride skip ---
             # v17 has 4 extra bytes here compared to other versions
@@ -1128,7 +1145,7 @@ class BlenderMeshImporter:
             # or normals that point consistently opposite to faces (avg_dot < -0.1) are degenerate.
             bad_correlation = abs(avg_dot) < 0.1
 
-            degenerate = all_w_zero or tangent_space or all_same_dir or mostly_zero or bad_correlation
+            degenerate = all_w_zero or all_same_dir or mostly_zero or bad_correlation
 
             if not degenerate:
                 print(f"[AFoPMT] {obj.name}: Importing normals from file")
@@ -1136,7 +1153,6 @@ class BlenderMeshImporter:
             else:
                 reasons = []
                 if all_w_zero: reasons.append("All w=0 (e.g. VAT Data)")
-                if tangent_space: reasons.append("Tangent-Space Encoding (x axis non-negative)")
                 if all_same_dir: reasons.append("All Same Direction")
                 if mostly_zero: reasons.append(f"Mostly Zero ({zero_count}/{len(computed_normals)})")
                 if bad_correlation: reasons.append(f"No Face Correlation (avg_dot={avg_dot:.3f})")
@@ -1185,7 +1201,7 @@ class BlenderMeshImporter:
             parent_index = b.parent_index
             if b.parent_index == 65535:
                 parent_index = -1
-            bone.parent = _armature.edit_bones[parent_index]
+            bone.parent = _armature.edit_bones[parent_index] if parent_index != -1 else None
             bone.tail = Vector([0.0,0.0,0.1])
             parent_matrix = Matrix()
             if bone.parent:
@@ -1196,7 +1212,11 @@ class BlenderMeshImporter:
         bpy.ops.object.mode_set(mode='OBJECT')
         return _obj
     @staticmethod
-    def parent_obj_to_armature(obj,armature):
+    def parent_obj_to_armature(obj, armature, mesh):
+        # Skip the armature modifier for meshes with no bone slots.
+        if not mesh.mesh_bones:
+            obj.parent = armature
+            return
         obj.modifiers.new(name='Armature', type='ARMATURE')
         obj.modifiers['Armature'].object = armature
         obj.parent = armature
@@ -1656,13 +1676,36 @@ class BlenderMeshExporter:
 
             if mesh.position_type == 0:
                 original_w = []
+                # Compute the correct absolute start of the vertex array.
+                # lod.data_offset is the start of the whole LOD block; the vertex
+                # positions begin at vertex_data_offset_a which is stored relative
+                # to the mesh block.  Using lod.data_offset + 6 directly reads from
+                # the wrong place (face buffer or another LOD), producing garbage
+                # scale values and causing in-game vertex stretching.
+                higher_size_w = sum(
+                    mesh.lods[li].data_size
+                    for li in range(lod_index + 1, len(mesh.lods))
+                )
+                intra_voa_w = lod.vertex_data_offset_a - higher_size_w
+                abs_voa_w_read = lod.data_offset + intra_voa_w
                 with open(src_path, 'rb') as src:
-                    src.seek(lod.data_offset + 6)
+                    src.seek(abs_voa_w_read + 6)  # skip x,y,z int16s to reach w
                     for _ in range(lod.vertex_count):
                         original_w.append(unpack('<h', src.read(2))[0])
                         src.seek(stride - 2, 1)
                 if len(data.vertices) != lod.vertex_count:
-                    fallback_scale = int(sum(abs(w) for w in original_w) / len(original_w)) if original_w else 1
+                    # Replacement mesh: derive a scale from the new mesh's actual
+                    # extents so every coordinate fits in [-scale, scale] without
+                    # overflow or silent skipping.  Averaging the original w values
+                    # is unreliable when the replacement is a different size/position.
+                    if data.vertices:
+                        max_coord = max(
+                            max(abs(v.co.x), abs(v.co.y), abs(v.co.z))
+                            for v in data.vertices
+                        )
+                    else:
+                        max_coord = 1.0
+                    fallback_scale = max(1, int(max_coord) + 1)
                     original_w = [fallback_scale] * len(data.vertices)
             else:
                 original_w = [None] * len(data.vertices)
@@ -1925,20 +1968,30 @@ class BlenderMeshExporter:
                 orig_tangents = []
                 orig_colors   = []  # list of raw 4*color_count byte chunks per vertex
                 orig_uvs      = []  # list of raw 4*uv_count byte chunks per vertex
-                normals_base  = 8 if mesh.normal_type == 0 else 28
-                cc = mesh.color_count if mesh.normal_type == 0 else 0
-                for ni in range(orig_vc_src):
-                    off = abs_vob_src + ni * ns
-                    # Layout (normal_type=0): color(4*cc) | normal(4) | tangent(4) | UV
-                    normal_off  = off + 4 * cc
-                    tangent_off = normal_off + 4
-                    uv_off      = tangent_off + 4
-                    orig_nw.append(unpack('<b', orig_file_bytes[normal_off+3:normal_off+4])[0])
-                    orig_tangents.append(orig_file_bytes[tangent_off:tangent_off+4])
-                    if mesh.color_count > 0:
-                        orig_colors.append(orig_file_bytes[off:off + 4 * mesh.color_count])
-                    if mesh.uv_count > 0:
-                        orig_uvs.append(orig_file_bytes[uv_off:uv_off + 4 * mesh.uv_count])
+                if mesh.normal_type == 0:
+                    # color(4*cc) | normal(4) | tangent(4) | UV
+                    cc = mesh.color_count
+                    for ni in range(orig_vc_src):
+                        off = abs_vob_src + ni * ns
+                        normal_off  = off + 4 * cc
+                        tangent_off = normal_off + 4
+                        uv_off      = tangent_off + 4
+                        orig_nw.append(unpack('<b', orig_file_bytes[normal_off+3:normal_off+4])[0])
+                        orig_tangents.append(orig_file_bytes[tangent_off:tangent_off+4])
+                        if mesh.color_count > 0:
+                            orig_colors.append(orig_file_bytes[off:off + 4 * mesh.color_count])
+                        if mesh.uv_count > 0:
+                            orig_uvs.append(orig_file_bytes[uv_off:uv_off + 4 * mesh.uv_count])
+                else:
+                    # normal_type 1: color(4*cc) | normal(12) | tangent(12) | sign(4) | UV
+                    color_off_in_stride = 0
+                    uv_off_in_stride    = 4 * mesh.color_count + 12 + 12 + 4
+                    for ni in range(orig_vc_src):
+                        off = abs_vob_src + ni * ns
+                        if mesh.color_count > 0:
+                            orig_colors.append(orig_file_bytes[off + color_off_in_stride:off + color_off_in_stride + 4 * mesh.color_count])
+                        if mesh.uv_count > 0:
+                            orig_uvs.append(orig_file_bytes[off + uv_off_in_stride:off + uv_off_in_stride + 4 * mesh.uv_count])
 
                 # Build per-vertex source index using mmb_vertex_order attribute if present
                 orig_idx_attr = data.attributes.get("mmb_vertex_order")
@@ -2016,16 +2069,54 @@ class BlenderMeshExporter:
                             f.write(b'\x00' * (4 * mesh.uv_count))
 
             else:
-                # float format (normal_type == 1):
-                #   12 bytes: normal as 3 floats
-                #   12 bytes: tangent as 3 floats
-                #    4 bytes: bitangent sign as float
-                #   color_count * 4 bytes: vertex colors as uint8_norm RGBA
-                #   uv_count * 4 bytes: UVs as pairs of int16_norm
-                for v in data.vertices:
+                # float format (normal_type == 1 or 2).
+                # normal_type 1: color(4*cc) | normal(12f) | tangent(12f) | sign(4f) | UV(4*uv)
+                SWOMT = bpy.context.scene.SWOMT
+                higher_size = sum(
+                    mesh.lods[li].data_size
+                    for li in range(lod_index + 1, len(mesh.lods))
+                )
+                vert_count_unchanged = len(data.vertices) == lod.vertex_count
+                with open(SWOMT.AssetPath, 'rb') as orig_src:
+                    orig_file_bytes = orig_src.read()
+                orig_do  = unpack('<I', orig_file_bytes[lod.data_offset_file_pos:lod.data_offset_file_pos+4])[0]
+                orig_vob = unpack('<I', orig_file_bytes[lod.start_offset+16:lod.start_offset+20])[0]
+                abs_vob_src = orig_do + (orig_vob - higher_size)
+                orig_vc_src = unpack('<I', orig_file_bytes[lod.start_offset:lod.start_offset+4])[0]
+                ns = mesh.normals_stride
+
+                orig_colors = []
+                orig_uvs    = []
+                # color(4*cc) | normal(12) | tangent(12) | sign(4) | UV
+                color_off_in_stride = 0
+                uv_off_in_stride    = 4 * mesh.color_count + 12 + 12 + 4
+                for ni in range(orig_vc_src):
+                    off = abs_vob_src + ni * ns
+                    if mesh.color_count > 0:
+                        orig_colors.append(orig_file_bytes[off + color_off_in_stride:off + color_off_in_stride + 4 * mesh.color_count])
+                    if mesh.uv_count > 0:
+                        orig_uvs.append(orig_file_bytes[off + uv_off_in_stride:off + uv_off_in_stride + 4 * mesh.uv_count])
+
+                orig_idx_attr = data.attributes.get("mmb_vertex_order")
+                orig_idx_for_vi = ({vi: orig_idx_attr.data[vi].value for vi in range(len(data.vertices))}
+                                   if orig_idx_attr is not None else None)
+
+                for vi, v in enumerate(data.vertices):
                     normal  = NTB[v.index][0]
                     tangent = NTB[v.index][1]
                     v_flip  = NTB[v.index][2]
+                    src_vi  = min(orig_idx_for_vi.get(vi, vi) if orig_idx_for_vi else vi, orig_vc_src - 1)
+
+                    # Colors first
+                    if mesh.color_count > 0:
+                        if SWOMT.export_vertex_colors and color_layer is not None:
+                            vertex_color = bm.verts[v.index][color_layer]
+                            for c in vertex_color:
+                                f.write(bp.uint8_norm(c))
+                        elif orig_colors and src_vi < len(orig_colors):
+                            f.write(orig_colors[src_vi])
+                        else:
+                            f.write(b'\x00' * (4 * mesh.color_count))
 
                     f.write(bp.float(normal[0] * -1))
                     f.write(bp.float(normal[1]))
@@ -2035,11 +2126,7 @@ class BlenderMeshExporter:
                     f.write(bp.float(tangent[2]))
                     f.write(bp.float(v_flip))
 
-                    if color_layer is not None:
-                        vertex_color = bm.verts[v.index][color_layer]
-                        for c in vertex_color:
-                            f.write(bp.uint8_norm(c))
-
+                    # UVs
                     if mesh.uv_count > 0:
                         if SWOMT.export_uvs:
                             for ui in range(mesh.uv_count):
@@ -2322,7 +2409,7 @@ class ImportLOD(bpy.types.Operator):
                               lod_index=lod.index)
         is_new_armature = bpy.data.objects.find(sk_mesh.name) == -1
         armature = BMI.find_or_create_skeleton(sk_mesh)
-        BMI.parent_obj_to_armature(obj,armature)
+        BMI.parent_obj_to_armature(obj, armature, mesh)
         if is_new_armature:
             BMI.rotate_model(obj,armature)
         return {'FINISHED'}
@@ -3081,7 +3168,7 @@ def _import_all_lods(context, lod_n):
                               skeletal_mesh=sk_mesh,
                               mesh=mesh,
                               lod_index=lod.index)
-        BMI.parent_obj_to_armature(obj, armature)
+        BMI.parent_obj_to_armature(obj, armature, mesh)
         last_obj = obj
     if is_new_armature and last_obj is not None:
         BMI.rotate_model(last_obj, armature)
@@ -3280,6 +3367,7 @@ class SWOMTPanel(bpy.types.Panel):
             exp_row.scale_y = 1.5
             exp_row.enabled = any_imported
             exp_row.operator("object.export_all_lods", text="Export All LODs")
+            layout.row().operator("object.bake_parent_inverse", text="Bake Parent Inverse", icon="ORIENTATION_PARENT")
 
             # Export Options collapsible box
             forced = _vert_count_changed()
@@ -3335,8 +3423,9 @@ class SWOMTPanel(bpy.types.Panel):
                         lod_import_button.lod_index = li
                         lod_import_button.mesh_index = mi
                         obj_name = l.blender_obj_name if l.blender_obj_name else f"{m.name}_LOD{li}"
+                        lod_obj = bpy.data.objects.get(obj_name)
                         lod_export_row = row.row()
-                        lod_export_row.enabled = bpy.data.objects.get(obj_name) is not None
+                        lod_export_row.enabled = lod_obj is not None
                         lod_export_button = lod_export_row.operator("object.export_lod")
                         lod_export_button.lod_index = li
                         lod_export_button.mesh_index = mi
@@ -3595,7 +3684,45 @@ class GenerateLODs(bpy.types.Operator):
 
         return {'FINISHED'}
 
+class BakeParentInverse(bpy.types.Operator):
+    """Bakes the parent inverse transform into the active mesh vertices and resets it to identity.
+    Select your replacement mesh, then click this before exporting.
+    Equivalent to: manually clearing parent inverse, counter-rotating, and applying."""
+    bl_idname = 'object.bake_parent_inverse'
+    bl_label = 'Bake Parent Inverse'
 
+    obj_name: bpy.props.StringProperty()
+
+    @classmethod
+    def poll(cls, context):
+        return True
+
+    def execute(self, context):
+        # Try obj_name first, fall back to view_layer active object
+        obj = bpy.data.objects.get(self.obj_name) if self.obj_name else None
+        if obj is None:
+            obj = context.view_layer.objects.active
+        if obj is None or obj.type != 'MESH':
+            self.report({'ERROR'}, "No mesh object is active. Select your replacement mesh first.")
+            return {'CANCELLED'}
+
+        pi = obj.matrix_parent_inverse
+        if all(abs(pi[i][j] - (1.0 if i == j else 0.0)) < 1e-6 for i in range(4) for j in range(4)):
+            self.report({'INFO'}, f"'{obj.name}' parent inverse is already identity — nothing to do.")
+            return {'FINISHED'}
+
+        # Apply the parent inverse into each vertex position.
+        # This is the same as: Object > Apply > Parent Inverse (not available as a standard op).
+        for v in obj.data.vertices:
+            v.co = pi @ v.co
+
+        # Reset matrix_parent_inverse to identity so future exports are clean.
+        obj.matrix_parent_inverse = Matrix.Identity(4)
+
+        obj.data.update()
+        self.report({'INFO'}, f"Parent inverse baked into '{obj.name}' and reset to identity.")
+        return {'FINISHED'}
+        
 classes=[SWOMTSettings,
          BrowseMMBFile,
          ComputeNormals,
@@ -3619,7 +3746,8 @@ classes=[SWOMTSettings,
          RenameMesh,
          SelectMGraphObject,
          RenameMMBFile,
-         SelectMGraphObjectFilePatch]
+         SelectMGraphObjectFilePatch,
+         BakeParentInverse]
 
 def register():
     for c in classes:
