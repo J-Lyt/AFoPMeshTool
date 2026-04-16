@@ -2128,6 +2128,9 @@ class BlenderMeshExporter:
 
             color_layer = bm.verts.layers.float_color.get("Color_0")
 
+            SWOMT = bpy.context.scene.SWOMT
+            export_uvs = SWOMT.export_uvs or _vert_count_changed()
+            
             if mesh.normal_type == 0:
                 # int8_norm format:
                 #   4 bytes: normal as (x, y, z) int8_norm + w int8 sign (always -1)
@@ -2256,7 +2259,7 @@ class BlenderMeshExporter:
 
                     # Write UVs
                     if mesh.uv_count > 0:
-                        if SWOMT.export_uvs:
+                        if export_uvs:
                             for ui in range(mesh.uv_count):
                                 u, v_uv = all_uvs[ui][v.index]
                                 if uv_compact:
@@ -2345,7 +2348,7 @@ class BlenderMeshExporter:
 
                     # UVs
                     if mesh.uv_count > 0:
-                        if SWOMT.export_uvs:
+                        if export_uvs:
                             for ui in range(mesh.uv_count):
                                 u, v_uv = all_uvs[ui][v.index]
                                 if uv_compact:
@@ -2552,18 +2555,16 @@ class SWOMTSettings(bpy.types.PropertyGroup):
     )
     export_vertex_colors: bpy.props.BoolProperty(
         name="Export Vertex Colors",
-        default=True,
+        default=False,
         description="Write vertex colors from Blender into the exported file. When unchecked, the original vertex colors from the .mmb are preserved.",
         update=_on_export_vertex_colors_update,
     )
-
     export_uvs: bpy.props.BoolProperty(
         name="Export UVs",
-        default=True,
-        description="Write UV coordinates from Blender into the exported file. When unchecked, the original UVs from the .mmb are preserved.",
+        default=False,
+        description="Write UV coordinates from Blender into the exported file. When unchecked, the original UVs from the .mmb are preserved. Automatically forced on when vert count has changed.",
         update=_on_export_uvs_update,
     )
-
     export_options_expanded: bpy.props.BoolProperty(
         name="Export Options",
         default=True,
@@ -3617,7 +3618,13 @@ class SWOMTPanel(bpy.types.Panel):
                 else:
                     weights_row.prop(SWOMT, "export_weights")
                 box.prop(SWOMT, "export_vertex_colors")
-                box.prop(SWOMT, "export_uvs")
+                uvs_row = box.row()
+                if forced:
+                    uvs_row.enabled = False
+                    uvs_row.prop(SWOMT, "export_uvs")
+                    uvs_row.label(text="", icon='LOCKED')
+                else:
+                    uvs_row.prop(SWOMT, "export_uvs")
             if forced:
                 warn_row = layout.row()
                 warn_row.label(text="Tip: Transfer Weights from original mesh", icon='INFO')
