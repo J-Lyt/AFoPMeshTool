@@ -1735,11 +1735,36 @@ class BlenderMeshExporter:
                 if skel_idx < len(asset.bones):
                     name_to_mesh_slot[asset.bones[skel_idx].name] = slot
 
-            # Map: Blender vertex group index -> mesh slot index
+            # Map: Blender vertex group index -> mesh slot index (matched by bone name)
             vgroup_to_mesh_slot = {}
             for vg in obj.vertex_groups:
                 if vg.name in name_to_mesh_slot:
                     vgroup_to_mesh_slot[vg.index] = name_to_mesh_slot[vg.name]
+
+            # Fallback: if no vertex groups matched by name (e.g. bone names differ between
+            # models), attempt to match by the numeric suffix of the group name against the
+            # mesh-slot index, then fall back to treating the group index itself as the mesh
+            # slot.  This prevents weights from being silently dropped on export.
+            if not vgroup_to_mesh_slot and obj.vertex_groups:
+                print(f"[AFoPMT] WARNING: No vertex groups on '{obj.name}' matched bone names "
+                      f"in mesh '{mesh.name}'. Attempting index-based fallback mapping.")
+                import re as _re
+                for vg in obj.vertex_groups:
+                    # Try to parse a trailing integer from the group name (e.g. "Bone_7" -> 7)
+                    m = _re.search(r'(\d+)$', vg.name)
+                    if m:
+                        slot = int(m.group(1))
+                    else:
+                        slot = vg.index
+                    if slot < len(mesh_bones):
+                        vgroup_to_mesh_slot[vg.index] = slot
+                if vgroup_to_mesh_slot:
+                    print(f"[AFoPMT] Index-based fallback produced {len(vgroup_to_mesh_slot)} "
+                          f"group mappings for '{obj.name}'.")
+                else:
+                    print(f"[AFoPMT] ERROR: Index-based fallback also failed for '{obj.name}'. "
+                          f"Weights will be zero. Check that vertex group names match skeleton "
+                          f"bone names or contain a bone index suffix.")
 
             # For int16 positions, read per-vertex w scale from the original source file.
             SWOMT = bpy.context.scene.SWOMT
@@ -1809,8 +1834,14 @@ class BlenderMeshExporter:
                     for vi in range(lod.vertex_count):
                         src.seek(abs_voa_w + vi * stride + pos_length)
                         orig_weight_bytes.append(src.read(weight_bytes_per_vert))
-            elif export_weights and len(data.vertices) == lod.vertex_count:
-                if stride == 32:
+            elif export_weights:
+                # Always read the original slot layout from the source file so we can
+                # preserve bone-slot order / secondary index data on export, regardless
+                # of whether the vertex count changed.  The per-vertex helper arrays are
+                # indexed by *original* vertex index and are only used when
+                # vert_count_matches is True inside the write loop (stride==32 path), or
+                # to supply the slot-index order for the else-stride path.
+                if stride == 32 and lod.vertex_count > 0:
                     orig_stride32_data = []
                     with open(src_path, 'rb') as src:
                         for vi in range(lod.vertex_count):
@@ -1818,7 +1849,7 @@ class BlenderMeshExporter:
                             all_w = unpack('<8H', src.read(16))  # 8 uint16 weights
                             all_i = list(src.read(8))            # 8 uint8 indices
                             orig_stride32_data.append((all_w, all_i))
-                elif stride not in (20, 36, 40, 44):
+                elif stride not in (20, 36, 40, 44) and lod.vertex_count > 0:
                     # else branch strides (12, 16 etc): wc = (stride - pos_length) / 2
                     # weights are uint8, indices are uint8
                     wc = int(weight_bytes_per_vert / 2)
@@ -1869,7 +1900,7 @@ class BlenderMeshExporter:
 
                 elif stride == 32:
                     vert_count_matches = len(data.vertices) == lod.vertex_count
-                    if orig_stride32_data is not None and vert_count_matches:
+                    if orig_stride32_data is not None and vert_count_matches and vi < len(orig_stride32_data):
                         # Vert count unchanged: preserve exact slot order from source.
                         orig_all_w, orig_all_i = orig_stride32_data[vi]
                         weight_slots = range(8) if sum(orig_all_w) == 32767 else range(4)
@@ -1938,7 +1969,11 @@ class BlenderMeshExporter:
                 else:
                     wc = int((stride - pos_length) / 2)
                     sw = raw_weights[:wc]
-                    if orig_slot_indices is not None:
+                    # Only use orig_slot_indices when this vertex index exists in the
+                    # original data. The replacement mesh may have more verts than the
+                    # original, so vi can exceed len(orig_slot_indices) and cause an
+                    # index-out-of-range crash.
+                    if orig_slot_indices is not None and vi < len(orig_slot_indices):
                         # Preserve original slot structure
                         remaining = {s: w for s, w in raw_weights}
                         slot_idxs = orig_slot_indices[vi]
@@ -1948,7 +1983,8 @@ class BlenderMeshExporter:
                         for slot_bone in slot_idxs:
                             f.write(bp.uint8(slot_bone))
                     else:
-                        # No original indices available - write Blender weights
+                        # Vert count changed or no original index entry for this vertex:
+                        # write Blender weights sorted by descending weight.
                         for i in range(wc):
                             if i < len(sw):
                                 f.write(bp.uint8(max(0, min(int(round(sw[i][1] * 255)), 255))))
