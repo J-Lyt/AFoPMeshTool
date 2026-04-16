@@ -1135,15 +1135,14 @@ class BlenderMeshImporter:
             v_vals = [uvs[i][1] for i in range(len(uvs))]
             u_vals = [uvs[i][0] for i in range(len(uvs))]
             v_min, v_max = min(v_vals), max(v_vals)
-            u_min, u_max = min(u_vals), max(u_vals)
-            centred_v = v_max > 0 and v_min < 0 and abs(v_min + v_max) < 0.15
-            centred_u = u_min < -0.1 and abs(u_min + u_max) < 0.15
+            centred_v = v_max > 0 and v_min < 0 and abs(v_min + v_max) < 0.15 and v_max < 0.6
+            centred_u = False # Imported raw; game maps [-1,1] directly to texture width
             uv_centred_flags.append((centred_u, centred_v))
             for finder, face in enumerate(bm.faces):
                 for lindex, loop in enumerate(face.loops):
                     v_index = loop.vert.index
                     u, v = uvs[v_index][0], uvs[v_index][1]
-                    u_out = (u + 1) / 2.0 if centred_u else u
+                    u_out = u
                     v_out = v + 0.5 if centred_v else v * -1 + 1
                     loop[uv_layer].uv = (u_out, v_out)
 
@@ -2005,19 +2004,20 @@ class BlenderMeshExporter:
                 # Prefer attributes
                 cu_attr = data.attributes.get(f'mmb_uv{ui}_centred_u')
                 cv_attr = data.attributes.get(f'mmb_uv{ui}_centred_v')
-                if cu_attr is not None and cv_attr is not None:
+                if cu_attr is not None:
                     uv_centred_u.append(bool(cu_attr.data[0].value))
+                elif ui < len(uv_layers):
+                    uv_centred_u.append(False)
+                else:
+                    uv_centred_u.append(False)
+                if cv_attr is not None:
                     uv_centred_v.append(bool(cv_attr.data[0].value))
                 elif ui < len(uv_layers):
                     # Fallback
-                    u_vals = [loop[uv_layers[ui]].uv[0] for bface in bm.faces for loop in bface.loops]
                     v_vals = [loop[uv_layers[ui]].uv[1] for bface in bm.faces for loop in bface.loops]
-                    u_min, u_max = min(u_vals), max(u_vals)
                     v_min, v_max = min(v_vals), max(v_vals)
-                    uv_centred_u.append(u_min < -0.05 and abs((u_min + u_max) / 2.0) < 0.15)
                     uv_centred_v.append(v_min < -0.05 and abs((v_min + v_max) / 2.0 - 0.5) < 0.15)
                 else:
-                    uv_centred_u.append(False)
                     uv_centred_v.append(False)
 
             for bface in bm.faces:
@@ -2027,7 +2027,7 @@ class BlenderMeshExporter:
                         if ui < len(uv_layers):
                             u_bl = loop[uv_layers[ui]].uv[0]
                             v_bl = loop[uv_layers[ui]].uv[1]
-                            u = u_bl * 2.0 - 1.0 if uv_centred_u[ui] else u_bl
+                            u = u_bl
                             v = v_bl - 0.5 if uv_centred_v[ui] else 1 - v_bl
                             all_uvs[ui][vi] = (u, v)
 
