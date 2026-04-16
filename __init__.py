@@ -759,9 +759,9 @@ class SkeletalMeshAsset(Asset):
                     max_abs = max(abs(x), abs(y), abs(z))
                     if max_abs >= abs(scale):
                         scale = min(32767, int(max_abs) + 1)
-                    f.write(bp.int16_norm(x / scale))
-                    f.write(bp.int16_norm(y / scale))
-                    f.write(bp.int16_norm(z / scale))
+                    f.write(bp.int16_norm(max(-1.0, min(1.0, x / scale))))
+                    f.write(bp.int16_norm(max(-1.0, min(1.0, y / scale))))
+                    f.write(bp.int16_norm(max(-1.0, min(1.0, z / scale))))
                     f.write(bp.int16(scale))
                 elif self.parent_mesh.position_type == 1:
                     f.write(bp.float(x))
@@ -842,7 +842,7 @@ class SkeletalMeshAsset(Asset):
                         f.write(bp.uint8(0))
                     for idx, _ in sorted_w:
                         f.write(bp.uint8(idx))
-            
+
         def __init__(self,parent_sk_mesh, index=0):
             self.parent_sk_mesh:SkeletalMeshAsset = parent_sk_mesh
             self.index = index
@@ -1379,6 +1379,30 @@ class BlenderMeshExporter:
     @staticmethod
     def find_object_by_name(name=""):
         return bpy.data.objects.get(name, None)
+
+    @staticmethod
+    def _bake_parent_inverse(obj):
+        # If obj has a non-identity parent inverse matrix, bake it into the mesh
+        # vertex positions and reset it to identity so the exporter reads
+        # coordinates in the correct space regardless of how the object was
+        # parented or re-parented in Blender.
+        if obj is None or obj.type != 'MESH':
+            return
+        pi = obj.matrix_parent_inverse
+        is_identity = all(
+            abs(pi[i][j] - (1.0 if i == j else 0.0)) < 1e-6
+            for i in range(4) for j in range(4)
+        )
+        if is_identity:
+            return
+        # Apply parent inverse into vertex positions
+        for v in obj.data.vertices:
+            v.co = pi @ v.co
+        # Reset to identity so future exports are clean
+        obj.matrix_parent_inverse = Matrix.Identity(4)
+        obj.data.update()
+        print(f"[AFoPMT] Auto-baked parent inverse for '{obj.name}'")
+
     @staticmethod
     def _write_mod_file(edited_lod_index_per_mesh: dict, out_path: str):
         """
@@ -1583,6 +1607,35 @@ class BlenderMeshExporter:
                     other_lod.vertex_data_offset_a = unpack('<I', file_data[other_lod_so+12:other_lod_so+16])[0]
                     other_lod.vertex_data_offset_b = unpack('<I', file_data[other_lod_so+16:other_lod_so+20])[0]
                     other_lod.face_block_offset    = unpack('<I', file_data[other_lod_so+20:other_lod_so+24])[0]
+
+        # Auto-zero any mesh whose Blender object has been deleted from the scene.
+        # This makes deleted meshes invisible in-game without breaking file structure.
+        for mesh in asset.meshes:
+            for li, lod in enumerate(mesh.lods):
+                obj_name = lod.blender_obj_name or f"{mesh.name}_LOD{li}"
+                obj = bpy.data.objects.get(obj_name)
+                if obj is not None:
+                    continue  # object still in scene, leave it alone
+                if lod.blender_obj_name == "":
+                    continue  # never imported this LOD, don't touch it
+                # Object was imported but is now gone — zero out all vertex positions.
+                pos_length = 8 if mesh.position_type == 0 else 12
+                higher_size = sum(
+                    mesh.lods[li2].data_size
+                    for li2 in range(li + 1, len(mesh.lods))
+                )
+                intra_voa = lod.vertex_data_offset_a - higher_size
+                abs_voa = lod.data_offset + intra_voa
+                stride = mesh.vertex_stride
+                for vi in range(lod.vertex_count):
+                    voff = abs_voa + vi * stride
+                    if mesh.position_type == 0:
+                        # int16 positions: write x=0, y=0, z=0, preserve w scale
+                        file_data[voff:voff + 6] = b'\x00' * 6
+                    else:
+                        # float positions: write 0.0, 0.0, 0.0
+                        file_data[voff:voff + 12] = b'\x00' * 12
+                print(f"[AFoPMT] Auto-zeroed deleted mesh '{mesh.name}' LOD{li}")
 
         with open(out_path, 'wb') as out:
             out.write(file_data)
@@ -1969,12 +2022,14 @@ class BlenderMeshExporter:
                 else:
                     wc = int((stride - pos_length) / 2)
                     sw = raw_weights[:wc]
-                    # Only use orig_slot_indices when this vertex index exists in the
-                    # original data. The replacement mesh may have more verts than the
-                    # original, so vi can exceed len(orig_slot_indices) and cause an
-                    # index-out-of-range crash.
-                    if orig_slot_indices is not None and vi < len(orig_slot_indices):
-                        # Preserve original slot structure
+                    vert_count_matches = len(data.vertices) == lod.vertex_count
+                    # Only use orig_slot_indices when vert count is unchanged AND this
+                    # vertex index exists in the original data. For replacement meshes
+                    # (vert count changed), the original slot order is irrelevant and
+                    # using it causes only the one slot that happens to match to get a
+                    # non-zero weight, pinning all verts to a single bone.
+                    if orig_slot_indices is not None and vert_count_matches and vi < len(orig_slot_indices):
+                        # Preserve original slot structure (vert count unchanged)
                         remaining = {s: w for s, w in raw_weights}
                         slot_idxs = orig_slot_indices[vi]
                         for slot_bone in slot_idxs:
@@ -1983,8 +2038,8 @@ class BlenderMeshExporter:
                         for slot_bone in slot_idxs:
                             f.write(bp.uint8(slot_bone))
                     else:
-                        # Vert count changed or no original index entry for this vertex:
-                        # write Blender weights sorted by descending weight.
+                        # Replacement mesh or no original index entry: write Blender
+                        # weights sorted by descending weight into the available slots.
                         for i in range(wc):
                             if i < len(sw):
                                 f.write(bp.uint8(max(0, min(int(round(sw[i][1] * 255)), 255))))
@@ -2611,6 +2666,7 @@ class ExportLOD(bpy.types.Operator):
         lod_obj_name = lod.blender_obj_name or f"{mesh.name}_LOD{self.lod_index}"
         tri_obj = BME.find_object_by_name(lod_obj_name)
         if tri_obj:
+            BME._bake_parent_inverse(tri_obj)
             BME._triangulate_object(tri_obj, compute_normals=context.scene.SWOMT.compute_normals_on_export)
 
         try:
@@ -3410,12 +3466,14 @@ class ExportAllLODs(bpy.types.Operator):
         src_path = SWOMT.AssetPath
         mod_file = os.path.splitext(src_path)[0] + "_MOD.mmb"
 
-        # Triangulate every LOD object that exists in the scene
+        # Bake parent inverse and triangulate every LOD object that exists in the scene.
+        # Baking must happen before triangulation so vertex positions are correct.
         for m in asset.meshes:
             for li, lod in enumerate(m.lods):
                 lod_obj_name = lod.blender_obj_name or f"{m.name}_LOD{li}"
                 tri_obj = BME.find_object_by_name(lod_obj_name)
                 if tri_obj:
+                    BME._bake_parent_inverse(tri_obj)
                     BME._triangulate_object(tri_obj, compute_normals=context.scene.SWOMT.compute_normals_on_export)
 
         # Export each LOD level in order (0 -> 3). _write_mod_file accumulates on
@@ -3533,7 +3591,6 @@ class SWOMTPanel(bpy.types.Panel):
             exp_row.scale_y = 1.5
             exp_row.enabled = any_imported
             exp_row.operator("object.export_all_lods", text="Export All LODs")
-            layout.row().operator("object.bake_parent_inverse", text="Bake Parent Inverse", icon="ORIENTATION_PARENT")
 
             # Export Options collapsible box
             forced = _vert_count_changed()
@@ -3850,44 +3907,7 @@ class GenerateLODs(bpy.types.Operator):
 
         return {'FINISHED'}
 
-class BakeParentInverse(bpy.types.Operator):
-    """Bakes the parent inverse transform into the active mesh vertices and resets it to identity.
-    Select your replacement mesh, then click this before exporting.
-    Equivalent to: manually clearing parent inverse, counter-rotating, and applying."""
-    bl_idname = 'object.bake_parent_inverse'
-    bl_label = 'Bake Parent Inverse'
 
-    obj_name: bpy.props.StringProperty()
-
-    @classmethod
-    def poll(cls, context):
-        return True
-
-    def execute(self, context):
-        # Try obj_name first, fall back to view_layer active object
-        obj = bpy.data.objects.get(self.obj_name) if self.obj_name else None
-        if obj is None:
-            obj = context.view_layer.objects.active
-        if obj is None or obj.type != 'MESH':
-            self.report({'ERROR'}, "No mesh object is active. Select your replacement mesh first.")
-            return {'CANCELLED'}
-
-        pi = obj.matrix_parent_inverse
-        if all(abs(pi[i][j] - (1.0 if i == j else 0.0)) < 1e-6 for i in range(4) for j in range(4)):
-            self.report({'INFO'}, f"'{obj.name}' parent inverse is already identity — nothing to do.")
-            return {'FINISHED'}
-
-        # Apply the parent inverse into each vertex position.
-        # This is the same as: Object > Apply > Parent Inverse (not available as a standard op).
-        for v in obj.data.vertices:
-            v.co = pi @ v.co
-
-        # Reset matrix_parent_inverse to identity so future exports are clean.
-        obj.matrix_parent_inverse = Matrix.Identity(4)
-
-        obj.data.update()
-        self.report({'INFO'}, f"Parent inverse baked into '{obj.name}' and reset to identity.")
-        return {'FINISHED'}
 
 classes=[SWOMTSettings,
          BrowseMMBFile,
@@ -3912,8 +3932,7 @@ classes=[SWOMTSettings,
          RenameMesh,
          SelectMGraphObject,
          RenameMMBFile,
-         SelectMGraphObjectFilePatch,
-         BakeParentInverse]
+         SelectMGraphObjectFilePatch]
 
 def register():
     for c in classes:
