@@ -11,7 +11,7 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 39),
+    "version": (0, 1, 40),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 12, 13, 15, 16, 17.",
     "category": "Import-Export"
@@ -1127,6 +1127,7 @@ class BlenderMeshImporter:
         bm.from_mesh(obj_data)
         bm.faces.ensure_lookup_table()
         # Import UVs
+        uv_centred_flags = []
         for uv_index in range(mesh.uv_count):
             uvs = lod.get_uvs(raw_mesh_file,uv_index)
             uv_layer = bm.loops.layers.uv.new(f'UVMap_{uv_index}')
@@ -1137,6 +1138,7 @@ class BlenderMeshImporter:
             u_min, u_max = min(u_vals), max(u_vals)
             centred_v = v_max > 0 and v_min < 0 and abs(v_min + v_max) < 0.15
             centred_u = u_min < -0.1 and abs(u_min + u_max) < 0.15
+            uv_centred_flags.append((centred_u, centred_v))
             for finder, face in enumerate(bm.faces):
                 for lindex, loop in enumerate(face.loops):
                     v_index = loop.vert.index
@@ -1151,17 +1153,17 @@ class BlenderMeshImporter:
 
         # Store per-UV-layer centred flags as mesh attributes so export can
         # reverse the correct transform without re-detecting from Blender values.
-        for uv_index in range(mesh.uv_count):
-            uvs = lod.get_uvs(raw_mesh_file, uv_index)
-            v_vals = [uvs[i][1] for i in range(len(uvs))]
-            u_vals = [uvs[i][0] for i in range(len(uvs))]
-            centred_v = min(v_vals) < 0 and max(v_vals) > 0 and abs(min(v_vals) + max(v_vals)) < 0.15
-            centred_u = min(u_vals) < -0.1 and abs(min(u_vals) + max(u_vals)) < 0.15
-            cu_attr = obj_data.attributes.new(name=f'mmb_uv{uv_index}_centred_u', type='INT', domain='POINT')
-            cv_attr = obj_data.attributes.new(name=f'mmb_uv{uv_index}_centred_v', type='INT', domain='POINT')
-            for vi in range(len(obj_data.vertices)):
-                cu_attr.data[vi].value = 1 if centred_u else 0
-                cv_attr.data[vi].value = 1 if centred_v else 0
+        for uv_index, (centred_u, centred_v) in enumerate(uv_centred_flags):
+            if centred_u:
+                cu_attr = obj_data.attributes.get(f'mmb_uv{uv_index}_centred_u') or \
+                          obj_data.attributes.new(name=f'mmb_uv{uv_index}_centred_u', type='INT', domain='POINT')
+                for vi in range(len(cu_attr.data)):
+                    cu_attr.data[vi].value = 1
+            if centred_v:
+                cv_attr = obj_data.attributes.get(f'mmb_uv{uv_index}_centred_v') or \
+                          obj_data.attributes.new(name=f'mmb_uv{uv_index}_centred_v', type='INT', domain='POINT')
+                for vi in range(len(cv_attr.data)):
+                    cv_attr.data[vi].value = 1
 
         # Import Colors
         # Written directly to obj_data.attributes (POINT domain, FLOAT_COLOR type) rather
