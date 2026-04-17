@@ -507,11 +507,11 @@ class SkeletalMeshAsset(Asset):
             def get_bone_weights(self, raw_mesh_file):
                 bone_weights = []
                 stride = self.parent_mesh.vertex_stride
-                pos_length = 0 #size of vertex position in stride
                 f = raw_mesh_file
                 f.seek(self.vertex_data_offset_a)
                 for v in range(self.vertex_count):
                     iw = {}
+                    stride_start = f.tell()
                     if stride == 20:
                         f.seek(8, 1)
                         weight_count = 4
@@ -521,18 +521,28 @@ class SkeletalMeshAsset(Asset):
                             if weights[i] > 0.0:
                                 iw[indices[i]] = weights[i]
                     elif stride == 32:
-                        # Layout: 8×uint16 weights | 8×uint8 indices
-                        # Two sub-variants detected by whether all 8 uint16 values sum to 32767:
-                        #   sum == 32767: all 8 slots are real bone weights (e.g. body mesh)
-                        #   sum != 32767: only slots 0-3 are real weights; slots 4-7 are
-                        #                secondary index data, not bone weights (e.g. banshee)
+                        # Layout Variants:
+                        # A) 8x uint16 weights (sum==32767) + 8x uint8 indices - e.g. rnf_body_01_f
+                        # B) 6x uint8 weights + pad2 + 6x uint16 indices + pad4 - e.g. wl_banshee_01
+                        # Detect by peeking at the first 16 bytes as uint16 weights
                         f.seek(8, 1)
-                        weights = [br.uint16(f) / 32767.0 for _ in range(8)]
-                        indices = [br.uint8(f) for _ in range(8)]
-                        weight_slots = range(8) if sum(int(w * 32767) for w in weights) == 32767 else range(4)
-                        for i in weight_slots:
-                            if weights[i] > 0.0:
-                                iw[indices[i]] = iw.get(indices[i], 0.0) + weights[i]
+                        peek_pos = f.tell()
+                        w8_u16 = [br.uint16(f) / 32767.0 for _ in range(8)]
+                        if sum(int(w * 32767) for w in w8_u16) == 32767:
+                            # Layout A
+                            indices = [br.uint8(f) for _ in range(8)]
+                            for i in range(8):
+                                if w8_u16[i] > 0.0:
+                                    iw[indices[i]] = iw.get(indices[i], 0.0) + w8_u16[i]
+                        else:
+                            # Layout B
+                            f.seek(peek_pos)
+                            weights = [br.uint8_norm(f) for _ in range(6)]
+                            f.seek(2, 1)  # skip 2 padding bytes
+                            indices = [br.uint16(f) for _ in range(6)]
+                            for i in range(6):
+                                if weights[i] > 0.0:
+                                    iw[indices[i]] = iw.get(indices[i], 0.0) + weights[i]
                     elif stride == 36:
                         f.seek(12, 1)
                         weights = [br.uint16(f) / 32767.0 for _ in range(8)]
@@ -557,13 +567,8 @@ class SkeletalMeshAsset(Asset):
                             if weights[i] > 0.0:
                                 iw[indices[i]] = weights[i]
                     else:
-                        if stride == 24:
-                            pos_length = 8
-                        elif stride == 28:
-                            pos_length = 12
-                        else:
-                            pos_length = 8
-                        f.seek(pos_length,1)
+                        pos_length = 12 if stride == 28 else 8
+                        f.seek(pos_length, 1)
                         weight_count = int((stride - pos_length) / 2)
                         weights = []
                         for w in range(weight_count):
@@ -574,7 +579,8 @@ class SkeletalMeshAsset(Asset):
                             if i < len(weights):
                                 iw[br.uint8(f)] = weights[i]
                             else:
-                                f.seek(1,1)
+                                f.seek(1, 1)
+                    f.seek(stride_start + stride)
                     bone_weights.append(iw)
                 return bone_weights
 
@@ -768,80 +774,6 @@ class SkeletalMeshAsset(Asset):
                     f.write(bp.float(y))
                     f.write(bp.float(z))
                 f.seek(stride_start + stride)
-
-            def write_bone_weights(self, file, mmb_index, blender_weights):
-                """
-                Writes bone weights for one vertex into file at the correct stride offset.
-                :param file: file to write on
-                :param mmb_index: which vertex slot in the file to write
-                :param blender_weights: bone indices already converted from Blender vertex group names back to mmb
-                                        mesh-bone indices.
-                """
-                stride = self.parent_mesh.vertex_stride
-                f = file
-
-                pos_len = 12 if self.parent_mesh.position_type == 1 else 8
-
-                # Max bone influences supported by this stride
-                if stride == 20:
-                    max_bones = 4
-                elif stride in (32, 36, 40):
-                    max_bones = 8
-                elif stride == 44:
-                    max_bones = 12
-                else:
-                    max_bones = int((stride - pos_len) / 2)
-
-                # Sort by weight descending, keep top max_bones
-                # Do not normalise weights
-                sorted_w = sorted(blender_weights.items(), key=lambda kv: kv[1], reverse=True)[:max_bones]
-                # Clamp each weight to [0.0, 1.0]
-                sorted_w = [(idx, max(0.0, min(1.0, w))) for idx, w in sorted_w]
-                active_count = len(sorted_w)
-
-                f.seek(self.data_offset + mmb_index * stride + pos_len)
-
-                if stride == 20:
-                    for _, w in sorted_w:
-                        f.write(bp.uint16(int(round(w * 32767))))
-                    for _ in range(max_bones - active_count):
-                        f.write(bp.uint16(0))
-                    for idx, _ in sorted_w:
-                        f.write(bp.uint8(idx))
-
-                elif stride in (32, 36):
-                    for _, w in sorted_w:
-                        f.write(bp.uint16(int(round(w * 32767))))
-                    for _ in range(max_bones - active_count):
-                        f.write(bp.uint16(0))
-                    for idx, _ in sorted_w:
-                        f.write(bp.uint8(idx))
-
-                elif stride == 40:
-                    for _, w in sorted_w:
-                        f.write(bp.uint16(int(round(w * 32767))))
-                    for _ in range(max_bones - active_count):
-                        f.write(bp.uint16(0))
-                    for idx, _ in sorted_w:
-                        f.write(bp.uint16(idx))
-
-                elif stride == 44:
-                    for _, w in sorted_w:
-                        f.write(bp.uint8(int(round(w * 255))))
-                    for _ in range(max_bones - active_count):
-                        f.write(bp.uint8(0))
-                    for idx, _ in sorted_w:
-                        f.write(bp.uint16(idx))
-                    for _ in range(max_bones - active_count):
-                        f.write(bp.uint16(0))
-
-                else:
-                    for _, w in sorted_w:
-                        f.write(bp.uint8(int(round(w * 255))))
-                    for _ in range(max_bones - active_count):
-                        f.write(bp.uint8(0))
-                    for idx, _ in sorted_w:
-                        f.write(bp.uint8(idx))
 
         def __init__(self,parent_sk_mesh, index=0):
             self.parent_sk_mesh:SkeletalMeshAsset = parent_sk_mesh
@@ -1880,6 +1812,8 @@ class BlenderMeshExporter:
             orig_stride32_data = None
             # Per-vertex original slot indices for the else branch (strides 12, 16, 24 etc...)
             orig_slot_indices = None
+            # Detect stride=32 layout variant
+            stride32_use_u16 = stride == 32 and len(mesh.mesh_bones) > 256
 
             if not export_weights and weight_bytes_per_vert > 0:
                 orig_weight_bytes = []
@@ -1899,8 +1833,15 @@ class BlenderMeshExporter:
                     with open(src_path, 'rb') as src:
                         for vi in range(lod.vertex_count):
                             src.seek(abs_voa_w + vi * stride + pos_length)
-                            all_w = unpack('<8H', src.read(16))  # 8 uint16 weights
-                            all_i = list(src.read(8))            # 8 uint8 indices
+                            if stride32_use_u16:
+                                # Layout B
+                                all_w = list(src.read(6))
+                                src.seek(2, 1) # skip 2 padding bytes
+                                all_i = list(unpack('<6H', src.read(12)))
+                            else:
+                                # Layout A
+                                all_w = unpack('<8H', src.read(16))
+                                all_i = list(src.read(8))
                             orig_stride32_data.append((all_w, all_i))
                 elif stride not in (20, 36, 40, 44) and lod.vertex_count > 0:
                     # else branch strides (12, 16 etc): wc = (stride - pos_length) / 2
@@ -1956,30 +1897,58 @@ class BlenderMeshExporter:
                     if orig_stride32_data is not None and vert_count_matches and vi < len(orig_stride32_data):
                         # Vert count unchanged: preserve exact slot order from source.
                         orig_all_w, orig_all_i = orig_stride32_data[vi]
-                        weight_slots = range(8) if sum(orig_all_w) == 32767 else range(4)
-                        remaining = {s: w for s, w in raw_weights}
-                        # Write weights for active slots from Blender groups
-                        for slot in weight_slots:
-                            bone = orig_all_i[slot]
-                            w = remaining.pop(bone, 0.0)
-                            f.write(bp.uint16(max(0, min(int(round(w * 32767)), 32767))))
-                        # Remaining uint16 slots written verbatim (secondary index data or zeros)
-                        for slot in range(len(weight_slots), 8):
-                            f.write(bp.uint16(orig_all_w[slot]))
-                        # All 8 uint8 indices verbatim
-                        for bone in orig_all_i:
-                            f.write(bp.uint8(bone))
+                        if stride32_use_u16:
+                            # Layout B
+                            remaining = {s: w for s, w in raw_weights}
+                            # Write 6 weight bytes preserving slot order
+                            for k in range(6):
+                                if k < len(orig_all_i):
+                                    bone = orig_all_i[k]
+                                    w = remaining.pop(bone, 0.0)
+                                else:
+                                    w = 0.0
+                                f.write(bp.uint8(max(0, min(int(round(w * 255)), 255))))
+                            f.write(b'\x00\x00') # 2 padding bytes
+                            # Write 6 uint16 indices
+                            for idx in orig_all_i:
+                                f.write(bp.uint16(idx))
+                        else:
+                            # Layout A
+                            weight_slots = range(8) if sum(orig_all_w) == 32767 else range(4)
+                            remaining = {s: w for s, w in raw_weights}
+                            for slot in weight_slots:
+                                bone = orig_all_i[slot]
+                                w = remaining.pop(bone, 0.0)
+                                f.write(bp.uint16(max(0, min(int(round(w * 32767)), 32767))))
+                            for slot in range(len(weight_slots), 8):
+                                f.write(bp.uint16(orig_all_w[slot]))
+                            for bone in orig_all_i:
+                                f.write(bp.uint8(bone))
                     else:
-                        # Vert count changed or no source data: write up to 8 slots by weight desc.
-                        sw = raw_weights[:8]
-                        for _, w in sw:
-                            f.write(bp.uint16(max(0, min(int(round(w * 32767)), 32767))))
-                        for _ in range(8 - len(sw)):
-                            f.write(bp.uint16(0))
-                        for s, _ in sw:
-                            f.write(bp.uint8(s))
-                        for _ in range(8 - len(sw)):
-                            f.write(bp.uint8(0))
+                        # Vert count changed: write by weight desc
+                        if stride32_use_u16:
+                            # Layout B
+                            sw = raw_weights[:6]
+                            for _, w in sw:
+                                f.write(bp.uint8(max(0, min(int(round(w * 255)), 255))))
+                            for _ in range(6 - len(sw)):
+                                f.write(bp.uint8(0))
+                            f.write(b'\x00\x00')
+                            for s, _ in sw[:6]:
+                                f.write(bp.uint16(s))
+                            for _ in range(6 - min(len(sw), 6)):
+                                f.write(bp.uint16(0))
+                        else:
+                            # Layout A
+                            sw = raw_weights[:8]
+                            for _, w in sw:
+                                f.write(bp.uint16(max(0, min(int(round(w * 32767)), 32767))))
+                            for _ in range(8 - len(sw)):
+                                f.write(bp.uint16(0))
+                            for s, _ in sw:
+                                f.write(bp.uint8(s))
+                            for _ in range(8 - len(sw)):
+                                f.write(bp.uint8(0))
 
                 elif stride == 36:
                     max_bones = 8
