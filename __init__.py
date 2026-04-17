@@ -2513,13 +2513,13 @@ class SWOMTSettings(bpy.types.PropertyGroup):
     )
     export_normals: bpy.props.BoolProperty(
         name="Export Normals",
-        default=True,
+        default=False,
         description="Write normals into the exported file. When unchecked, the original normals from the .mmb are preserved. Automatically forced on when vert count has changed.",
         update=_on_export_normals_update,
     )
     export_weights: bpy.props.BoolProperty(
         name="Export Weights",
-        default=True,
+        default=False,
         description="Write bone weights into the exported file. When unchecked, the original weights from the .mmb are preserved. Automatically forced on when vert count has changed.",
     )
     export_vertex_colors: bpy.props.BoolProperty(
