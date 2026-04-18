@@ -595,13 +595,17 @@ class SkeletalMeshAsset(Asset):
                 f.seek(self.face_block_offset)
                 use_uint32 = False
                 if self.index_count > 0:
-                    peek_bytes = f.read(16)
-                    f.seek(self.face_block_offset)
-                    if len(peek_bytes) >= 16:
-                        import struct as _struct
-                        hi_words = [_struct.unpack('<H', peek_bytes[i:i+2])[0]
-                                    for i in range(2, 16, 4)]
-                        use_uint32 = all(v == 0 for v in hi_words)
+                    # Detect uint32 indices
+                    if self.size_a == self.face_block_offset // 4 and self.size_a != self.face_block_offset // 2:
+                        use_uint32 = True
+                    else:
+                        peek_bytes = f.read(16)
+                        f.seek(self.face_block_offset)
+                        if len(peek_bytes) >= 16:
+                            import struct as _struct
+                            hi_words = [_struct.unpack('<H', peek_bytes[i:i + 2])[0]
+                                        for i in range(2, 16, 4)]
+                            use_uint32 = all(v == 0 for v in hi_words)
                 for i in range(int(self.index_count/3)):
                     if use_uint32:
                         f1 = br.uint32(f)
@@ -1415,7 +1419,11 @@ class BlenderMeshExporter:
                 norms_buf.write(orig_file_data[orig_abs_vob:orig_abs_vob + orig_normals_size])
 
             faces_buf = io.BytesIO()
-            BME.write_triangles(faces_buf, mesh, lod_index)
+            # Detect uint32 indices
+            orig_sa_pre = unpack('<I', file_data[lod.start_offset + 8: lod.start_offset + 12])[0]
+            orig_fb_pre = unpack('<I', file_data[lod.start_offset + 20: lod.start_offset + 24])[0]
+            orig_uses_uint32_pre = (orig_fb_pre > 0 and orig_sa_pre == orig_fb_pre // 4)
+            BME.write_triangles(faces_buf, mesh, lod_index, force_uint32=orig_uses_uint32_pre or new_vert_count > 65535)
             if lod.faces_end_bytes:
                 faces_buf.write(lod.faces_end_bytes)
 
@@ -1442,9 +1450,18 @@ class BlenderMeshExporter:
             orig_data_size   = file_lod_data_size - intra_voa  # writable region in source
 
             # Preserve any trailing bytes after face data (e.g. fa7f sentinel padding).
-            orig_trailing_size = orig_data_size - len(vd) - len(nd) - len(fd)
+            # Must use ORIGINAL vd/nd/fd sizes to correctly locate trailing bytes.
+            orig_vc = unpack('<I', file_data[lod.start_offset:lod.start_offset + 4])[0]
+            orig_ic = unpack('<I', file_data[lod.start_offset + 4:lod.start_offset + 8])[0]
+            orig_sa = unpack('<I', file_data[lod.start_offset + 8:lod.start_offset + 12])[0]
+            orig_fb_hdr = unpack('<I', file_data[lod.start_offset + 20:lod.start_offset + 24])[0]
+            orig_idx_size = 4 if (orig_fb_hdr > 0 and orig_sa == orig_fb_hdr // 4) else 2
+            orig_vd_size = orig_vc * mesh.vertex_stride
+            orig_nd_size = orig_vc * mesh.normals_stride
+            orig_fd_size = orig_ic * orig_idx_size
+            orig_trailing_size = orig_data_size - orig_vd_size - orig_nd_size - orig_fd_size
             if orig_trailing_size > 0:
-                trailing_abs = lod.data_offset + intra_voa + len(vd) + len(nd) + len(fd)
+                trailing_abs = lod.data_offset + intra_voa + orig_vd_size + orig_nd_size + orig_fd_size
                 trailing_bytes = bytes(file_data[trailing_abs:trailing_abs + orig_trailing_size])
             else:
                 trailing_bytes = b''
@@ -1508,14 +1525,18 @@ class BlenderMeshExporter:
             new_fb_for_header  = higher_size + new_intra_fb
             # data_size in the header = intra_voa (prefix) + writable region
             new_file_data_size = intra_voa + new_data_size
-            file_data[so +  0: so +  4] = pack('<I', new_vert_count)
-            file_data[so +  4: so +  8] = pack('<I', new_index_count)
-            file_data[so +  8: so + 12] = pack('<I', new_fb_for_header // 2)  # size_a
+            # size_a: fb//2 for uint16, fb//4 for uint32.
+            # Use uint32 if original mesh used it OR if vert count exceeds uint16 range.
+            use_uint32_faces = orig_uses_uint32_pre or new_vert_count > 65535
+            new_size_a = new_fb_for_header // 4 if use_uint32_faces else new_fb_for_header // 2
+            file_data[so + 0: so + 4] = pack('<I', new_vert_count)
+            file_data[so + 4: so + 8] = pack('<I', new_index_count)
+            file_data[so + 8: so + 12] = pack('<I', new_size_a) # size_a
             # voa (so+12) is unchanged
-            file_data[so + 16: so + 20] = pack('<I', new_vob_for_header)      # vob
-            file_data[so + 20: so + 24] = pack('<I', new_fb_for_header)       # fb
+            file_data[so + 16: so + 20] = pack('<I', new_vob_for_header) # vob
+            file_data[so + 20: so + 24] = pack('<I', new_fb_for_header) # fb
             # data_offset (so+24) is unchanged for the edited LOD itself
-            file_data[so + 28: so + 32] = pack('<I', new_file_data_size)      # data_size
+            file_data[so + 28: so + 32] = pack('<I', new_file_data_size) # data_size
 
             # Update the in-memory LOD so re-import in the same session uses correct values.
             lod.vertex_count         = new_vert_count
@@ -1752,27 +1773,24 @@ class BlenderMeshExporter:
                           f"bone names or contain a bone index suffix.")
 
             # For int16 positions, read per-vertex w scale from the original source file.
+            # Always read from SWOMT.AssetPath using the original data_offset from the
+            # file header. lod.data_offset may have been corrupted in-memory by a prior
+            # mesh export in the same _write_mod_file call (ExportAllLODs exports all
+            # meshes at a given LOD level in one call).
             SWOMT = bpy.context.scene.SWOMT
-            # Use MOD file as source if it exists, matching _write_mod_file behaviour.
             src_path = SWOMT.AssetPath
-            mod_candidate = os.path.splitext(src_path)[0] + "_MOD.mmb"
-            if os.path.isfile(mod_candidate):
-                src_path = mod_candidate
+            with open(src_path, 'rb') as _f:
+                _f.seek(lod.data_offset_file_pos)
+                orig_data_offset = unpack('<I', _f.read(4))[0]
 
             if mesh.position_type == 0:
                 original_w = []
-                # Compute the correct absolute start of the vertex array.
-                # lod.data_offset is the start of the whole LOD block; the vertex
-                # positions begin at vertex_data_offset_a which is stored relative
-                # to the mesh block.  Using lod.data_offset + 6 directly reads from
-                # the wrong place (face buffer or another LOD), producing garbage
-                # scale values and causing in-game vertex stretching.
                 higher_size_w = sum(
                     mesh.lods[li].data_size
                     for li in range(lod_index + 1, len(mesh.lods))
                 )
                 intra_voa_w = lod.vertex_data_offset_a - higher_size_w
-                abs_voa_w_read = lod.data_offset + intra_voa_w
+                abs_voa_w_read = orig_data_offset + intra_voa_w
                 with open(src_path, 'rb') as src:
                     src.seek(abs_voa_w_read + 6)  # skip x,y,z int16s to reach w
                     for _ in range(lod.vertex_count):
@@ -1799,13 +1817,13 @@ class BlenderMeshExporter:
             export_weights = bpy.context.scene.SWOMT.export_weights or _vert_count_changed()
             weight_bytes_per_vert = stride - pos_length
 
-            # Compute abs_voa once for weight reading
+            # Compute abs_voa once for weight reading (use orig_data_offset from file)
             higher_size_w = sum(
                 mesh.lods[li].data_size
                 for li in range(lod_index + 1, len(mesh.lods))
             )
             intra_voa_w = lod.vertex_data_offset_a - higher_size_w
-            abs_voa_w   = lod.data_offset + intra_voa_w
+            abs_voa_w   = orig_data_offset + intra_voa_w
 
             orig_weight_bytes = None
             # Per-vertex data needed when export_weights=True and stride=32
@@ -2335,20 +2353,26 @@ class BlenderMeshExporter:
 
 
     @staticmethod
-    def write_triangles(file, mesh:SkeletalMeshAsset.Mesh, lod_index=0):
+    def write_triangles(file, mesh:SkeletalMeshAsset.Mesh, lod_index=0, force_uint32=False):
         f = file
         obj = BME.find_object_by_name(mesh.name + f"_LOD{lod_index}")
         lod: SkeletalMeshAsset.Mesh.LOD = mesh.lods[lod_index]
         if obj:
             data = obj.data
+            use_uint32 = force_uint32 or len(data.vertices) > 65535
             bm = bmesh.new()
             bm.from_mesh(data)
             bm.verts.ensure_lookup_table()
             bm.faces.ensure_lookup_table()
             for p in data.polygons:
-                f.write(bp.uint16(p.vertices[0]))
-                f.write(bp.uint16(p.vertices[2]))
-                f.write(bp.uint16(p.vertices[1]))
+                if use_uint32:
+                    f.write(bp.uint32(p.vertices[0]))
+                    f.write(bp.uint32(p.vertices[2]))
+                    f.write(bp.uint32(p.vertices[1]))
+                else:
+                    f.write(bp.uint16(p.vertices[0]))
+                    f.write(bp.uint16(p.vertices[2]))
+                    f.write(bp.uint16(p.vertices[1]))
             bm.free()
 
     @staticmethod
@@ -3622,9 +3646,8 @@ class SWOMTPanel(bpy.types.Panel):
                         lod_import_button.lod_index = li
                         lod_import_button.mesh_index = mi
                         obj_name = l.blender_obj_name if l.blender_obj_name else f"{m.name}_LOD{li}"
-                        lod_obj = bpy.data.objects.get(obj_name)
                         lod_export_row = row.row()
-                        lod_export_row.enabled = lod_obj is not None
+                        lod_export_row.enabled = bpy.data.objects.get(obj_name) is not None
                         lod_export_button = lod_export_row.operator("object.export_lod")
                         lod_export_button.lod_index = li
                         lod_export_button.mesh_index = mi
