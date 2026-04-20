@@ -11,7 +11,7 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 44),
+    "version": (0, 1, 45),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 12, 13, 15, 16, 17.",
     "category": "Import-Export"
@@ -19,6 +19,7 @@ bl_info = {
 
 import shutil
 import os
+import json
 # Delete __pycache__ on load to prevent stale cache issues
 _cache_dir = os.path.join(os.path.dirname(__file__), "__pycache__")
 try:
@@ -45,35 +46,46 @@ import operator
 _RAW_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/fullExport/__init__.py"
 _BONE_JSON_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/fullExport/bone_matrices.json"
 _BONE_JSON_FILENAME = "bone_matrices.json"
+_LOD_CFG_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/fullExport/lod_presets.cfg"
+_LOD_CFG_FILENAME = "lod_presets.cfg"
+_MMB_JSON_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/fullExport/mmb_lod_presets.json"
+_MMB_JSON_FILENAME = "mmb_lod_presets.json"
 _update_status = None   # None = not checked, "up_to_date", or "vX.X.X available"
 _update_error  = None   # set if network fetch failed
 
-def _get_bone_json_path():
-    """Return the path for bone_matrices.json (same folder as plugin file)"""
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), _BONE_JSON_FILENAME)
-
-def _download_bone_json():
-    """Download bone_matrices.json to the plugin folder"""
+def _download_data_file(url: str, filename: str):
+    """Downloads a data file to the plugin folder."""
     try:
-        req = urllib.request.urlopen(_BONE_JSON_URL, timeout=30)
+        req = urllib.request.urlopen(url, timeout=30)
         data = req.read()
-        dest = _get_bone_json_path()
+        dest = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
         with open(dest, 'wb') as f:
             f.write(data)
         return True, None
     except Exception as e:
         return False, str(e)
 
-def _check_bone_json():
-    """If bone_matrices.json is missing, download it silently in a background thread."""
-    if not os.path.isfile(_get_bone_json_path()):
-        def _download_thread():
-            ok, err = _download_bone_json()
+def _check_data_files():
+    """If any data files are missing, download them in the background"""
+    plugin_dir = os.path.dirname(os.path.abspath(__file__))
+    missing = []
+    for url, filename in [
+        (_BONE_JSON_URL, _BONE_JSON_FILENAME),
+        (_LOD_CFG_URL,   _LOD_CFG_FILENAME),
+        (_MMB_JSON_URL,  _MMB_JSON_FILENAME),
+    ]:
+        if not os.path.isfile(os.path.join(plugin_dir, filename)):
+            missing.append((url, filename))
+    if not missing:
+        return
+    def _download_thread():
+        for url, filename in missing:
+            ok, err = _download_data_file(url, filename)
             if not ok:
-                print(f"[AFoPMT] Failed to download bone_matrices.json: {err}")
+                print(f"[AFoPMT] Failed to download {filename}: {err}")
             else:
-                print("[AFoPMT] bone_matrices.json downloaded successfully")
-        threading.Thread(target=_download_thread, daemon=True).start()
+                print(f"[AFoPMT] {filename} downloaded successfully")
+    threading.Thread(target=_download_thread, daemon=True).start()
 
 def _fetch_remote_version():
     """Fetch remote __init__.py and return version tuple, or None on failure."""
@@ -1386,6 +1398,8 @@ class BlenderMeshExporter:
             obj = BME.find_object_by_name(mesh.name + f"_LOD{lod_index}")
             if obj is None:
                 continue
+            if len(obj.data.vertices) == 0:
+                continue  # zero-vert mesh - auto-zero section will zero positions in file_data
 
             new_vert_count  = len(obj.data.vertices)
             new_index_count = len(obj.data.polygons) * 3
@@ -1561,17 +1575,17 @@ class BlenderMeshExporter:
                     other_lod.vertex_data_offset_b = unpack('<I', file_data[other_lod_so+16:other_lod_so+20])[0]
                     other_lod.face_block_offset    = unpack('<I', file_data[other_lod_so+20:other_lod_so+24])[0]
 
-        # Auto-zero any mesh whose Blender object has been deleted from the scene.
-        # This makes deleted meshes invisible in-game without breaking file structure.
+        # Auto-zero any mesh whose Blender object has a vert count of 0.
+        # This makes the mesh invisible in-game without breaking file structure.
         for mesh in asset.meshes:
             for li, lod in enumerate(mesh.lods):
                 obj_name = lod.blender_obj_name or f"{mesh.name}_LOD{li}"
                 obj = bpy.data.objects.get(obj_name)
-                if obj is not None:
-                    continue  # object still in scene, leave it alone
-                if lod.blender_obj_name == "":
-                    continue  # never imported this LOD, don't touch it
-                # Object was imported but is now gone — zero out all vertex positions.
+                if obj is None:
+                    continue  # object not in scene, leave it alone
+                if len(obj.data.vertices) != 0:
+                    continue  # has vertices, export normally
+                # Object exists but has no vertices - zero out all vertex positions.
                 pos_length = 8 if mesh.position_type == 0 else 12
                 higher_size = sum(
                     mesh.lods[li2].data_size
@@ -1588,7 +1602,7 @@ class BlenderMeshExporter:
                     else:
                         # float positions: write 0.0, 0.0, 0.0
                         file_data[voff:voff + 12] = b'\x00' * 12
-                print(f"[AFoPMT] Auto-zeroed deleted mesh '{mesh.name}' LOD{li}")
+                print(f"[AFoPMT] Auto-zeroed empty mesh '{mesh.name}' LOD{li}")
 
         with open(out_path, 'wb') as out:
             out.write(file_data)
@@ -2117,7 +2131,7 @@ class BlenderMeshExporter:
 
             SWOMT = bpy.context.scene.SWOMT
             export_uvs = SWOMT.export_uvs or _vert_count_changed()
-            
+
             if mesh.normal_type == 0:
                 # int8_norm format:
                 #   4 bytes: normal as (x, y, z) int8_norm + w int8 sign (always -1)
@@ -2487,16 +2501,18 @@ def _auto_load_mmb(self, context):
         print(f"MMB auto-load failed: {e}")
 
 def _vert_count_changed():
-    """Return True if any imported LOD Blender object has a different vert count than the MMB."""
+    """Return True if any imported LOD0 Blender object has a different vert count than the MMB."""
     if asset is None:
         return False
     for m in asset.meshes:
         for li, lod in enumerate(m.lods):
+            if li != 0:
+                continue
             if lod.vertex_count == 0:
                 continue
             obj_name = lod.blender_obj_name or f"{m.name}_LOD{li}"
             obj = bpy.data.objects.get(obj_name)
-            if obj is not None and len(obj.data.vertices) != lod.vertex_count:
+            if obj is not None and len(obj.data.vertices) != 0 and len(obj.data.vertices) != lod.vertex_count:
                 return True
     return False
 
@@ -2562,6 +2578,157 @@ class SWOMTSettings(bpy.types.PropertyGroup):
         name="Export Options",
         default=True,
     )
+    force_lod0_mmb_override: bpy.props.StringProperty(
+        name="MMB Filename",
+        description="Original .mmb filename to look up in mmb_lod_presets.json",
+        default="",
+    )
+    force_lod0_output_path: bpy.props.StringProperty(
+        name="Force LOD0 Output Path",
+        default="",
+    )
+    force_lod0_cfg_path: bpy.props.StringProperty(
+        name="LOD Presets CFG",
+        description="Path to an existing lod_presets.cfg to update. Leave empty to generate a new one alongside the asset.",
+        default="",
+        subtype="FILE_PATH",
+    )
+
+def _force_lod0_generate_cfg(mmb_name: str, asset_dir: str, cfg_override: str = "", operator=None) -> str:
+    """
+    Look up mmb_name in mmb_lod_presets.json, find its preset names,
+    then write a modified lod_presets.cfg into asset_dir (or update cfg_override)
+    with those presets having manualLodPixelSteps = {1, 1, 1}.
+    Returns a status message string.
+    """
+    import re as _re
+    plugin_dir = os.path.dirname(os.path.abspath(__file__))
+    json_path = os.path.join(plugin_dir, "mmb_lod_presets.json")
+    cfg_path = cfg_override if cfg_override else os.path.join(plugin_dir, "lod_presets.cfg")
+    out_path = cfg_override if cfg_override else os.path.join(asset_dir, "lod_presets.cfg")
+
+    if not os.path.isfile(json_path):
+        return f"mmb_lod_presets.json not found in plugin folder."
+    if not os.path.isfile(cfg_path):
+        return f"lod_presets.cfg not found in plugin folder."
+
+    with open(json_path, 'r', encoding='utf-8') as f:
+        db = json.load(f)
+
+    # Match any JSON entry whose mmb name is contained within the asset filename.
+    mmb_stem = os.path.splitext(mmb_name.strip())[0].lower()
+    matches = [e for e in db if os.path.splitext(e['mmb'])[0].lower() in mmb_stem]
+    if not matches:
+        return f"'{mmb_name}' not found in mmb_lod_presets.json."
+    if len(matches) > 1:
+        return f"Multiple entries matched '{mmb_name}' - please specify the exact filename."
+
+    target_presets = set(p.strip().lower() for p in matches[0].get('lod_presets', []))
+    if not target_presets:
+        return f"No LOD presets listed for '{mmb_name}'."
+
+    with open(cfg_path, 'r', encoding='utf-8') as f:
+        cfg_text = f.read()
+
+    def replace_steps(block: str) -> str:
+        """Replace manualLodPixelSteps values with 1, 1, 1 in a preset block."""
+        return _re.sub(
+            r'(manualLodPixelSteps\s*=\s*\{)[^}]*(\})',
+            r'\g<1>\n\t\t\t1,\n\t\t\t1,\n\t\t\t1,\n\t\t\2',
+            block,
+        )
+
+    # Match each preset block - one level of nesting for manualLodPixelSteps {}
+    block_pattern = _re.compile(r'(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})', _re.DOTALL)
+
+    patched = 0
+    def patch_block(m):
+        nonlocal patched
+        block = m.group(0)
+        name_match = _re.search(r'name\s*=\s*"([^"]*)"', block)
+        if name_match and name_match.group(1).strip().lower() in target_presets:
+            patched += 1
+            return replace_steps(block)
+        return block
+
+    new_cfg = block_pattern.sub(patch_block, cfg_text)
+
+    with open(out_path, 'w', encoding='utf-8') as f:
+        f.write(new_cfg)
+
+    return f"Patched {patched} preset(s) for '{mmb_name}' -> lod_presets.cfg updated."
+
+class ForceLOD0(bpy.types.Operator):
+    """Generate a lod_presets.cfg that forces LOD0 for this mesh's presets"""
+    bl_idname  = 'object.force_lod0'
+    bl_label   = 'Force LOD0'
+    bl_options = {'REGISTER'}
+
+    needs_override: bpy.props.BoolProperty(default=False, options={'HIDDEN'})
+
+    @classmethod
+    def poll(cls, context):
+        return asset is not None
+
+    def invoke(self, context, event):
+        SWOMT = context.scene.SWOMT
+        mmb_name = os.path.basename(SWOMT.AssetPath) if SWOMT.AssetPath else ''
+        plugin_dir = os.path.dirname(os.path.abspath(__file__))
+        json_path  = os.path.join(plugin_dir, "mmb_lod_presets.json")
+        found = False
+        if mmb_name and os.path.isfile(json_path):
+            with open(json_path, 'r', encoding='utf-8') as f:
+                db = json.load(f)
+            mmb_stem = os.path.splitext(mmb_name)[0].lower()
+            matches = [e for e in db if os.path.splitext(e['mmb'])[0].lower() in mmb_stem]
+            found = len(matches) == 1
+
+        if found:
+            self.needs_override = False
+            return self.execute(context)
+        else:
+            self.needs_override = True
+            SWOMT.force_lod0_mmb_override = mmb_name # fill with current mmb filename
+            return context.window_manager.invoke_props_dialog(self, width=420)
+
+    def draw(self, context):
+        layout = self.layout
+        SWOMT = context.scene.SWOMT
+        mmb_name = os.path.basename(SWOMT.AssetPath) if SWOMT.AssetPath else ''
+        if mmb_name:
+            layout.label(text=f"'{mmb_name}' was not found in mmb_lod_presets.json.")
+        else:
+            layout.label(text="No .mmb file loaded.")
+        layout.label(text="Enter the original .mmb filename to look up:")
+        layout.prop(SWOMT, "force_lod0_mmb_override", text="")
+
+    def execute(self, context):
+        SWOMT = context.scene.SWOMT
+        if self.needs_override:
+            mmb_name = SWOMT.force_lod0_mmb_override.strip()
+        else:
+            mmb_name = os.path.basename(SWOMT.AssetPath) if SWOMT.AssetPath else ''
+
+        if not mmb_name:
+            self.report({'ERROR'}, "No .mmb filename provided.")
+            return {'CANCELLED'}
+
+        asset_dir = os.path.dirname(SWOMT.AssetPath) if SWOMT.AssetPath else ''
+        if not asset_dir:
+            self.report({'ERROR'}, "No asset path loaded.")
+            return {'CANCELLED'}
+
+        cfg_override = SWOMT.force_lod0_cfg_path.strip()
+        msg = _force_lod0_generate_cfg(mmb_name, asset_dir, cfg_override=cfg_override, operator=self)
+        if msg.startswith("Patched"):
+            SWOMT.force_lod0_output_path = cfg_override if cfg_override else os.path.join(asset_dir, "lod_presets.cfg")
+            self.report({'INFO'}, msg)
+        else:
+            SWOMT.force_lod0_output_path = ""
+            self.report({'ERROR'}, msg)
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
 
 # OPERATORS #
 class BrowseMMBFile(bpy.types.Operator):
@@ -2581,6 +2748,34 @@ class BrowseMMBFile(bpy.types.Operator):
 
     def execute(self, context):
         context.scene.SWOMT.AssetPath = self.filepath
+        return {'FINISHED'}
+
+class BrowseLodPresetsCfg(bpy.types.Operator):
+    """Select an existing lod_presets.cfg to update"""
+    bl_idname = "object.browse_lod_presets_cfg"
+    bl_label  = "Select lod_presets.cfg"
+
+    filepath:    bpy.props.StringProperty(subtype="FILE_PATH")
+    filter_glob: bpy.props.StringProperty(default="*.cfg", options={'HIDDEN'})
+
+    def invoke(self, context, event):
+        current = context.scene.SWOMT.force_lod0_cfg_path
+        if current:
+            self.filepath = current
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        context.scene.SWOMT.force_lod0_cfg_path = self.filepath
+        return {'FINISHED'}
+
+class ClearLodPresetsCfg(bpy.types.Operator):
+    """Clear the selected lod_presets.cfg"""
+    bl_idname = "object.clear_lod_presets_cfg"
+    bl_label  = "Clear lod_presets.cfg selection"
+
+    def execute(self, context):
+        context.scene.SWOMT.force_lod0_cfg_path = ""
         return {'FINISHED'}
 
 
@@ -2659,6 +2854,16 @@ class ExportLOD(bpy.types.Operator):
         lod  = mesh.lods[self.lod_index]
         lod_obj_name = lod.blender_obj_name or f"{mesh.name}_LOD{self.lod_index}"
         tri_obj = BME.find_object_by_name(lod_obj_name)
+
+        # Block export of LOD1-3 when vert count has changed. LOD0 is not streamed and exports correctly.
+        if self.lod_index > 0 and tri_obj is not None:
+            new_vc = len(tri_obj.data.vertices)
+            if new_vc != lod.vertex_count:
+                self.report({'ERROR'},
+                    f"Cannot export '{mesh.name}' LOD{self.lod_index}: vertex count changed "
+                    f"({lod.vertex_count} -> {new_vc}). Only LOD0 supports vertex count changes.")
+                return {'CANCELLED'}
+
         if tri_obj:
             BME._bake_parent_inverse(tri_obj)
             BME._triangulate_object(tri_obj, compute_normals=context.scene.SWOMT.compute_normals_on_export)
@@ -3127,73 +3332,6 @@ class AddMeshBone(bpy.types.Operator):
         self.report({'INFO'}, f"'{new_name}' staged for addition via {source} (will patch on export)")
         return {'FINISHED'}
 
-
-class ZeroOutMesh(bpy.types.Operator):
-    """Zero out all vertex positions for all LODs of this mesh in the _MOD file"""
-    bl_idname = "object.zero_out_mesh"
-    bl_label = "Zero Out"
-
-    mesh_index: bpy.props.IntProperty()
-
-    @classmethod
-    def poll(cls, context):
-        return asset is not None
-
-    def execute(self, context):
-        mesh = asset.meshes[self.mesh_index]
-        mesh.zeroed_out_in_session = True
-
-        # Update any already-imported Blender objects in the viewport
-        for li, lod in enumerate(mesh.lods):
-            obj_name = lod.blender_obj_name if lod.blender_obj_name else f"{mesh.name}_LOD{li}"
-            obj = bpy.data.objects.get(obj_name)
-            if obj is not None:
-                for vert in obj.data.vertices:
-                    vert.co = (0.0, 0.0, 0.0)
-                obj.data.update()
-
-        self.report({'INFO'}, f"'{mesh.name}' hidden in viewport — will be zeroed in _MOD on Export.")
-        return {'FINISHED'}
-
-
-class RevertMesh(bpy.types.Operator):
-    """Revert vertex positions to original for all LODs of this mesh in the _MOD file.
-    Only works if Zero Out was used in this session."""
-    bl_idname = "object.revert_mesh"
-    bl_label = "Revert"
-
-    mesh_index: bpy.props.IntProperty()
-
-    @classmethod
-    def poll(cls, context):
-        return asset is not None
-
-    def execute(self, context):
-        mesh = asset.meshes[self.mesh_index]
-
-        if not mesh.zeroed_out_in_session:
-            self.report({'WARNING'}, "Mesh was not zeroed out in this session — nothing to revert.")
-            return {'CANCELLED'}
-
-        SWOMT = context.scene.SWOMT
-        original_file = get_merged_mmb(SWOMT.AssetPath)
-
-        # Update any already-imported Blender objects in the viewport
-        raw_mesh_file = mesh.extract_mesh_file(original_file)
-        for li, lod in enumerate(mesh.lods):
-            obj_name = lod.blender_obj_name if lod.blender_obj_name else f"{mesh.name}_LOD{li}"
-            obj = bpy.data.objects.get(obj_name)
-            if obj is not None:
-                verts = lod.get_vertex_positions(raw_mesh_file)
-                for i, vert in enumerate(obj.data.vertices):
-                    vert.co = (-verts[i][0], verts[i][1], verts[i][2])
-                obj.data.update()
-
-        mesh.zeroed_out_in_session = False
-        self.report({'INFO'}, f"Reverted '{mesh.name}' ({len(mesh.lods)} LOD(s)) to original positions.")
-        return {'FINISHED'}
-
-
 class SelectMGraphObject(bpy.types.Operator):
     """Select the MGraphObject file and patch the mesh name inside it"""
     bl_idname = "object.select_mgraphobject"
@@ -3258,7 +3396,6 @@ class SelectMGraphObject(bpy.types.Operator):
         self.report({'INFO'}, f"Patched {count} MeshName occurrence(s): '{old_name}' -> '{new_name}' in {os.path.basename(self.filepath)} (backup: {os.path.basename(backup_path)})")
         return {'FINISHED'}
 
-
 class RenameMMBFile(bpy.types.Operator):
     """Rename the loaded .mmb file on disk and update path references in a mgraphobject"""
     bl_idname = "object.rename_mmb_file"
@@ -3309,7 +3446,6 @@ class RenameMMBFile(bpy.types.Operator):
 
         bpy.ops.object.select_mgraphobject_file_patch('INVOKE_DEFAULT')
         return {'FINISHED'}
-
 
 class SelectMGraphObjectFilePatch(bpy.types.Operator):
     """Select the MGraphObject file and update all path references to the renamed .mmb"""
@@ -3474,6 +3610,7 @@ class ExportAllLODs(bpy.types.Operator):
         # top of _MOD.mmb when it already exists, so each pass layers on top of
         # the previous one correctly.
         exported_any = False
+        skipped_lods = []  # Skipped due to vert count change
         for lod_n in range(4):
             edited = {}
             for m in asset.meshes:
@@ -3481,8 +3618,14 @@ class ExportAllLODs(bpy.types.Operator):
                     continue
                 lod = m.lods[lod_n]
                 obj_name = lod.blender_obj_name or f"{m.name}_LOD{lod_n}"
-                if BME.find_object_by_name(obj_name) is not None:
-                    edited[m.index] = lod_n
+                obj = BME.find_object_by_name(obj_name)
+                if obj is None:
+                    continue
+                # Block LOD1-3 with changed vert count - streaming breaks in-game.
+                if lod_n > 0 and len(obj.data.vertices) != lod.vertex_count:
+                    skipped_lods.append((m.name, lod_n, lod.vertex_count, len(obj.data.vertices)))
+                    continue
+                edited[m.index] = lod_n
             if not edited:
                 continue
             try:
@@ -3491,6 +3634,12 @@ class ExportAllLODs(bpy.types.Operator):
             except Exception as e:
                 self.report({'ERROR'}, f"Export LOD{lod_n} failed: {e}")
                 return {'CANCELLED'}
+
+        if skipped_lods:
+            names = ', '.join(f"'{n}' LOD{li} ({oc}→{nc})" for n,li,oc,nc in skipped_lods)
+            self.report({'WARNING'},
+                f"Skipped {len(skipped_lods)} LOD(s) with changed vertex count: {names}."
+                f"Only LOD0 supports vertex count changes.")
 
         if not exported_any:
             self.report({'WARNING'}, "No LOD objects found in scene to export.")
@@ -3561,16 +3710,6 @@ class SWOMTPanel(bpy.types.Panel):
         if asset:
             row.label(text=asset.name)
             row.operator("object.rename_mmb_file", text="Rename File")
-            any_imported = any(
-                len(m.lods) > lod_n and bpy.data.objects.get(
-                    m.lods[lod_n].blender_obj_name if m.lods[lod_n].blender_obj_name else f"{m.name}_LOD{lod_n}"
-                ) is not None
-                for m in asset.meshes if m.lods
-                for lod_n in range(len(m.lods))
-            )
-            gen_lods_row = layout.row()
-            gen_lods_row.enabled = any_imported
-            gen_lods_row.operator("object.generate_lods", text="Generate LODs", icon="MOD_DECIM")
             layout.separator()
             layout.label(text="Import", icon='IMPORT')
             imp_row = layout.row(align=True)
@@ -3583,8 +3722,29 @@ class SWOMTPanel(bpy.types.Panel):
             layout.label(text="Export", icon='EXPORT')
             exp_row = layout.row()
             exp_row.scale_y = 1.5
-            exp_row.enabled = any_imported
+            exp_row.enabled = any(
+                len(m.lods) > lod_n and bpy.data.objects.get(
+                    m.lods[lod_n].blender_obj_name if m.lods[lod_n].blender_obj_name else f"{m.name}_LOD{lod_n}"
+                ) is not None
+                for m in asset.meshes if m.lods
+                for lod_n in range(len(m.lods))
+            )
             exp_row.operator("object.export_all_lods", text="Export All LODs")
+            force_row = layout.row(align=True)
+            cfg_selected = bool(SWOMT.force_lod0_cfg_path.strip())
+            btn_text = "Update 'lod_presets.cfg' file (Force LOD0)" if cfg_selected else "Generate 'lod_presets.cfg' file (Force LOD0)"
+            force_row.operator("object.force_lod0", text=btn_text, icon='FILE_NEW')
+            force_row.operator("object.browse_lod_presets_cfg", text="", icon='FILEBROWSER')
+            if cfg_selected:
+                force_row.operator("object.clear_lod_presets_cfg", text="", icon='REMOVE')
+            if SWOMT.force_lod0_output_path:
+                info_box = layout.box()
+                if cfg_selected:
+                    info_box.label(text="Updated file:", icon='INFO')
+                    info_box.label(text=SWOMT.force_lod0_output_path)
+                else:
+                    info_box.label(text="Place generated file at:", icon='INFO')
+                    info_box.label(text=r"...\AFOP\rogue\modules\core\graphobject\lod_presets.cfg")
 
             # Export Options collapsible box
             forced = _vert_count_changed()
@@ -3618,9 +3778,26 @@ class SWOMTPanel(bpy.types.Panel):
                     uvs_row.label(text="", icon='LOCKED')
                 else:
                     uvs_row.prop(SWOMT, "export_uvs")
+
+            # Warn if any LOD1-3 across all meshes has a changed vert count
             if forced:
+                tip_row = layout.row()
+                tip_row.label(text="Tip: Transfer Weights from original mesh", icon='INFO')
+            lod_vc_changed = []
+            for m in asset.meshes:
+                for li, l in enumerate(m.lods):
+                    if li == 0:
+                        continue
+                    obj_name = l.blender_obj_name if l.blender_obj_name else f"{m.name}_LOD{li}"
+                    obj = bpy.data.objects.get(obj_name)
+                    if obj is not None and len(obj.data.vertices) != l.vertex_count:
+                        lod_vc_changed.append(li)
+            if lod_vc_changed:
+                skipped_str = ', '.join(f"LOD{li}" for li in sorted(set(lod_vc_changed)))
                 warn_row = layout.row()
-                warn_row.label(text="Tip: Transfer Weights from original mesh", icon='INFO')
+                warn_row.label(
+                    text=f"Only LOD0 supports vertex count changes - {skipped_str} will be skipped.",
+                    icon='ERROR')
             for mi, m in enumerate(asset.meshes):
                 expanded = SWOMT.mesh_expanded[mi] if mi < 32 else True
                 mesh_row = layout.row()
@@ -3634,11 +3811,6 @@ class SWOMTPanel(bpy.types.Panel):
                 if expanded:
                     rename_op = name_right.operator("object.rename_mesh", text="Rename Mesh")
                     rename_op.mesh_index = mi
-                    action_row = mesh_box.row()
-                    zero_op = action_row.operator("object.zero_out_mesh", text="Remove Mesh")
-                    zero_op.mesh_index = mi
-                    revert_op = action_row.operator("object.revert_mesh", text="Revert Mesh")
-                    revert_op.mesh_index = mi
                     for li,l in enumerate(m.lods):
                         row = mesh_box.row()
                         row.label(text = f"LOD{li} - {l.vertex_count}", icon = "CON_SIZELIKE")
@@ -3755,161 +3927,30 @@ class ApplyUpdate(bpy.types.Operator):
             self.report({'ERROR'}, f"Could not write file: {e}")
             return {'CANCELLED'}
 
-        # Update bone_matrices.json
-        ok, err = _download_bone_json()
+        # Update data files
+        warnings = []
+        for url, filename in [
+            (_BONE_JSON_URL, _BONE_JSON_FILENAME),
+            (_LOD_CFG_URL, _LOD_CFG_FILENAME),
+            (_MMB_JSON_URL, _MMB_JSON_FILENAME),
+        ]:
+            ok, err = _download_data_file(url, filename)
+            if not ok:
+                warnings.append(f"{filename}: {err}")
 
         global _update_status
         _update_status = None
-        if not ok:
-            self.report({'WARNING'}, f"Updated! Restart Blender to apply. (Failed to download bone_matrices.json): {err}")
+        if warnings:
+            self.report({'WARNING'}, f"Updated! Restart Blender to apply. Failed to download: {', '.join(warnings)}")
         else:
             self.report({'INFO'}, "Updated! Restart Blender to apply.")
         return {'FINISHED'}
 
 
-class GenerateLODs(bpy.types.Operator):
-    """Generate LODs for all imported LOD0 meshes by decimating from LOD0"""
-    bl_idname = 'object.generate_lods'
-    bl_label = "Generate LODs"
-
-    @classmethod
-    def poll(cls, context):
-        if asset is None:
-            return False
-        return any(
-            bpy.data.objects.get(
-                m.lods[0].blender_obj_name if m.lods and m.lods[0].blender_obj_name else f"{m.name}_LOD0"
-            ) is not None
-            for m in asset.meshes if m.lods
-        )
-
-    def execute(self, context):
-        import bpy as _bpy
-        import bmesh as _bmesh
-
-        # Helper to find a VIEW_3D area for operator context overrides
-        def get_view3d_override(obj):
-            for window in _bpy.context.window_manager.windows:
-                for area in window.screen.areas:
-                    if area.type == 'VIEW_3D':
-                        return _bpy.context.temp_override(
-                            window=window, area=area,
-                            active_object=obj,
-                            selected_objects=[obj],
-                            object=obj,
-                        )
-            return None
-
-        for mesh in asset.meshes:
-            if not mesh.lods or len(mesh.lods) < 2:
-                continue
-
-            lod0_name = mesh.lods[0].blender_obj_name or f"{mesh.name}_LOD0"
-            lod0_obj = bpy.data.objects.get(lod0_name)
-            if lod0_obj is None:
-                continue
-
-            lod0_vc = len(lod0_obj.data.vertices)
-            if lod0_vc == 0:
-                continue
-
-            # Find the collection(s) LOD0 belongs to (excluding the scene master collection)
-            lod0_collections = [c for c in lod0_obj.users_collection
-                                 if c != context.scene.collection]
-
-            # Determine max weights per vertex from the mesh's vertex stride.
-            stride = mesh.vertex_stride
-            if stride == 20:
-                max_weights = 4
-            elif stride == 32:
-                max_weights = 8   # 4 primary + 4 secondary
-            elif stride == 36:
-                max_weights = 8
-            elif stride == 40:
-                max_weights = 8
-            elif stride == 44:
-                max_weights = 12
-            else:
-                pos_length = 12 if mesh.position_type == 1 else 8
-                max_weights = int((stride - pos_length) / 2)
-            print(f"[AFoPMT] {mesh.name}: max weights per vertex = {max_weights} (stride={stride})")
-
-            for lod_index in range(1, len(mesh.lods)):
-                lod = mesh.lods[lod_index]
-                orig_vc = lod.vertex_count
-                if orig_vc == 0:
-                    continue
-
-                ratio = orig_vc / lod0_vc
-
-                # Duplicate LOD0 as the base for this LOD
-                new_obj = lod0_obj.copy()
-                new_obj.data = lod0_obj.data.copy()
-                new_obj.name = f"{mesh.name}_LOD{lod_index}"
-
-                # Link into the same collections as LOD0 (or scene collection as fallback)
-                if lod0_collections:
-                    for col in lod0_collections:
-                        col.objects.link(new_obj)
-                else:
-                    context.scene.collection.objects.link(new_obj)
-
-                context.view_layer.objects.active = new_obj
-                new_obj.select_set(True)
-
-                # Merge by distance before decimating to clean up seam splits
-                bm = _bmesh.new()
-                bm.from_mesh(new_obj.data)
-                _bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=1e-4)
-                bm.to_mesh(new_obj.data)
-                bm.free()
-                new_obj.data.update()
-
-                # Apply Decimate modifier
-                dec = new_obj.modifiers.new(name="Decimate", type='DECIMATE')
-                dec.ratio = max(0.001, min(1.0, ratio))
-
-                dg = _bpy.context.evaluated_depsgraph_get()
-                eval_obj = new_obj.evaluated_get(dg)
-                me = _bpy.data.meshes.new_from_object(eval_obj)
-                new_obj.modifiers.remove(dec)
-                new_obj.data = me
-
-                # Limit weights per vertex to match LOD0.
-                override = get_view3d_override(new_obj)
-                if override:
-                    with override:
-                        if _bpy.context.active_object and _bpy.context.active_object.mode != 'OBJECT':
-                            _bpy.ops.object.mode_set(mode='OBJECT')
-                        _bpy.ops.object.vertex_group_limit_total(
-                            group_select_mode='ALL',
-                            limit=max_weights
-                        )
-
-                # Compute smooth normals on the decimated mesh
-                BME._compute_normals_for_object(new_obj)
-
-                new_obj.select_set(False)
-
-                # Parent to armature if LOD0 has one
-                if lod0_obj.parent and lod0_obj.parent.type == 'ARMATURE':
-                    new_obj.parent = lod0_obj.parent
-                    new_obj.parent_type = lod0_obj.parent_type
-                    new_obj.matrix_parent_inverse = lod0_obj.matrix_parent_inverse.copy()
-                    for mod in lod0_obj.modifiers:
-                        if mod.type == 'ARMATURE':
-                            arm_mod = new_obj.modifiers.new(name=mod.name, type='ARMATURE')
-                            arm_mod.object = mod.object
-                            break
-
-                self.report({'INFO'}, f"Generated {new_obj.name} ({len(new_obj.data.vertices)} verts, ratio {ratio:.3f})")
-
-        return {'FINISHED'}
-
-
-
 classes=[SWOMTSettings,
          BrowseMMBFile,
+         BrowseLodPresetsCfg,
+         ClearLodPresetsCfg,
          ComputeNormals,
          ClearNormals,
          ImportAllLOD0s,
@@ -3917,9 +3958,7 @@ classes=[SWOMTSettings,
          ImportAllLOD2s,
          ImportAllLOD3s,
          ExportAllLODs,
-         GenerateLODs,
-         ZeroOutMesh,
-         RevertMesh,
+         ForceLOD0,
          RemapMeshBone,
          AddMeshBone,
          CheckForUpdates,
@@ -3941,8 +3980,8 @@ def register():
         bpy.app.handlers.load_post.append(_on_load_post)
     # Kick off background version check on startup
     threading.Thread(target=_check_update_thread, daemon=True).start()
-    # Download bone_matrices.json if it is missing
-    _check_bone_json()
+    # Download data files if they are missing
+    _check_data_files()
 
 def unregister():
     for c in classes:
