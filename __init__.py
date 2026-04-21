@@ -65,6 +65,30 @@ def _download_data_file(url: str, filename: str):
     except Exception as e:
         return False, str(e)
 
+def _mod_file_output(src_path: str, overwrite: bool = False) -> str:
+    """
+    Determine the output file path with overwrite protection.
+
+    - If overwrite is True, return 'src_path' directly (overwrite the loaded file).
+    - If src_path already contains '_MOD' in its stem, return it directly. (overwrite it)
+    - If '<stem>_MOD.mmb' doesn't exist, return it. If it does, increment: '<stem>_MOD1.mmb', '<stem>_MOD2.mmb', etc.
+    """
+    if overwrite:
+        return src_path
+    stem, _ = os.path.splitext(src_path)
+    # If already a _MOD file, overwrite it
+    if '_MOD' in os.path.basename(stem):
+        return src_path
+    base = stem + "_MOD.mmb"
+    if not os.path.isfile(base):
+        return base
+    i = 1
+    while True:
+        candidate = f"{stem}_MOD{i}.mmb"
+        if not os.path.isfile(candidate):
+            return candidate
+        i += 1
+
 def _check_data_files():
     """If any data files are missing, download them in the background"""
     plugin_dir = os.path.dirname(os.path.abspath(__file__))
@@ -2543,6 +2567,11 @@ def _on_export_uvs_update(self, context):
 
 class SWOMTSettings(bpy.types.PropertyGroup):
     AssetPath: bpy.props.StringProperty(name="Asset Path", update=_auto_load_mmb)
+    overwrite_existing: bpy.props.BoolProperty(
+        name="Overwrite existing file",
+        default=False,
+        description="When checked, export overwrites the loaded file instead of creating a new _MOD file",
+    )
     mesh_expanded: bpy.props.BoolVectorProperty(size=32, default=tuple([False]*32))
     bone_slots_expanded: bpy.props.BoolVectorProperty(size=32, default=tuple([False]*32))
     compute_normals_on_export: bpy.props.BoolProperty(
@@ -2847,7 +2876,7 @@ class ExportLOD(bpy.types.Operator):
 
         SWOMT = context.scene.SWOMT
         src_path = SWOMT.AssetPath
-        mod_file = os.path.splitext(src_path)[0] + "_MOD.mmb"
+        mod_file = _mod_file_output(src_path, overwrite=SWOMT.overwrite_existing)
 
         # Triangulate the Blender mesh before export so all faces are tris
         mesh = asset.meshes[self.mesh_index]
@@ -2889,7 +2918,10 @@ class ExportLOD(bpy.types.Operator):
             except Exception as e:
                 self.report({'ERROR'}, f"Failed to rename mod file: {e}")
                 return {'FINISHED'}
+            SWOMT.AssetPath = new_file
             self.report({'INFO'}, f"Exported -> {os.path.basename(new_file)}")
+        else:
+            SWOMT.AssetPath = mod_file
 
         return {'FINISHED'}
 
@@ -3594,7 +3626,7 @@ class ExportAllLODs(bpy.types.Operator):
 
         SWOMT = context.scene.SWOMT
         src_path = SWOMT.AssetPath
-        mod_file = os.path.splitext(src_path)[0] + "_MOD.mmb"
+        mod_file = _mod_file_output(src_path, overwrite=SWOMT.overwrite_existing)
 
         # Bake parent inverse and triangulate every LOD object that exists in the scene.
         # Baking must happen before triangulation so vertex positions are correct.
@@ -3656,7 +3688,10 @@ class ExportAllLODs(bpy.types.Operator):
             except Exception as e:
                 self.report({'ERROR'}, f"Failed to rename mod file: {e}")
                 return {'FINISHED'}
+            SWOMT.AssetPath = new_file
             self.report({'INFO'}, f"Exported -> {os.path.basename(new_file)}")
+        else:
+            SWOMT.AssetPath = mod_file
 
         return {'FINISHED'}
 
@@ -3699,6 +3734,7 @@ class SWOMTPanel(bpy.types.Panel):
         row = layout.row(align=True)
         row.prop(SWOMT, "AssetPath", text="Asset Path")
         row.operator("object.browse_mmb_file", text="", icon="FILE_FOLDER")
+        layout.prop(SWOMT, "overwrite_existing")
 
         layout.separator()
         row = layout.row()
