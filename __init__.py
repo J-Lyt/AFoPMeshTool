@@ -549,10 +549,13 @@ class SkeletalMeshAsset(Asset):
                     iw = {}
                     stride_start = f.tell()
                     if stride == 20:
-                        f.seek(8, 1)
-                        weight_count = 4
+                        pos_skip = 12 if self.parent_mesh.position_type == 1 else 8
+                        f.seek(pos_skip, 1)
+                        remaining = stride - pos_skip
+                        index_count = 4
+                        weight_count = (remaining - index_count) // 2
                         weights = [br.uint16(f) / 32767.0 for _ in range(weight_count)]
-                        indices = [br.uint8(f) for _ in range(weight_count)]
+                        indices = [br.uint8(f) for _ in range(index_count)]
                         for i in range(weight_count):
                             if weights[i] > 0.0:
                                 iw[indices[i]] = weights[i]
@@ -603,7 +606,7 @@ class SkeletalMeshAsset(Asset):
                             if weights[i] > 0.0:
                                 iw[indices[i]] = weights[i]
                     else:
-                        pos_length = 12 if stride == 28 else 8
+                        pos_length = 12 if self.parent_mesh.position_type == 1 else 8
                         f.seek(pos_length, 1)
                         weight_count = int((stride - pos_length) / 2)
                         weights = []
