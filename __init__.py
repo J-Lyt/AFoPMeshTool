@@ -44,8 +44,6 @@ import operator
 
 # Auto-update
 _RAW_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/fullExport/__init__.py"
-_BONE_JSON_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/fullExport/bone_matrices.json"
-_BONE_JSON_FILENAME = "bone_matrices.json"
 _LOD_CFG_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/fullExport/lod_presets.cfg"
 _LOD_CFG_FILENAME = "lod_presets.cfg"
 _MMB_JSON_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/fullExport/mmb_lod_presets.json"
@@ -94,7 +92,6 @@ def _check_data_files():
     plugin_dir = os.path.dirname(os.path.abspath(__file__))
     missing = []
     for url, filename in [
-        (_BONE_JSON_URL, _BONE_JSON_FILENAME),
         (_LOD_CFG_URL,   _LOD_CFG_FILENAME),
         (_MMB_JSON_URL,  _MMB_JSON_FILENAME),
     ]:
@@ -1954,34 +1951,46 @@ class BlenderMeshExporter:
                 elif stride == 32:
                     vert_count_matches = len(data.vertices) == lod.vertex_count
                     if orig_stride32_data is not None and vert_count_matches and vi < len(orig_stride32_data):
-                        # Vert count unchanged: preserve exact slot order from source.
                         orig_all_w, orig_all_i = orig_stride32_data[vi]
                         if stride32_use_u16:
                             # Layout B
                             remaining = {s: w for s, w in raw_weights}
-                            # Write 6 weight bytes preserving slot order
+                            # fill zero-weight slots with any added-bone weights that original indices don't cover.
+                            all_i = list(orig_all_i)
+                            extra = sorted(remaining.keys() - set(all_i),
+                                           key=lambda s: remaining[s], reverse=True)
                             for k in range(6):
-                                if k < len(orig_all_i):
-                                    bone = orig_all_i[k]
-                                    w = remaining.pop(bone, 0.0)
-                                else:
-                                    w = 0.0
+                                if all_i[k] not in remaining and extra:
+                                    all_i[k] = extra.pop(0)
+                            # Write 6 weight bytes
+                            for k in range(6):
+                                bone = all_i[k]
+                                w = remaining.pop(bone, 0.0)
                                 f.write(bp.uint8(max(0, min(int(round(w * 255)), 255))))
                             f.write(b'\x00\x00') # 2 padding bytes
                             # Write 6 uint16 indices
-                            for idx in orig_all_i:
+                            for idx in all_i:
                                 f.write(bp.uint16(idx))
                         else:
                             # Layout A
                             weight_slots = range(8) if sum(orig_all_w) == 32767 else range(4)
                             remaining = {s: w for s, w in raw_weights}
+                            # Inject added-bone weights into zero-weight positions.
+                            all_i = list(orig_all_i)
+                            empty_slots = [k for k in weight_slots if orig_all_w[k] == 0]
+                            extra = sorted(remaining.keys() - set(all_i),
+                                           key=lambda s: remaining[s], reverse=True)
+                            for k in empty_slots:
+                                if not extra:
+                                    break
+                                all_i[k] = extra.pop(0)
                             for slot in weight_slots:
-                                bone = orig_all_i[slot]
+                                bone = all_i[slot]
                                 w = remaining.pop(bone, 0.0)
                                 f.write(bp.uint16(max(0, min(int(round(w * 32767)), 32767))))
                             for slot in range(len(weight_slots), 8):
                                 f.write(bp.uint16(orig_all_w[slot]))
-                            for bone in orig_all_i:
+                            for bone in all_i:
                                 f.write(bp.uint8(bone))
                     else:
                         # Vert count changed: write by weight desc
@@ -2058,8 +2067,14 @@ class BlenderMeshExporter:
                     # non-zero weight, pinning all verts to a single bone.
                     if orig_slot_indices is not None and vert_count_matches and vi < len(orig_slot_indices):
                         # Preserve original slot structure (vert count unchanged)
+                        # Inject any added-bone weights into zero-weight positions
                         remaining = {s: w for s, w in raw_weights}
-                        slot_idxs = orig_slot_indices[vi]
+                        slot_idxs = list(orig_slot_indices[vi])
+                        extra = sorted(remaining.keys() - set(slot_idxs),
+                                       key=lambda s: remaining[s], reverse=True)
+                        for k in range(len(slot_idxs)):
+                            if slot_idxs[k] not in remaining and extra:
+                                slot_idxs[k] = extra.pop(0)
                         for slot_bone in slot_idxs:
                             w = remaining.pop(slot_bone, 0.0)
                             f.write(bp.uint8(max(0, min(int(round(w * 255)), 255))))
@@ -2992,26 +3007,72 @@ class RenameMesh(bpy.types.Operator):
         return {'FINISHED'}
 
 
-_bone_matrices = None
-
-def _load_bone_matrices():
+def _compute_inv_bind_from_skeleton(bone_name):
     """
-    Load bone_matrices.json from the same directory as the plugin file
+    Compute the inverse bind matrix for a bone from the currently loaded skeleton.
     """
-    global _bone_matrices
-    if _bone_matrices is not None:
-        return _bone_matrices
-    json_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bone_matrices.json")
-    if not os.path.isfile(json_path):
+    if asset is None:
         return None
+    bone_idx = next((i for i, b in enumerate(asset.bones) if b.name == bone_name), None)
+    if bone_idx is None:
+        return None
+
+    SWOMT = bpy.context.scene.SWOMT
+    src_path = SWOMT.AssetPath
+    mod_candidate = os.path.splitext(src_path)[0] + "_MOD.mmb"
+    base_path = mod_candidate if os.path.isfile(mod_candidate) else src_path
+    if not os.path.isfile(base_path):
+        return None
+
     try:
-        import json
-        with open(json_path, 'r', encoding='utf-8') as f:
-            _bone_matrices = json.load(f)
-        print(f"[AFoPMT] Loaded {len(_bone_matrices)} bone matrices from bone_matrices.json")
-        return _bone_matrices
-    except Exception as e:
-        print(f"[AFoPMT] Failed to load bone_matrices.json: {e}")
+        with open(base_path, 'rb') as f:
+            data = f.read()
+
+        pos = 0
+        version = data[3]
+        pos += 8
+        if version >= 15:
+            pos += 4
+        bone_count = unpack('<I', data[pos:pos+4])[0]
+        pos += 4
+
+        # Read all file_local matrices and parent indices
+        file_locals = []
+        parents = []
+        for i in range(bone_count):
+            nlen = unpack('<H', data[pos:pos+2])[0]; pos += 2
+            pos += nlen  # skip name
+            raw = unpack('<16f', data[pos:pos+64]); pos += 64
+            parent_idx = unpack('<H', data[pos:pos+2])[0]; pos += 2
+            m = Matrix([
+                [raw[0], raw[4], raw[8],  raw[12]],
+                [raw[1], raw[5], raw[9],  raw[13]],
+                [raw[2], raw[6], raw[10], raw[14]],
+                [raw[3], raw[7], raw[11], raw[15]],
+            ])
+            file_locals.append(m)
+            parents.append(parent_idx)
+
+        # Get file_world for target bone
+        file_world_cache = [None] * bone_count
+        def get_fw(i):
+            if file_world_cache[i] is not None:
+                return file_world_cache[i]
+            if parents[i] == 65535:
+                file_world_cache[i] = file_locals[i]
+            else:
+                file_world_cache[i] = get_fw(parents[i]) @ file_locals[i]
+            return file_world_cache[i]
+
+        fw = get_fw(bone_idx)
+        try:
+            inv_bind = fw.inverted()
+        except ValueError:
+            return None
+
+        return tuple(inv_bind[r][c] for c in range(4) for r in range(4))
+
+    except Exception:
         return None
 
 
@@ -3100,11 +3161,7 @@ def _bone_search_cb(self, context, edit_text):
 
 
 class RemapMeshBone(bpy.types.Operator):
-    """
-    Remap a mesh bone slot to a different bone.
-    By default the inverse bind matrix is looked up from bone_matrices.json.
-    Uncheck Auto to supply a donor MMB file instead.
-    """
+    """Remap a mesh bone slot to a different bone"""
     bl_idname = "object.remap_mesh_bone"
     bl_label = "Remap Bone Slot"
 
@@ -3119,7 +3176,7 @@ class RemapMeshBone(bpy.types.Operator):
     )
     use_auto: bpy.props.BoolProperty(
         name="Auto",
-        description="Use bone_matrices.json for the inverse bind matrix (Recommended). Uncheck to select a donor MMB file instead.",
+        description="Derive the inverse bind matrix from the loaded skeleton (Recommended). Uncheck to select a donor MMB file instead.",
         default=True,
     )
     donor_path: bpy.props.StringProperty(
@@ -3153,12 +3210,7 @@ class RemapMeshBone(bpy.types.Operator):
         layout.prop(self, "new_bone_name", text="New Bone", icon="BONE_DATA")
         layout.separator()
         layout.prop(self, "use_auto")
-        if self.use_auto:
-            matrices = _load_bone_matrices()
-            if matrices is None:
-                layout.label(text="bone_matrices.json not found in plugin folder", icon="ERROR")
-                layout.label(text="Ensure plugin was installed correctly")
-        else:
+        if not self.use_auto:
             layout.label(text="Donor MMB - an MMB file whose mesh already uses the new bone:", icon="FILE")
             layout.prop(self, "donor_path", text="")
 
@@ -3191,22 +3243,16 @@ class RemapMeshBone(bpy.types.Operator):
             self.report({'ERROR'}, f"Slot already has '{new_name}' at position {mesh_bones_list.index(new_skel_idx)}")
             return {'CANCELLED'}
 
-        # Get the inverse bind matrix from either the JSON file or a donor mmb
-        new_matrix = None
+        # Get the inverse bind matrix
+        # Auto: derive directly from the loaded skeleton (Recommended).
+        # Manual: read from a donor MMB file.
         if self.use_auto:
-            matrices = _load_bone_matrices()
-            if matrices is None:
-                self.report({'ERROR'},
-                    "bone_matrices.json not found in the plugin folder. "
-                    "Ensure plugin was installed correctly.")
-                return {'CANCELLED'}
-            new_matrix = matrices.get(new_name)
+            new_matrix = _compute_inv_bind_from_skeleton(new_name)
             if new_matrix is None:
                 self.report({'ERROR'},
-                    f"'{new_name}' not found in bone_matrices.json. "
+                    f"Could not derive inv_bind for '{new_name}' from the loaded skeleton. "
                     f"Uncheck Auto and supply a donor MMB instead.")
                 return {'CANCELLED'}
-            new_matrix = tuple(new_matrix)
         else:
             donor_path = self.donor_path.strip()
             if not donor_path or not os.path.isfile(donor_path):
@@ -3240,16 +3286,12 @@ class RemapMeshBone(bpy.types.Operator):
                 if vg is not None:
                     vg.name = new_name
 
-        source = "bone_matrices.json" if self.use_auto else "donor MMB"
+        source = "skeleton" if self.use_auto else "donor MMB"
         self.report({'INFO'}, f"Slot {self.slot_index}: '{old_name}' to '{new_name}' via {source} (will patch on export)")
         return {'FINISHED'}
 
 class AddMeshBone(bpy.types.Operator):
-    """
-    Add a new bone slot to this mesh's bone table.
-    Appends a new 66-byte entry (matrix + skeleton index) to the bone table to the
-    exported file and creates the matching vertex group in Blender.
-    """
+    """Add a new bone slot to this mesh's bone table"""
     bl_idname = "object.add_mesh_bone"
     bl_label = "Add Bone Slot"
 
@@ -3263,7 +3305,7 @@ class AddMeshBone(bpy.types.Operator):
     )
     use_auto: bpy.props.BoolProperty(
         name="Auto",
-        description="Use bone_matrices.json for the inverse bind matrix (Recommended). Uncheck to select a donor MMB file instead.",
+        description="Derive the inverse bind matrix from the loaded skeleton (Recommended). Uncheck to select a donor MMB file instead.",
         default=True,
     )
     donor_path: bpy.props.StringProperty(
@@ -3291,12 +3333,7 @@ class AddMeshBone(bpy.types.Operator):
         layout.prop(self, "new_bone_name", text="New Bone", icon="BONE_DATA")
         layout.separator()
         layout.prop(self, "use_auto")
-        if self.use_auto:
-            matrices = _load_bone_matrices()
-            if matrices is None:
-                layout.label(text="bone_matrices.json not found in plugin folder.", icon="ERROR")
-                layout.label(text="Ensure plugin was installed correctly")
-        else:
+        if not self.use_auto:
             layout.label(text="Donor MMB - an MMB file whose mesh already uses the new bone:", icon="FILE")
             layout.prop(self, "donor_path", text="")
 
@@ -3322,22 +3359,16 @@ class AddMeshBone(bpy.types.Operator):
             self.report({'ERROR'}, f"'{new_name}' is already staged for addition.")
             return {'CANCELLED'}
 
-        # Get the inverse bind matrix
-        new_matrix = None
+        # Get the inverse bind matrix.
+        # Auto: derive directly from the loaded skeleton (Recommended).
+        # Manual: read from a donor MMB file.
         if self.use_auto:
-            matrices = _load_bone_matrices()
-            if matrices is None:
-                self.report({'ERROR'},
-                    "bone_matrices.json not found in the plugin folder. "
-                    "Ensure plugin was installed correctly.")
-                return {'CANCELLED'}
-            new_matrix = matrices.get(new_name)
+            new_matrix = _compute_inv_bind_from_skeleton(new_name)
             if new_matrix is None:
                 self.report({'ERROR'},
-                    f"'{new_name}' not found in bone_matrices.json. "
+                    f"Could not derive inv_bind for '{new_name}' from the loaded skeleton. "
                     f"Uncheck Auto and supply a donor MMB instead.")
                 return {'CANCELLED'}
-            new_matrix = tuple(new_matrix)
         else:
             donor_path = self.donor_path.strip()
             if not donor_path or not os.path.isfile(donor_path):
@@ -3363,7 +3394,7 @@ class AddMeshBone(bpy.types.Operator):
             if obj is not None and obj.vertex_groups.get(new_name) is None:
                 obj.vertex_groups.new(name=new_name)
 
-        source = "bone_matrices.json" if self.use_auto else "donor MMB"
+        source = "skeleton" if self.use_auto else "donor MMB"
         self.report({'INFO'}, f"'{new_name}' staged for addition via {source} (will patch on export)")
         return {'FINISHED'}
 
@@ -3975,7 +4006,6 @@ class ApplyUpdate(bpy.types.Operator):
         # Update data files
         warnings = []
         for url, filename in [
-            (_BONE_JSON_URL, _BONE_JSON_FILENAME),
             (_LOD_CFG_URL, _LOD_CFG_FILENAME),
             (_MMB_JSON_URL, _MMB_JSON_FILENAME),
         ]:
