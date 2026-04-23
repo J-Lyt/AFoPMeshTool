@@ -3769,6 +3769,12 @@ class SWOMTPanel(bpy.types.Panel):
                 for lod_n in range(len(m.lods))
             )
             exp_row.operator("object.export_all_lods", text="Export All LODs")
+            pose_row = layout.row()
+            pose_row.scale_y = 1.2
+            arm_obj = bpy.data.objects.get(asset.name) if asset else None
+            pose_row.enabled = arm_obj is not None and arm_obj.type == 'ARMATURE'
+            pose_row.operator("object.export_posed_bone_matrices",
+                              text="Export Pose as New Rest Pose", icon="ARMATURE_DATA")
             force_row = layout.row(align=True)
             cfg_selected = bool(SWOMT.force_lod0_cfg_path.strip())
             btn_text = "Update 'lod_presets.cfg' file (Force LOD0)" if cfg_selected else "Generate 'lod_presets.cfg' file (Force LOD0)"
@@ -3986,6 +3992,212 @@ class ApplyUpdate(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class ExportPosedBoneMatrices(bpy.types.Operator):
+    """
+    Export the armature's current pose.
+
+    Use this after posing the armature in 'Pose Mode'.
+    """
+    bl_idname = "object.export_posed_bone_matrices"
+    bl_label = "Export Pose as New Rest Pose"
+    bl_options = {'REGISTER'}
+
+    @classmethod
+    def poll(cls, context):
+        if asset is None:
+            return False
+        arm_obj = bpy.data.objects.get(asset.name)
+        return arm_obj is not None and arm_obj.type == 'ARMATURE'
+
+    def execute(self, context):
+        SWOMT = context.scene.SWOMT
+        src_path = SWOMT.AssetPath
+        arm_obj = bpy.data.objects.get(asset.name)
+
+        if arm_obj is None or arm_obj.type != 'ARMATURE':
+            self.report({'ERROR'}, "Armature object not found in scene.")
+            return {'CANCELLED'}
+
+        # Build pose_bone armature-local matrices for every bone.
+        arm_pose_local = {} # bone_name -> Matrix (armature-local)
+        for pb in arm_obj.pose.bones:
+            arm_pose_local[pb.name] = pb.matrix.copy()
+
+        S = Matrix.Scale(-1.0, 4, Vector((1.0, 0.0, 0.0))) # diag(-1,1,1,1)
+
+        def pose_to_file_world(pose_mat):
+            """Convert pose_bone.matrix (Blender armature-local) to MMB file-space world matrix."""
+            return S @ pose_mat
+
+        # Determine which bones are actually posed (differ from rest pose).
+        POSE_EPSILON = 1e-4
+
+        def _is_posed(pb):
+            """Return True if this bone's pose differs from its rest."""
+            rest_al = pb.bone.matrix_local
+            pose_al = pb.matrix
+            for r in range(4):
+                for c in range(4):
+                    if abs(pose_al[r][c] - rest_al[r][c]) > POSE_EPSILON:
+                        return True
+            return False
+
+        posed_bones = {pb.name for pb in arm_obj.pose.bones if _is_posed(pb)}
+
+        # Patch skeleton section in a copy of the file bytes.
+        mod_file = _mod_file_output(src_path, overwrite=SWOMT.overwrite_existing)
+
+        # Start from existing _MOD if present, otherwise original
+        base_path = src_path
+        mod_candidate = os.path.splitext(src_path)[0] + "_MOD.mmb"
+        if os.path.isfile(mod_candidate):
+            base_path = mod_candidate
+
+        with open(base_path, 'rb') as f:
+            file_data = bytearray(f.read())
+
+        patched_skel = 0
+        # Re-walk skeleton section to get file offsets (not stored on asset.bones)
+        pos = 0
+        version = file_data[3]
+        pos += 8
+        if version >= 15:
+            pos += 4
+
+        bone_count = unpack('<I', bytes(file_data[pos:pos+4]))[0]
+        pos += 4
+
+        bone_mat_offsets = [] # file offset of each bone's 64-byte matrix
+        bone_parents = []
+        for i in range(bone_count):
+            nlen = unpack('<H', bytes(file_data[pos:pos+2]))[0]
+            pos += 2
+            pos += nlen  # skip name
+            bone_mat_offsets.append(pos)
+            pos += 64  # matrix
+            parent_idx = unpack('<H', bytes(file_data[pos:pos+2]))[0]
+            bone_parents.append(parent_idx)
+            pos += 2
+
+        # Build bone name -> index map
+        bone_name_to_idx = {b.name: i for i, b in enumerate(asset.bones)}
+
+        # Build file_world for every bone.
+        orig_file_local = {}
+        _pos2 = 0
+        _pos2 += 8
+        if file_data[3] >= 15:
+            _pos2 += 4
+        _bc2 = unpack('<I', bytes(file_data[_pos2:_pos2+4]))[0]
+        _pos2 += 4
+        for _i in range(_bc2):
+            _nlen = unpack('<H', bytes(file_data[_pos2:_pos2+2]))[0]
+            _pos2 += 2
+            _bname = bytes(file_data[_pos2:_pos2+_nlen]).decode('ascii', errors='replace')
+            _pos2 += _nlen
+            _raw = unpack('<16f', bytes(file_data[_pos2:_pos2+64]))
+            _pos2 += 64
+            _pos2 += 2
+            orig_file_local[_bname] = Matrix([
+                [_raw[0], _raw[4], _raw[8],  _raw[12]],
+                [_raw[1], _raw[5], _raw[9],  _raw[13]],
+                [_raw[2], _raw[6], _raw[10], _raw[14]],
+                [_raw[3], _raw[7], _raw[11], _raw[15]],
+            ])
+
+        orig_file_world = {}
+        for _i, _b in enumerate(asset.bones):
+            _pidx = bone_parents[_i]
+            if _pidx == 65535:
+                orig_file_world[_b.name] = orig_file_local.get(_b.name, Matrix.Identity(4))
+            else:
+                _pname = asset.bones[_pidx].name
+                orig_file_world[_b.name] = orig_file_world.get(_pname, Matrix.Identity(4)) @ orig_file_local.get(_b.name, Matrix.Identity(4))
+
+        file_world = {}
+        for pb in arm_obj.pose.bones:
+            if pb.name in posed_bones:
+                file_world[pb.name] = pose_to_file_world(pb.matrix)
+            else:
+                file_world[pb.name] = orig_file_world.get(pb.name, pose_to_file_world(pb.matrix))
+
+        for bone_name, fw in file_world.items():
+            # Only write bones that were actually posed
+            if bone_name not in posed_bones:
+                continue
+            bi = bone_name_to_idx.get(bone_name)
+            if bi is None:
+                continue
+            parent_idx = bone_parents[bi]
+            if parent_idx == 65535:
+                parent_fw = Matrix.Identity(4)
+            else:
+                parent_bone_name = asset.bones[parent_idx].name
+                parent_fw = file_world.get(parent_bone_name, Matrix.Identity(4))
+
+            try:
+                new_local = parent_fw.inverted() @ fw
+            except ValueError:
+                continue
+
+            # The translation delta in file_local must be negated relative to the original.
+            orig_local = orig_file_local.get(bone_name)
+            if orig_local is not None:
+                orig_trans = orig_local.col[3].copy()
+                new_trans  = new_local.col[3].copy()
+                delta = new_trans - orig_trans
+                new_local.col[3] = orig_trans - delta
+
+            # Write new local matrix (row-major 4x4 floats) to file_data
+            flat = [new_local[r][c] for c in range(4) for r in range(4)]
+            offset = bone_mat_offsets[bi]
+            file_data[offset:offset+64] = pack('<16f', *flat)
+            patched_skel += 1
+
+        # Patch mesh bone slot (inv_bind) matrices.
+        # inv_bind = file_world_matrix.inverted()
+        patched_slots = 0
+        for mi, mesh in enumerate(asset.meshes):
+            mesh_bones_list = list(mesh.mesh_bones.keys())
+            for slot_idx, skel_idx in enumerate(mesh_bones_list):
+                if skel_idx >= len(asset.bones):
+                    continue
+                bone_name = asset.bones[skel_idx].name
+                # Only update inv_bind for bones that were actually posed
+                if bone_name not in posed_bones:
+                    continue
+                fw = file_world.get(bone_name)
+                if fw is None:
+                    continue
+                try:
+                    new_inv_bind = fw.inverted()
+                except ValueError:
+                    self.report({'WARNING'}, f"Could not invert matrix for bone '{bone_name}' - skipping.")
+                    continue
+                flat = tuple(new_inv_bind[r][c] for c in range(4) for r in range(4))
+                mesh.pending_bone_remaps[slot_idx] = (skel_idx, flat)
+                patched_slots += 1
+
+        if patched_skel == 0 and patched_slots == 0:
+            self.report({'WARNING'}, "No bones were updated. Was the armature posed?")
+            return {'CANCELLED'}
+
+        # Write the skeleton-patched file_data to disk first
+        with open(mod_file, 'wb') as f:
+            f.write(file_data)
+
+        # Then apply mesh inv_bind patches via the existing header-patch path.
+        # _apply_header_patches writes bone remaps directly into the file on disk.
+        for mesh in asset.meshes:
+            BME._apply_header_patches(mod_file, mesh, asset, operator=self)
+
+        SWOMT.AssetPath = mod_file
+        self.report({'INFO'},
+            f"Pose exported: {patched_skel} skeleton bone(s) ({len(posed_bones)} posed), "
+            f"{patched_slots} inv_bind slot(s) -> {os.path.basename(mod_file)}")
+        return {'FINISHED'}
+
+
 classes=[SWOMTSettings,
          BrowseMMBFile,
          BrowseLodPresetsCfg,
@@ -4009,7 +4221,8 @@ classes=[SWOMTSettings,
          RenameMesh,
          SelectMGraphObject,
          RenameMMBFile,
-         SelectMGraphObjectFilePatch]
+         SelectMGraphObjectFilePatch,
+         ExportPosedBoneMatrices]
 
 def register():
     for c in classes:
