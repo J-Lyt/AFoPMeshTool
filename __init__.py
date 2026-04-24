@@ -1488,18 +1488,24 @@ class BlenderMeshExporter:
             orig_data_size   = file_lod_data_size - intra_voa  # writable region in source
 
             # Preserve any trailing bytes after face data (e.g. fa7f sentinel padding).
-            # Must use ORIGINAL vd/nd/fd sizes to correctly locate trailing bytes.
-            orig_vc = unpack('<I', file_data[lod.start_offset:lod.start_offset + 4])[0]
-            orig_ic = unpack('<I', file_data[lod.start_offset + 4:lod.start_offset + 8])[0]
-            orig_sa = unpack('<I', file_data[lod.start_offset + 8:lod.start_offset + 12])[0]
-            orig_fb_hdr = unpack('<I', file_data[lod.start_offset + 20:lod.start_offset + 24])[0]
-            orig_idx_size = 4 if (orig_fb_hdr > 0 and orig_sa == orig_fb_hdr // 4) else 2
-            orig_vd_size = orig_vc * mesh.vertex_stride
-            orig_nd_size = orig_vc * mesh.normals_stride
-            orig_fd_size = orig_ic * orig_idx_size
-            orig_trailing_size = orig_data_size - orig_vd_size - orig_nd_size - orig_fd_size
+            if orig_uses_uint32_pre:
+                # Must use ORIGINAL vd/nd/fd sizes to correctly locate trailing bytes.
+                orig_vc = unpack('<I', file_data[lod.start_offset:lod.start_offset + 4])[0]
+                orig_ic = unpack('<I', file_data[lod.start_offset + 4:lod.start_offset + 8])[0]
+                orig_sa = unpack('<I', file_data[lod.start_offset + 8:lod.start_offset + 12])[0]
+                orig_fb_hdr = unpack('<I', file_data[lod.start_offset + 20:lod.start_offset + 24])[0]
+                orig_idx_size = 4 if (orig_fb_hdr > 0 and orig_sa == orig_fb_hdr // 4) else 2
+                orig_vd_size = orig_vc * mesh.vertex_stride
+                orig_nd_size = orig_vc * mesh.normals_stride
+                orig_fd_size = orig_ic * orig_idx_size
+                orig_trailing_size = orig_data_size - orig_vd_size - orig_nd_size - orig_fd_size
+            else:
+                orig_trailing_size = orig_data_size - len(vd) - len(nd) - len(fd)
             if orig_trailing_size > 0:
-                trailing_abs = lod.data_offset + intra_voa + orig_vd_size + orig_nd_size + orig_fd_size
+                if orig_uses_uint32_pre:
+                    trailing_abs = lod.data_offset + intra_voa + orig_vd_size + orig_nd_size + orig_fd_size
+                else:
+                    trailing_abs = lod.data_offset + intra_voa + len(vd) + len(nd) + len(fd)
                 trailing_bytes = bytes(file_data[trailing_abs:trailing_abs + orig_trailing_size])
             else:
                 trailing_bytes = b''
