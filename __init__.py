@@ -3471,8 +3471,14 @@ class RenameMMBFile(bpy.types.Operator):
     def poll(cls, context):
         return asset is not None
 
+    @staticmethod
+    def _base_stem(path):
+        """Return the stem with any _MOD or _MOD<n> suffix stripped."""
+        stem = Path(path).stem
+        return re.sub(r'_MOD\d*$', '', stem)
+
     def invoke(self, context, event):
-        old_stem = Path(context.scene.SWOMT.AssetPath).stem
+        old_stem = self._base_stem(context.scene.SWOMT.AssetPath)
         bpy.types.Scene.mmb_file_rename_input = bpy.props.StringProperty(
             name="New Filename",
             maxlen=len(old_stem),
@@ -3482,7 +3488,7 @@ class RenameMMBFile(bpy.types.Operator):
         return context.window_manager.invoke_props_dialog(self, width=380)
 
     def draw(self, context):
-        old_stem = Path(context.scene.SWOMT.AssetPath).stem
+        old_stem = self._base_stem(context.scene.SWOMT.AssetPath)
         layout = self.layout
         layout.label(text=f"Original: {old_stem}")
         layout.label(text=f"Must be exactly {len(old_stem)} characters")
@@ -3491,7 +3497,7 @@ class RenameMMBFile(bpy.types.Operator):
     def execute(self, context):
         SWOMT = context.scene.SWOMT
         old_path = Path(SWOMT.AssetPath)
-        old_stem = old_path.stem
+        old_stem = self._base_stem(SWOMT.AssetPath)
         new_stem = context.scene.mmb_file_rename_input.strip()
 
         if not new_stem:
@@ -3779,7 +3785,7 @@ class SWOMTPanel(bpy.types.Panel):
         row = layout.row()
         if asset:
             row.label(text=asset.name)
-            row.operator("object.rename_mmb_file", text="Rename File")
+            row.operator("object.rename_mmb_file", text="", icon="GREASEPENCIL")
             layout.separator()
             layout.label(text="Import", icon='IMPORT')
             imp_row = layout.row(align=True)
@@ -3878,15 +3884,13 @@ class SWOMTPanel(bpy.types.Panel):
                 expanded = SWOMT.mesh_expanded[mi] if mi < 32 else True
                 mesh_row = layout.row()
                 mesh_box = mesh_row.box()
-                name_split = mesh_box.split(factor=0.5)
-                name_left = name_split.row()
-                name_left.prop(SWOMT, "mesh_expanded", index=mi, text="",
-                               icon='TRIA_DOWN' if expanded else 'TRIA_RIGHT', emboss=False)
-                name_left.label(text=m.name, icon="MESH_ICOSPHERE")
-                name_right = name_split.row()
+                name_row = mesh_box.row()
+                name_row.prop(SWOMT, "mesh_expanded", index=mi, text="",
+                              icon='TRIA_DOWN' if expanded else 'TRIA_RIGHT', emboss=False)
+                name_row.label(text=m.name, icon="MESH_ICOSPHERE")
+                rename_op = name_row.operator("object.rename_mesh", text="", icon="GREASEPENCIL")
+                rename_op.mesh_index = mi
                 if expanded:
-                    rename_op = name_right.operator("object.rename_mesh", text="Rename Mesh")
-                    rename_op.mesh_index = mi
                     for li,l in enumerate(m.lods):
                         row = mesh_box.row()
                         row.label(text = f"LOD{li} - {l.vertex_count}", icon = "CON_SIZELIKE")
