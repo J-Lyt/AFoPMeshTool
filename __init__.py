@@ -1715,8 +1715,8 @@ class BlenderMeshExporter:
 
         # Mesh name rename
         if mesh.pending_rename_new:
-            padded = (b'\x00' * (mesh.name_length - len(mesh.pending_rename_new))
-                      + mesh.pending_rename_new.encode('utf-8'))
+            padded = (mesh.pending_rename_new.encode('utf-8')
+                      + b'\x00' * (mesh.name_length - len(mesh.pending_rename_new)))
             try:
                 with open(file_path, 'rb+') as f:
                     f.seek(mesh.name_offset + 2)
