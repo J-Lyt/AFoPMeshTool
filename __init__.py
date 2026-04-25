@@ -13,7 +13,7 @@ bl_info = {
     "location": "Scene Properties > AFoP Mesh Tool Panel",
     "version": (0, 1, 47),
     "blender": (5, 0, 0),
-    "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 12, 13, 15, 16, 17.",
+    "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 11, 12, 13, 15, 16, 17.",
     "category": "Import-Export"
     }
 
@@ -462,6 +462,8 @@ class SkeletalMeshAsset(Asset):
             def parse(self, f):
                 self.start_offset = f.tell()
                 self.vertex_count = br.uint32(f)
+                if self.parent_mesh.parent_sk_mesh.version == 11:
+                    f.seek(4, 1) # skip unk
                 self.index_count = br.uint32(f)
                 self.size_a = br.uint32(f)  # seems to be face_block_offset divided by 2
                 self.vertex_data_offset_a = br.uint32(f)
@@ -545,7 +547,12 @@ class SkeletalMeshAsset(Asset):
                 for v in range(self.vertex_count):
                     iw = {}
                     stride_start = f.tell()
-                    if stride == 20:
+                    if stride == 12:
+                        # 4x uint8 bone slot indices, no weight bytes - Weight 1.0 on first index
+                        f.seek(8, 1)
+                        indices = [br.uint8(f) for _ in range(4)]
+                        iw[indices[0]] = 1.0
+                    elif stride == 20:
                         pos_skip = 12 if self.parent_mesh.position_type == 1 else 8
                         f.seek(pos_skip, 1)
                         remaining = stride - pos_skip
@@ -839,15 +846,20 @@ class SkeletalMeshAsset(Asset):
             self.position_type = 0 # 0:int16_norm 1:floats
             self.mesh_file = None  # BytesIO of reversed ordered LOD mesh data (used by create_mesh_file)
         def parse(self, f):
+            version = self.parent_sk_mesh.version
+
             self.name_offset = f.tell()
             _nlen = unpack('<H', f.read(2))[0]
             self.name_length = _nlen
             self.name = br.string(f, _nlen).rstrip('\x00')
             f.seek(48, 1)  # some kind of matrix
             f.seek(1, 1)
-            x_count = br.uint8(f)
-            f.seek(1, 1)
-            f.seek(4 * x_count, 1)
+            if version == 11:
+                f.seek(1, 1) # skip x_count
+                f.seek(4 * br.uint16(f), 1)
+            else:
+                x_count = br.uint8(f)
+                f.seek(1 + 4 * x_count, 1)
             self.u_count_offset = f.tell()
             u_count = br.uint16(f)
             for b in range(u_count):
@@ -858,25 +870,23 @@ class SkeletalMeshAsset(Asset):
                 self.mesh_bones[bone_index] = matrix
             self.bone_table_end_offset = f.tell()
 
-            version = self.parent_sk_mesh.version
-
             # --- Pre-LOD section ---
             # root_bone_index: present only when u_count > 0, and absent for v12 entirely.
-            # lod_info_type: present for v15/v16/v17 always; absent for v12/v13.
-            #   v12:            no root_bone_index, no lod_info_type
+            # lod_info_type: present for v15/v16/v17 always; absent for v11/v12/v13.
+            #   v11/v12:        no root_bone_index, no lod_info_type
             #   v13, u>0:       root_bone_index[1]  lod_info_type[1]
             #   v13, u==0:      (no root_bone_index, no lod_info_type)
             #   v15/16/17, u>0: root_bone_index[2]  lod_info_type[1]
             #   v15/16/17, u==0: lod_info_type[1]
-            if u_count > 0 and version != 12:
+            if u_count > 0 and version not in (11, 12):
                 if version == 13:
                     f.seek(1, 1)  # v13: 1-byte root_bone_index
                 else:             # v15, v16, v17
                     f.seek(2, 1)  # v15+: 2-byte root_bone_index
                 lod_info_type = br.uint8(f)
             else:
-                if version in (12, 13):
-                    lod_info_type = 0  # v12/v13 have no lod_info_type byte
+                if version in (11, 12, 13):
+                    lod_info_type = 0  # v11/v12/v13 have no lod_info_type byte
                 else:                  # v15, v16, v17 with u_count == 0
                     lod_info_type = br.uint8(f)
 
@@ -884,10 +894,11 @@ class SkeletalMeshAsset(Asset):
             f.seek(4, 1)  # unknown 4 bytes before LOD list
 
             # --- LOD list ---
-            # Each LOD is 36 bytes.
+            # v11: Each LOD is 40 bytes.
+            # v12-v17: Each LOD is 36 bytes.
             # lod_info_type == 2: 28 extra bytes per LOD (v15/v16/v17)
             for l in range(self.lod_count):
-                lod = self.LOD(self,l)
+                lod = self.LOD(self, l)
                 lod.parse(f)
                 if lod_info_type == 2:
                     f.seek(28, 1)
@@ -896,19 +907,25 @@ class SkeletalMeshAsset(Asset):
             # --- Tail section: UV hashes, color hashes, strides ---
             # UV hashes are 4 bytes each on all versions.
             #
-            # v12/v13/v15 layout:  uv_count  uv_hashes  unk[4]  color_count  color_hashes
-            # v16/v17 layout:      uv_count  uv_hashes  color_count  color_hashes  unk[4]  count_c  c_data
+            # v11 layout: unk(4)  unk(4)  uv_count  uv_hashes  vs  ns (no color_count)
+            # v12/v13/v15 layout: uv_count  uv_hashes  unk[4]  color_count  color_hashes
+            # v16/v17 layout: uv_count  uv_hashes  color_count  color_hashes  unk[4]  count_c  c_data
+            if version == 11:
+                f.seek(8,1) # skip unk
+
             self.uv_count = br.uint8(f)
             f.seek(4 * self.uv_count, 1)
 
-            if version in (16, 17):
+            if version == 11:
+                self.color_count = 0 # v11 does not store color_count; always 0
+            elif version in (16, 17):
                 self.color_count = br.uint8(f)
                 f.seek(4 * self.color_count, 1)
-                f.seek(4, 1)               # unk after color (v16/v17)
+                f.seek(4, 1) # unk after color (v16/v17)
                 count_c = br.uint8(f)
                 f.seek(4 * count_c, 1)
             else:
-                f.seek(4, 1)               # unk before color (v12/v13/v15)
+                f.seek(4, 1) # unk before color (v12/v13/v15)
                 self.color_count = br.uint8(f)
                 f.seek(4 * self.color_count, 1)
 
@@ -988,8 +1005,8 @@ class SkeletalMeshAsset(Asset):
         self.pending_file_rename_new = ""
     def parse(self,f):
         super().parse(f)
-        if self.version not in (12, 13, 15, 16, 17):
-            raise Exception(f'Unsupported .mmb version: {self.version}. Supported versions: 12, 13, 15, 16, 17.')
+        if self.version not in (11, 12, 13, 15, 16, 17):
+            raise Exception(f'Unsupported .mmb version: {self.version}. Supported versions: 11, 12, 13, 15, 16, 17.')
         self.bone_count = br.uint32(f)
         for b in range(self.bone_count):
             self.bones.append(self.Bone(f))
@@ -3128,7 +3145,7 @@ def _read_donor_matrix(donor_path, target_bone_name, mesh_name):
                         return mat
                     if fallback_matrix is None:
                         fallback_matrix = mat
-            if version not in (12, 13, 15, 16, 17):
+            if version not in (11, 12, 13, 15, 16, 17):
                 break
             if u_count > 0 and version != 12:
                 f.seek(1 if version == 13 else 2, 1)
