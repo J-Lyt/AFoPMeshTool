@@ -551,6 +551,22 @@ class SkeletalMeshAsset(Asset):
                 bone_weights = []
                 stride = self.parent_mesh.vertex_stride
                 f = raw_mesh_file
+                # Detect stride-32 layout
+                stride32_layout = None
+                if stride == 32 and self.vertex_count > 0:
+                    n_slots = len(self.parent_mesh.mesh_bones)
+                    f.seek(self.vertex_data_offset_a + 8)
+                    peek = f.read(24)
+                    w8_u16 = [unpack('<H', peek[i * 2:i * 2 + 2])[0] for i in range(8)]
+                    if sum(w8_u16) == 32767:
+                        stride32_layout = 'A'
+                    else:
+                        c12_idx = list(peek[12:24])
+                        if n_slots <= 256 and all(0 <= x < n_slots for x in c12_idx):
+                            stride32_layout = 'C'
+                        else:
+                            stride32_layout = 'B'
+
                 f.seek(self.vertex_data_offset_a)
                 for v in range(self.vertex_count):
                     iw = {}
@@ -572,22 +588,24 @@ class SkeletalMeshAsset(Asset):
                             if weights[i] > 0.0:
                                 iw[indices[i]] = weights[i]
                     elif stride == 32:
-                        # Layout Variants:
-                        # A) 8x uint16 weights (sum==32767) + 8x uint8 indices - e.g. rnf_body_01_f
-                        # B) 6x uint8 weights + pad2 + 6x uint16 indices + pad4 - e.g. wl_banshee_01
-                        # Detect by peeking at the first 16 bytes as uint16 weights
                         f.seek(8, 1)
-                        peek_pos = f.tell()
-                        w8_u16 = [br.uint16(f) / 32767.0 for _ in range(8)]
-                        if sum(int(w * 32767) for w in w8_u16) == 32767:
-                            # Layout A
-                            indices = [br.uint8(f) for _ in range(8)]
+                        if stride32_layout == 'A':
+                            # Layout A: 8x uint16 weights, 8x uint8 indices
+                            w8 = [br.uint16(f) / 32767.0 for _ in range(8)]
+                            idx8 = [br.uint8(f) for _ in range(8)]
                             for i in range(8):
-                                if w8_u16[i] > 0.0:
-                                    iw[indices[i]] = iw.get(indices[i], 0.0) + w8_u16[i]
+                                if w8[i] > 0.0:
+                                    iw[idx8[i]] = iw.get(idx8[i], 0.0) + w8[i]
+                        elif stride32_layout == 'C':
+                            # Layout C: 12x uint8 weights, 12x uint8 indices
+                            w12 = [br.uint8(f) for _ in range(12)]
+                            idx12 = [br.uint8(f) for _ in range(12)]
+                            for i in range(12):
+                                wt = w12[i] / 255.0
+                                if wt > 0.0:
+                                    iw[idx12[i]] = iw.get(idx12[i], 0.0) + wt
                         else:
-                            # Layout B
-                            f.seek(peek_pos)
+                            # Layout B: 6x uint8 weights, pad2, 6x uint16 indices, pad4
                             weights = [br.uint8_norm(f) for _ in range(6)]
                             f.seek(2, 1)  # skip 2 padding bytes
                             indices = [br.uint16(f) for _ in range(6)]
@@ -1905,6 +1923,19 @@ class BlenderMeshExporter:
             # Detect stride=32 layout variant
             stride32_use_u16 = stride == 32 and len(mesh.mesh_bones) > 256
 
+            # Layout C: 12x uint8 weights, 12x uint8 indices.
+            stride32_layout_c = False
+            if stride == 32 and not stride32_use_u16 and lod.vertex_count > 0:
+                _n_slots = len(mesh.mesh_bones)
+                with open(src_path, 'rb') as _src_lc:
+                    _src_lc.seek(abs_voa_w + pos_length)
+                    _peek24 = _src_lc.read(24)
+                _a_w_check = unpack('<8H', _peek24[:16])
+                if sum(_a_w_check) != 32767:
+                    _c_i_check = list(_peek24[12:24])
+                    if _n_slots <= 256 and all(0 <= x < _n_slots for x in _c_i_check):
+                        stride32_layout_c = True
+
             if not export_weights and weight_bytes_per_vert > 0:
                 orig_weight_bytes = []
                 with open(src_path, 'rb') as src:
@@ -1928,6 +1959,10 @@ class BlenderMeshExporter:
                                 all_w = list(src.read(6))
                                 src.seek(2, 1) # skip 2 padding bytes
                                 all_i = list(unpack('<6H', src.read(12)))
+                            elif stride32_layout_c:
+                                # Layout C
+                                all_w = list(src.read(12))
+                                all_i = list(src.read(12))
                             else:
                                 # Layout A
                                 all_w = unpack('<8H', src.read(16))
@@ -2010,6 +2045,21 @@ class BlenderMeshExporter:
                             # Write 6 uint16 indices
                             for idx in all_i:
                                 f.write(bp.uint16(idx))
+                        elif stride32_layout_c:
+                            # Layout C
+                            remaining = {s: w for s, w in raw_weights}
+                            all_i = list(orig_all_i)
+                            extra = sorted(remaining.keys() - set(all_i),
+                                           key=lambda s: remaining[s], reverse=True)
+                            for k in range(12):
+                                if all_i[k] not in remaining and extra:
+                                    all_i[k] = extra.pop(0)
+                            for k in range(12):
+                                bone = all_i[k]
+                                w = remaining.pop(bone, 0.0)
+                                f.write(bp.uint8(max(0, min(int(round(w * 255)), 255))))
+                            for bone in all_i:
+                                f.write(bp.uint8(bone))
                         else:
                             # Layout A
                             weight_slots = range(8) if sum(orig_all_w) == 32767 else range(4)
@@ -2045,6 +2095,17 @@ class BlenderMeshExporter:
                                 f.write(bp.uint16(s))
                             for _ in range(6 - min(len(sw), 6)):
                                 f.write(bp.uint16(0))
+                        elif stride32_layout_c:
+                            # Layout C
+                            sw = raw_weights[:12]
+                            for _, w in sw:
+                                f.write(bp.uint8(max(0, min(int(round(w * 255)), 255))))
+                            for _ in range(12 - len(sw)):
+                                f.write(bp.uint8(0))
+                            for s, _ in sw:
+                                f.write(bp.uint8(s))
+                            for _ in range(12 - len(sw)):
+                                f.write(bp.uint8(0))
                         else:
                             # Layout A
                             sw = raw_weights[:8]
