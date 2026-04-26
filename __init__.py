@@ -458,12 +458,18 @@ class SkeletalMeshAsset(Asset):
                 self.normals_end_bytes = None
                 self.faces_end_bytes = None
                 self.data_start = 0  # offset within mesh_file BytesIO where this LOD's block begins
+                self.lod_unk = 0  # v11 only: unknown uint32
+
+            @property
+            def lod_field_offset(self):
+                """Extra byte offset applied to every LOD header field after vc. v11 has an extra uint32"""
+                return 4 if self.parent_mesh.parent_sk_mesh.version == 11 else 0
 
             def parse(self, f):
                 self.start_offset = f.tell()
                 self.vertex_count = br.uint32(f)
                 if self.parent_mesh.parent_sk_mesh.version == 11:
-                    f.seek(4, 1) # skip unk
+                    self.lod_unk = br.uint32(f)
                 self.index_count = br.uint32(f)
                 self.size_a = br.uint32(f)  # seems to be face_block_offset divided by 2
                 self.vertex_data_offset_a = br.uint32(f)
@@ -480,6 +486,8 @@ class SkeletalMeshAsset(Asset):
             def write(self, f):
                 f.seek(self.start_offset)
                 f.write(bp.uint32(self.vertex_count))
+                if self.parent_mesh.parent_sk_mesh.version == 11:
+                    f.write(bp.uint32(self.lod_unk))
                 f.write(bp.uint32(self.index_count))
                 f.write(bp.uint32(int(self.face_block_offset / 2)))
                 f.write(bp.uint32(self.vertex_data_offset_a))
@@ -1465,8 +1473,8 @@ class BlenderMeshExporter:
                 with open(SWOMT.AssetPath, 'rb') as orig_src:
                     orig_file_data = orig_src.read()
                 orig_data_offset = unpack('<I', orig_file_data[lod.data_offset_file_pos:lod.data_offset_file_pos + 4])[0]
-                file_vob_orig = unpack('<I', orig_file_data[lod.start_offset + 16:lod.start_offset + 20])[0]
-                file_fb_orig  = unpack('<I', orig_file_data[lod.start_offset + 20:lod.start_offset + 24])[0]
+                file_vob_orig = unpack('<I', orig_file_data[lod.start_offset + lod.lod_field_offset + 16:lod.start_offset + lod.lod_field_offset + 20])[0]
+                file_fb_orig = unpack('<I', orig_file_data[lod.start_offset + lod.lod_field_offset + 20:lod.start_offset + lod.lod_field_offset + 24])[0]
                 orig_intra_vob = file_vob_orig - orig_higher_size
                 orig_intra_fb  = file_fb_orig  - orig_higher_size
                 orig_normals_size = orig_intra_fb - orig_intra_vob
@@ -1475,8 +1483,8 @@ class BlenderMeshExporter:
 
             faces_buf = io.BytesIO()
             # Detect uint32 indices
-            orig_sa_pre = unpack('<I', file_data[lod.start_offset + 8: lod.start_offset + 12])[0]
-            orig_fb_pre = unpack('<I', file_data[lod.start_offset + 20: lod.start_offset + 24])[0]
+            orig_sa_pre = unpack('<I', file_data[lod.start_offset + lod.lod_field_offset + 8: lod.start_offset + lod.lod_field_offset + 12])[0]
+            orig_fb_pre = unpack('<I', file_data[lod.start_offset + lod.lod_field_offset + 20: lod.start_offset + lod.lod_field_offset + 24])[0]
             orig_uses_uint32_pre = (orig_fb_pre > 0 and orig_sa_pre == orig_fb_pre // 4)
             BME.write_triangles(faces_buf, mesh, lod_index, force_uint32=orig_uses_uint32_pre or new_vert_count > 65535)
             if lod.faces_end_bytes:
@@ -1501,16 +1509,16 @@ class BlenderMeshExporter:
             new_intra_fb  = new_intra_vob + len(nd)
 
             # new_data_size is the only writable region (vd+nd+fd), excluding the preserved prefix bytes.
-            file_lod_data_size = unpack('<I', file_data[lod.start_offset + 28:lod.start_offset + 32])[0]
+            file_lod_data_size = unpack('<I', file_data[lod.start_offset + lod.lod_field_offset + 28:lod.start_offset + lod.lod_field_offset + 32])[0]
             orig_data_size   = file_lod_data_size - intra_voa  # writable region in source
 
             # Preserve any trailing bytes after face data (e.g. fa7f sentinel padding).
             if orig_uses_uint32_pre:
                 # Must use ORIGINAL vd/nd/fd sizes to correctly locate trailing bytes.
                 orig_vc = unpack('<I', file_data[lod.start_offset:lod.start_offset + 4])[0]
-                orig_ic = unpack('<I', file_data[lod.start_offset + 4:lod.start_offset + 8])[0]
-                orig_sa = unpack('<I', file_data[lod.start_offset + 8:lod.start_offset + 12])[0]
-                orig_fb_hdr = unpack('<I', file_data[lod.start_offset + 20:lod.start_offset + 24])[0]
+                orig_ic = unpack('<I', file_data[lod.start_offset + lod.lod_field_offset + 4:lod.start_offset + lod.lod_field_offset + 8])[0]
+                orig_sa = unpack('<I', file_data[lod.start_offset + lod.lod_field_offset + 8:lod.start_offset + lod.lod_field_offset + 12])[0]
+                orig_fb_hdr = unpack('<I', file_data[lod.start_offset + lod.lod_field_offset + 20:lod.start_offset + lod.lod_field_offset + 24])[0]
                 orig_idx_size = 4 if (orig_fb_hdr > 0 and orig_sa == orig_fb_hdr // 4) else 2
                 orig_vd_size = orig_vc * mesh.vertex_stride
                 orig_nd_size = orig_vc * mesh.normals_stride
@@ -1559,9 +1567,10 @@ class BlenderMeshExporter:
                 for li in range(0, lod_index):
                     other_lod = mesh.lods[li]
                     so = other_lod.start_offset
+                    fo = other_lod.lod_field_offset
                     for field_off in (12, 16, 20):  # voa, vob, fb
-                        old = unpack('<I', file_data[so+field_off:so+field_off+4])[0]
-                        file_data[so+field_off:so+field_off+4] = pack('<I', old + delta)
+                        old = unpack('<I', file_data[so + fo + field_off:so + fo + field_off + 4])[0]
+                        file_data[so + fo + field_off:so + fo + field_off + 4] = pack('<I', old + delta)
 
             elif delta < 0:
                 # Shrinking: zero the freed bytes (no structural change needed)
@@ -1582,6 +1591,7 @@ class BlenderMeshExporter:
 
             # Patch the edited LOD's own header fields.
             so = lod.start_offset
+            fo = lod.lod_field_offset
             new_vob_for_header = higher_size + new_intra_vob
             new_fb_for_header  = higher_size + new_intra_fb
             # data_size in the header = intra_voa (prefix) + writable region
@@ -1591,13 +1601,13 @@ class BlenderMeshExporter:
             use_uint32_faces = orig_uses_uint32_pre or new_vert_count > 65535
             new_size_a = new_fb_for_header // 4 if use_uint32_faces else new_fb_for_header // 2
             file_data[so + 0: so + 4] = pack('<I', new_vert_count)
-            file_data[so + 4: so + 8] = pack('<I', new_index_count)
-            file_data[so + 8: so + 12] = pack('<I', new_size_a) # size_a
-            # voa (so+12) is unchanged
-            file_data[so + 16: so + 20] = pack('<I', new_vob_for_header) # vob
-            file_data[so + 20: so + 24] = pack('<I', new_fb_for_header) # fb
-            # data_offset (so+24) is unchanged for the edited LOD itself
-            file_data[so + 28: so + 32] = pack('<I', new_file_data_size) # data_size
+            file_data[so + fo + 4: so + fo + 8] = pack('<I', new_index_count)
+            file_data[so + fo + 8: so + fo + 12] = pack('<I', new_size_a)  # size_a
+            # voa (so+fo+12) is unchanged
+            file_data[so + fo + 16: so + fo + 20] = pack('<I', new_vob_for_header)  # vob
+            file_data[so + fo + 20: so + fo + 24] = pack('<I', new_fb_for_header)  # fb
+            # data_offset (so+fo+24) is unchanged for the edited LOD itself
+            file_data[so + fo + 28: so + fo + 32] = pack('<I', new_file_data_size)  # data_size
 
             # Update the in-memory LOD so re-import in the same session uses correct values.
             lod.vertex_count         = new_vert_count
@@ -1618,9 +1628,10 @@ class BlenderMeshExporter:
                 for li in range(0, lod_index):
                     other_lod = mesh.lods[li]
                     other_lod_so = other_lod.start_offset
-                    other_lod.vertex_data_offset_a = unpack('<I', file_data[other_lod_so+12:other_lod_so+16])[0]
-                    other_lod.vertex_data_offset_b = unpack('<I', file_data[other_lod_so+16:other_lod_so+20])[0]
-                    other_lod.face_block_offset    = unpack('<I', file_data[other_lod_so+20:other_lod_so+24])[0]
+                    other_lod_fo = other_lod.lod_field_offset
+                    other_lod.vertex_data_offset_a = unpack('<I', file_data[other_lod_so + other_lod_fo + 12:other_lod_so + other_lod_fo + 16])[0]
+                    other_lod.vertex_data_offset_b = unpack('<I', file_data[other_lod_so + other_lod_fo + 16:other_lod_so + other_lod_fo + 20])[0]
+                    other_lod.face_block_offset = unpack('<I', file_data[other_lod_so + other_lod_fo + 20:other_lod_so + other_lod_fo + 24])[0]
 
         # Auto-zero any mesh whose Blender object has a vert count of 0.
         # This makes the mesh invisible in-game without breaking file structure.
@@ -1922,7 +1933,7 @@ class BlenderMeshExporter:
                                 all_w = unpack('<8H', src.read(16))
                                 all_i = list(src.read(8))
                             orig_stride32_data.append((all_w, all_i))
-                elif stride not in (20, 36, 40, 44) and lod.vertex_count > 0:
+                elif stride not in (12, 20, 36, 40, 44) and lod.vertex_count > 0:
                     # else branch strides (12, 16 etc): wc = (stride - pos_length) / 2
                     # weights are uint8, indices are uint8
                     wc = int(weight_bytes_per_vert / 2)
@@ -1959,7 +1970,12 @@ class BlenderMeshExporter:
                 raw_weights.sort(key=lambda x: x[1], reverse=True)
 
                 # Write bone weights
-                if stride == 20:
+                if stride == 12:
+                    # 4x uint8 bone slot indices, no weight bytes - Weight 1.0 on first index
+                    for _ in range(4):
+                        f.write(bp.uint8(raw_weights[0][0] if raw_weights else 0))
+
+                elif stride == 20:
                     max_bones = 4
                     sw = raw_weights[:max_bones]
                     for _, w in sw:
@@ -2215,8 +2231,8 @@ class BlenderMeshExporter:
                 with open(SWOMT.AssetPath, 'rb') as orig_src:
                     orig_file_bytes = orig_src.read()
                 orig_do  = unpack('<I', orig_file_bytes[lod.data_offset_file_pos:lod.data_offset_file_pos+4])[0]
-                orig_vob = unpack('<I', orig_file_bytes[lod.start_offset+16:lod.start_offset+20])[0]
-                orig_voa = unpack('<I', orig_file_bytes[lod.start_offset+12:lod.start_offset+16])[0]
+                orig_vob = unpack('<I', orig_file_bytes[lod.start_offset + lod.lod_field_offset + 16:lod.start_offset + lod.lod_field_offset + 20])[0]
+                orig_voa = unpack('<I', orig_file_bytes[lod.start_offset + lod.lod_field_offset + 12:lod.start_offset + lod.lod_field_offset + 16])[0]
                 abs_vob_src = orig_do + (orig_vob - higher_size)
                 abs_voa_src = orig_do + (orig_voa - higher_size)
                 orig_vc_src = unpack('<I', orig_file_bytes[lod.start_offset:lod.start_offset+4])[0]
@@ -2357,7 +2373,7 @@ class BlenderMeshExporter:
                 with open(SWOMT.AssetPath, 'rb') as orig_src:
                     orig_file_bytes = orig_src.read()
                 orig_do  = unpack('<I', orig_file_bytes[lod.data_offset_file_pos:lod.data_offset_file_pos+4])[0]
-                orig_vob = unpack('<I', orig_file_bytes[lod.start_offset+16:lod.start_offset+20])[0]
+                orig_vob = unpack('<I', orig_file_bytes[lod.start_offset+lod.lod_field_offset+16:lod.start_offset+lod.lod_field_offset+20])[0]
                 abs_vob_src = orig_do + (orig_vob - higher_size)
                 orig_vc_src = unpack('<I', orig_file_bytes[lod.start_offset:lod.start_offset+4])[0]
                 ns = mesh.normals_stride
