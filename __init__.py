@@ -13,7 +13,7 @@ bl_info = {
     "location": "Scene Properties > AFoP Mesh Tool Panel",
     "version": (0, 1, 49),
     "blender": (5, 0, 0),
-    "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 11, 12, 13, 15, 16, 17.",
+    "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 11, 12, 13, 14, 15, 16, 17.",
     "category": "Import-Export"
     }
 
@@ -898,22 +898,24 @@ class SkeletalMeshAsset(Asset):
 
             # --- Pre-LOD section ---
             # root_bone_index: present only when u_count > 0, and absent for v12 entirely.
-            # lod_info_type: present for v15/v16/v17 always; absent for v11/v12/v13.
+            # lod_info_type: present for v14,v15/v16/v17 always; absent for v11/v12/v13.
             #   v11/v12:        no root_bone_index, no lod_info_type
             #   v13, u>0:       root_bone_index[1]  lod_info_type[1]
             #   v13, u==0:      (no root_bone_index, no lod_info_type)
+            #   v14, u>0:       root_bone_index[1]  lod_info_type[1]
+            #   v14, u==0:      lod_info_type[1]
             #   v15/16/17, u>0: root_bone_index[2]  lod_info_type[1]
             #   v15/16/17, u==0: lod_info_type[1]
             if u_count > 0 and version not in (11, 12):
-                if version == 13:
-                    f.seek(1, 1)  # v13: 1-byte root_bone_index
+                if version in (13, 14):
+                    f.seek(1, 1)  # v13/v14: 1-byte root_bone_index
                 else:             # v15, v16, v17
                     f.seek(2, 1)  # v15+: 2-byte root_bone_index
                 lod_info_type = br.uint8(f)
             else:
                 if version in (11, 12, 13):
                     lod_info_type = 0  # v11/v12/v13 have no lod_info_type byte
-                else:                  # v15, v16, v17 with u_count == 0
+                else:                  # v14, v15, v16, v17 with u_count == 0
                     lod_info_type = br.uint8(f)
 
             self.lod_count = br.uint8(f)
@@ -1031,7 +1033,7 @@ class SkeletalMeshAsset(Asset):
         self.pending_file_rename_new = ""
     def parse(self,f):
         super().parse(f)
-        if self.version not in (11, 12, 13, 15, 16, 17):
+        if self.version not in (11, 12, 13, 14, 15, 16, 17):
             raise Exception(f'Unsupported .mmb version: {self.version}. Supported versions: 11, 12, 13, 15, 16, 17.')
         self.bone_count = br.uint32(f)
         for b in range(self.bone_count):
@@ -3266,10 +3268,10 @@ def _read_donor_matrix(donor_path, target_bone_name, mesh_name):
                         return mat
                     if fallback_matrix is None:
                         fallback_matrix = mat
-            if version not in (11, 12, 13, 15, 16, 17):
+            if version not in (11, 12, 13, 14, 15, 16, 17):
                 break
             if u_count > 0 and version != 12:
-                f.seek(1 if version == 13 else 2, 1)
+                f.seek(1 if version in (13, 14) else 2, 1)
                 lod_info_type = br.uint8(f)
             else:
                 lod_info_type = 0 if version in (12, 13) else br.uint8(f)
