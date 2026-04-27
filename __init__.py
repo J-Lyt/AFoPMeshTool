@@ -1778,37 +1778,73 @@ class BlenderMeshExporter:
                     operator.report({'ERROR'}, f"Failed to patch mesh name in mod file: {e}")
 
     @staticmethod
-    def get_vertex_blend_indices(vertex):
+    def normalize_weights(raw_weights, max_bones):
         """
-        Returns a dictionary of the vertex normalized, sorted and truncated 8 weights.
+        Normalize so the weights sum to 1.0.
+        Normalize before encoding to ensure encode_weights_u8/u16 only need to correct the rounding error.
         """
-        group_weights = {}
+        sw = raw_weights[:max_bones]
+        total = sum(w for _, w in sw)
+        if total <= 0.0:
+            return sw
+        inv = 1.0 / total
+        return [(s, w * inv) for s, w in sw]
 
-        # Gather bone groups
-        for vg in vertex.groups:
-            if vg.weight > 0.0:
-                group_weights[vg.group] = vg.weight
+    @staticmethod
+    def encode_weights_u8(sw):
+        """
+        Encode pairs to uint8, then fix the integer sum to exactly 255 by adjusting the weight with the largest rounding error.
+        """
+        encoded = [(s, int(round(w * 255))) for s, w in sw]
+        diff = 255 - sum(e for _, e in encoded)
+        if diff != 0:
+            errors = [(abs((sw[i][1] * 255) - encoded[i][1]), i) for i in range(len(encoded))]
+            _, idx = max(errors)
+            s, e = encoded[idx]
+            encoded[idx] = (s, max(0, min(255, e + diff)))
+        return encoded
 
-        # Normalize
-        total_weight = 0
-        for k in group_weights.keys():
-            total_weight += group_weights[k]
-        if total_weight == 0:
-            raise Exception("Vertex {v} has no weight".format(v=vertex.index))
-        normalizer = 1 / total_weight
-        for gw in group_weights:
-            group_weights[gw] *= normalizer
-
-        # Sort Weights
-        sorted_weights = sorted(group_weights.items(), key=operator.itemgetter(1), reverse=True)
-
-        # Truncate Weights
-        trunc_weights = sorted_weights[0:8]
-        return trunc_weights
+    @staticmethod
+    def encode_weights_u16(sw):
+        """
+        Encode pairs to uint16, then fix the integer sum to exactly 32767 by adjusting the largest rounding error.
+        """
+        encoded = [(s, int(round(w * 32767))) for s, w in sw]
+        diff = 32767 - sum(e for _, e in encoded)
+        if diff != 0:
+            errors = [(abs((sw[i][1] * 32767) - encoded[i][1]), i) for i in range(len(encoded))]
+            _, idx = max(errors)
+            s, e = encoded[idx]
+            encoded[idx] = (s, max(0, min(32767, e + diff)))
+        return encoded
 
     @staticmethod
     def convert_coordinate(co):
         return Vector((co[0] * -1, co[1], co[2]))
+
+    @staticmethod
+    def find_unweighted_vertices(mesh: SkeletalMeshAsset.Mesh, lod_index=0):
+        """
+        Returns the count of vertices that have no bone weights.
+        """
+        obj = BME.find_object_by_name(mesh.name + f"_LOD{lod_index}")
+        if not obj:
+            return 0
+        mesh_bones = list(mesh.mesh_bones.keys())
+        name_to_mesh_slot = {
+            asset.bones[skel_idx].name: slot
+            for slot, skel_idx in enumerate(mesh_bones)
+            if skel_idx < len(asset.bones)
+        }
+        vgroup_to_mesh_slot = {vg.index: name_to_mesh_slot[vg.name]
+                               for vg in obj.vertex_groups if vg.name in name_to_mesh_slot}
+        return sum(
+            1 for v in obj.data.vertices
+            if not any(
+                vgroup_to_mesh_slot.get(vge.group) is not None and vge.weight > 0.0
+                for vge in v.groups
+            )
+        )
 
     @staticmethod
     def write_vertices(file, mesh:SkeletalMeshAsset.Mesh, lod_index=0):
@@ -2012,14 +2048,15 @@ class BlenderMeshExporter:
 
                 elif stride == 20:
                     max_bones = 4
-                    sw = raw_weights[:max_bones]
-                    for _, w in sw:
-                        f.write(bp.uint16(max(0, min(int(round(w * 32767)), 32767))))
-                    for _ in range(max_bones - len(sw)):
+                    sw = BME.normalize_weights(raw_weights, max_bones)
+                    enc = BME.encode_weights_u16(sw)
+                    for _, e in enc:
+                        f.write(bp.uint16(e))
+                    for _ in range(max_bones - len(enc)):
                         f.write(bp.uint16(0))
-                    for s, _ in sw:
+                    for s, _ in enc:
                         f.write(bp.uint8(s))
-                    for _ in range(max_bones - len(sw)):
+                    for _ in range(max_bones - len(enc)):
                         f.write(bp.uint8(0))
 
                 elif stride == 32:
@@ -2028,7 +2065,7 @@ class BlenderMeshExporter:
                         orig_all_w, orig_all_i = orig_stride32_data[vi]
                         if stride32_use_u16:
                             # Layout B
-                            remaining = {s: w for s, w in raw_weights}
+                            remaining = {s: w for s, w in BME.normalize_weights(raw_weights, 6)}
                             # fill zero-weight slots with any added-bone weights that original indices don't cover.
                             all_i = list(orig_all_i)
                             extra = sorted(remaining.keys() - set(all_i),
@@ -2036,34 +2073,35 @@ class BlenderMeshExporter:
                             for k in range(6):
                                 if all_i[k] not in remaining and extra:
                                     all_i[k] = extra.pop(0)
-                            # Write 6 weight bytes
-                            for k in range(6):
-                                bone = all_i[k]
-                                w = remaining.pop(bone, 0.0)
-                                f.write(bp.uint8(max(0, min(int(round(w * 255)), 255))))
+                            # Pre-encode all 6 weights as a batch to fix rounding sum
+                            ordered = [(all_i[k], remaining.pop(all_i[k], 0.0)) for k in range(6)]
+                            enc = BME.encode_weights_u8(ordered)
+                            for _, e in enc:
+                                f.write(bp.uint8(e))
                             f.write(b'\x00\x00') # 2 padding bytes
                             # Write 6 uint16 indices
                             for idx in all_i:
                                 f.write(bp.uint16(idx))
                         elif stride32_layout_c:
                             # Layout C
-                            remaining = {s: w for s, w in raw_weights}
+                            remaining = {s: w for s, w in BME.normalize_weights(raw_weights, 12)}
                             all_i = list(orig_all_i)
                             extra = sorted(remaining.keys() - set(all_i),
                                            key=lambda s: remaining[s], reverse=True)
                             for k in range(12):
                                 if all_i[k] not in remaining and extra:
                                     all_i[k] = extra.pop(0)
-                            for k in range(12):
-                                bone = all_i[k]
-                                w = remaining.pop(bone, 0.0)
-                                f.write(bp.uint8(max(0, min(int(round(w * 255)), 255))))
+                            # Pre-encode all 12 weights as a batch to fix rounding sum
+                            ordered = [(all_i[k], remaining.pop(all_i[k], 0.0)) for k in range(12)]
+                            enc = BME.encode_weights_u8(ordered)
+                            for _, e in enc:
+                                f.write(bp.uint8(e))
                             for bone in all_i:
                                 f.write(bp.uint8(bone))
                         else:
                             # Layout A
                             weight_slots = range(8) if sum(orig_all_w) == 32767 else range(4)
-                            remaining = {s: w for s, w in raw_weights}
+                            remaining = {s: w for s, w in BME.normalize_weights(raw_weights, len(weight_slots))}
                             # Inject added-bone weights into zero-weight positions.
                             all_i = list(orig_all_i)
                             empty_slots = [k for k in weight_slots if orig_all_w[k] == 0]
@@ -2073,10 +2111,11 @@ class BlenderMeshExporter:
                                 if not extra:
                                     break
                                 all_i[k] = extra.pop(0)
-                            for slot in weight_slots:
-                                bone = all_i[slot]
-                                w = remaining.pop(bone, 0.0)
-                                f.write(bp.uint16(max(0, min(int(round(w * 32767)), 32767))))
+                            # Pre-encode active weight slots as a batch to fix rounding sum
+                            ordered = [(all_i[slot], remaining.pop(all_i[slot], 0.0)) for slot in weight_slots]
+                            enc = BME.encode_weights_u16(ordered)
+                            for _, e in enc:
+                                f.write(bp.uint16(e))
                             for slot in range(len(weight_slots), 8):
                                 f.write(bp.uint16(orig_all_w[slot]))
                             for bone in all_i:
@@ -2085,10 +2124,11 @@ class BlenderMeshExporter:
                         # Vert count changed: write by weight desc
                         if stride32_use_u16:
                             # Layout B
-                            sw = raw_weights[:6]
-                            for _, w in sw:
-                                f.write(bp.uint8(max(0, min(int(round(w * 255)), 255))))
-                            for _ in range(6 - len(sw)):
+                            sw = BME.normalize_weights(raw_weights, 6)
+                            enc = BME.encode_weights_u8(sw)
+                            for _, e in enc:
+                                f.write(bp.uint8(e))
+                            for _ in range(6 - len(enc)):
                                 f.write(bp.uint8(0))
                             f.write(b'\x00\x00')
                             for s, _ in sw[:6]:
@@ -2097,10 +2137,11 @@ class BlenderMeshExporter:
                                 f.write(bp.uint16(0))
                         elif stride32_layout_c:
                             # Layout C
-                            sw = raw_weights[:12]
-                            for _, w in sw:
-                                f.write(bp.uint8(max(0, min(int(round(w * 255)), 255))))
-                            for _ in range(12 - len(sw)):
+                            sw = BME.normalize_weights(raw_weights, 12)
+                            enc = BME.encode_weights_u8(sw)
+                            for _, e in enc:
+                                f.write(bp.uint8(e))
+                            for _ in range(12 - len(enc)):
                                 f.write(bp.uint8(0))
                             for s, _ in sw:
                                 f.write(bp.uint8(s))
@@ -2108,10 +2149,11 @@ class BlenderMeshExporter:
                                 f.write(bp.uint8(0))
                         else:
                             # Layout A
-                            sw = raw_weights[:8]
-                            for _, w in sw:
-                                f.write(bp.uint16(max(0, min(int(round(w * 32767)), 32767))))
-                            for _ in range(8 - len(sw)):
+                            sw = BME.normalize_weights(raw_weights, 8)
+                            enc = BME.encode_weights_u16(sw)
+                            for _, e in enc:
+                                f.write(bp.uint16(e))
+                            for _ in range(8 - len(enc)):
                                 f.write(bp.uint16(0))
                             for s, _ in sw:
                                 f.write(bp.uint8(s))
@@ -2120,10 +2162,11 @@ class BlenderMeshExporter:
 
                 elif stride == 36:
                     max_bones = 8
-                    sw = raw_weights[:max_bones]
-                    for _, w in sw:
-                        f.write(bp.uint16(max(0, min(int(round(w * 32767)), 32767))))
-                    for _ in range(max_bones - len(sw)):
+                    sw = BME.normalize_weights(raw_weights, max_bones)
+                    enc = BME.encode_weights_u16(sw)
+                    for _, e in enc:
+                        f.write(bp.uint16(e))
+                    for _ in range(max_bones - len(enc)):
                         f.write(bp.uint16(0))
                     for s, _ in sw:
                         f.write(bp.uint8(s))
@@ -2132,10 +2175,11 @@ class BlenderMeshExporter:
 
                 elif stride == 40:
                     max_bones = 8
-                    sw = raw_weights[:max_bones]
-                    for _, w in sw:
-                        f.write(bp.uint16(max(0, min(int(round(w * 32767)), 32767))))
-                    for _ in range(max_bones - len(sw)):
+                    sw = BME.normalize_weights(raw_weights, max_bones)
+                    enc = BME.encode_weights_u16(sw)
+                    for _, e in enc:
+                        f.write(bp.uint16(e))
+                    for _ in range(max_bones - len(enc)):
                         f.write(bp.uint16(0))
                     for s, _ in sw:
                         f.write(bp.uint16(s))
@@ -2144,21 +2188,16 @@ class BlenderMeshExporter:
 
                 elif stride == 44:
                     max_bones = 12
-                    sw = raw_weights[:max_bones]
+                    sw = BME.normalize_weights(raw_weights, max_bones)
+                    enc = BME.encode_weights_u8(sw)
                     for i in range(max_bones):
-                        if i < len(sw):
-                            f.write(bp.uint8(max(0, min(int(round(sw[i][1] * 255)), 255))))
-                        else:
-                            f.write(bp.uint8(0))
+                        f.write(bp.uint8(enc[i][1] if i < len(enc) else 0))
                     for i in range(max_bones):
-                        if i < len(sw):
-                            f.write(bp.uint16(sw[i][0]))
-                        else:
-                            f.write(bp.uint16(0))
+                        f.write(bp.uint16(enc[i][0] if i < len(enc) else 0))
 
                 else:
                     wc = int((stride - pos_length) / 2)
-                    sw = raw_weights[:wc]
+                    sw = BME.normalize_weights(raw_weights, wc)
                     vert_count_matches = len(data.vertices) == lod.vertex_count
                     # Only use orig_slot_indices when vert count is unchanged AND this
                     # vertex index exists in the original data. For replacement meshes
@@ -2168,31 +2207,27 @@ class BlenderMeshExporter:
                     if orig_slot_indices is not None and vert_count_matches and vi < len(orig_slot_indices):
                         # Preserve original slot structure (vert count unchanged)
                         # Inject any added-bone weights into zero-weight positions
-                        remaining = {s: w for s, w in raw_weights}
+                        remaining = {s: w for s, w in BME.normalize_weights(raw_weights, wc)}
                         slot_idxs = list(orig_slot_indices[vi])
                         extra = sorted(remaining.keys() - set(slot_idxs),
                                        key=lambda s: remaining[s], reverse=True)
                         for k in range(len(slot_idxs)):
                             if slot_idxs[k] not in remaining and extra:
                                 slot_idxs[k] = extra.pop(0)
-                        for slot_bone in slot_idxs:
-                            w = remaining.pop(slot_bone, 0.0)
-                            f.write(bp.uint8(max(0, min(int(round(w * 255)), 255))))
+                        ordered = [(slot_idxs[k], remaining.pop(slot_idxs[k], 0.0)) for k in range(len(slot_idxs))]
+                        enc = BME.encode_weights_u8(ordered)
+                        for _, e in enc:
+                            f.write(bp.uint8(e))
                         for slot_bone in slot_idxs:
                             f.write(bp.uint8(slot_bone))
                     else:
                         # Replacement mesh or no original index entry: write Blender
                         # weights sorted by descending weight into the available slots.
+                        enc = BME.encode_weights_u8(sw)
                         for i in range(wc):
-                            if i < len(sw):
-                                f.write(bp.uint8(max(0, min(int(round(sw[i][1] * 255)), 255))))
-                            else:
-                                f.write(bp.uint8(0))
+                            f.write(bp.uint8(enc[i][1] if i < len(enc) else 0))
                         for i in range(wc):
-                            if i < len(sw):
-                                f.write(bp.uint8(sw[i][0]))
-                            else:
-                                f.write(bp.uint8(0))
+                            f.write(bp.uint8(enc[i][0] if i < len(enc) else 0))
 
                 # Advance to next vertex slot
                 f.seek(stride_start + stride)
@@ -3015,6 +3050,15 @@ class ExportLOD(bpy.types.Operator):
             BME._bake_parent_inverse(tri_obj)
             BME._triangulate_object(tri_obj, compute_normals=context.scene.SWOMT.compute_normals_on_export)
 
+        # Validate weights before writing
+        unweighted_count = BME.find_unweighted_vertices(mesh, self.lod_index)
+        if unweighted_count:
+            self.report({'ERROR'},
+                        f"Export failed: {unweighted_count} unweighted vertice(s) in "
+                        f"'{mesh.name}' LOD{self.lod_index}. "
+                        f"Assign bone weights to all vertices before exporting.")
+            return {'CANCELLED'}
+
         try:
             BME._write_mod_file(
                 edited_lod_index_per_mesh={self.mesh_index: self.lod_index},
@@ -3777,6 +3821,23 @@ class ExportAllLODs(bpy.types.Operator):
                 if tri_obj:
                     BME._bake_parent_inverse(tri_obj)
                     BME._triangulate_object(tri_obj, compute_normals=context.scene.SWOMT.compute_normals_on_export)
+
+        # Validate weights before writing
+        unweighted_errors = []
+        for m in asset.meshes:
+            for li, lod in enumerate(m.lods):
+                obj_name = lod.blender_obj_name or f"{m.name}_LOD{li}"
+                if BME.find_object_by_name(obj_name) is None:
+                    continue
+                count = BME.find_unweighted_vertices(m, li)
+                if count:
+                    unweighted_errors.append(f"'{m.name}' LOD{li}: {count} vertice(s)")
+        if unweighted_errors:
+            self.report({'ERROR'},
+                        f"Export failed: unweighted vertice(s) in "
+                        f"{', '.join(unweighted_errors)}. "
+                        f"Assign bone weights to all vertices before exporting.")
+            return {'CANCELLED'}
 
         # Export each LOD level in order (0 -> 3). _write_mod_file accumulates on
         # top of _MOD.mmb when it already exists, so each pass layers on top of
