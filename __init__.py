@@ -1,15 +1,7 @@
 # Original author: AlexPo
-# Modified by: JasperZebra — Avatar: Frontiers of Pandora (.mmb version 13) support
-# Further modified — multi-version support: v12, v13, v15, v16, v17
-#   - Added v12/v15/v16 parsing (multi-version support)
-#   - Fixed pre-LOD section: root_bone_index and lod_info_type are version/u_count conditional
-#   - Fixed tail section: UV hashes are 4 bytes on all versions; unk field order differs v12-15 vs v16-17
-#   - Formula-based position type detection: normals_base = ns - 4*uv - 4*col; 28->float, 12->int16
-#   - All fixes are version-conditional (additive only — existing versions unchanged)
-
 bl_info = {
     "name": "AFoP Mesh Tool",
-    "author": "JasperZebra, J-Lyt",
+    "author": "JasperZebra, J-Lyt, SaintBaron",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
     "version": (0, 1, 49),
     "blender": (5, 0, 0),
