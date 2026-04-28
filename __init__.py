@@ -2298,8 +2298,6 @@ class BlenderMeshExporter:
                 flip = -1.0 if l.bitangent_sign == -1 else 1.0
                 NTB[l.vertex_index] = (l.normal, l.tangent, flip)
 
-            color_layer = bm.verts.layers.float_color.get("Color_0")
-
             SWOMT = bpy.context.scene.SWOMT
             export_uvs = SWOMT.export_uvs or _vert_count_changed()
 
@@ -2402,11 +2400,18 @@ class BlenderMeshExporter:
 
                     # Write vertex color: preserve original bytes unless Export Vertex Colors is on.
                     if mesh.color_count > 0:
-                        if SWOMT.export_vertex_colors and color_layer is not None:
-                            # Export from Blender color layer
-                            vertex_color = bm.verts[v.index][color_layer]
-                            for c in vertex_color:
-                                f.write(bp.uint8_norm(c))
+                        if SWOMT.export_vertex_colors:
+                            for ci in range(mesh.color_count):
+                                layer = bm.verts.layers.float_color.get(f"Color_{ci}")
+                                if layer is not None:
+                                    vertex_color = bm.verts[v.index][layer]
+                                    for c in vertex_color:
+                                        f.write(bp.uint8_norm(c))
+                                elif orig_colors and src_vi < len(orig_colors):
+                                    # Preserve original bytes verbatim
+                                    f.write(orig_colors[src_vi][ci * 4:ci * 4 + 4])
+                                else:
+                                    f.write(b'\x00' * 4)
                         elif orig_colors and src_vi < len(orig_colors):
                             # Preserve original bytes verbatim
                             f.write(orig_colors[src_vi])
@@ -2501,10 +2506,17 @@ class BlenderMeshExporter:
 
                     # Colors first
                     if mesh.color_count > 0:
-                        if SWOMT.export_vertex_colors and color_layer is not None:
-                            vertex_color = bm.verts[v.index][color_layer]
-                            for c in vertex_color:
-                                f.write(bp.uint8_norm(c))
+                        if SWOMT.export_vertex_colors:
+                            for ci in range(mesh.color_count):
+                                layer = bm.verts.layers.float_color.get(f"Color_{ci}")
+                                if layer is not None:
+                                    vertex_color = bm.verts[v.index][layer]
+                                    for c in vertex_color:
+                                        f.write(bp.uint8_norm(c))
+                                elif orig_colors and src_vi < len(orig_colors):
+                                    f.write(orig_colors[src_vi][ci * 4:ci * 4 + 4])
+                                else:
+                                    f.write(b'\x00' * 4)
                         elif orig_colors and src_vi < len(orig_colors):
                             f.write(orig_colors[src_vi])
                         else:
