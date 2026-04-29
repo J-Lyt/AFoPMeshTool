@@ -1431,11 +1431,6 @@ class BlenderMeshExporter:
         src_path = SWOMT.AssetPath
         export_normals = SWOMT.export_normals or _vert_count_changed()
 
-        # If a _MOD file already exists, use it as the source so successive exports accumulate.
-        mod_candidate = os.path.splitext(src_path)[0] + "_MOD.mmb"
-        if os.path.isfile(mod_candidate):
-            src_path = mod_candidate
-
         with open(src_path, 'rb') as src:
             file_data = bytearray(src.read())
 
@@ -3169,13 +3164,11 @@ def _compute_inv_bind_from_skeleton(bone_name):
 
     SWOMT = bpy.context.scene.SWOMT
     src_path = SWOMT.AssetPath
-    mod_candidate = os.path.splitext(src_path)[0] + "_MOD.mmb"
-    base_path = mod_candidate if os.path.isfile(mod_candidate) else src_path
-    if not os.path.isfile(base_path):
+    if not os.path.isfile(src_path):
         return None
 
     try:
-        with open(base_path, 'rb') as f:
+        with open(src_path, 'rb') as f:
             data = f.read()
 
         pos = 0
@@ -4248,13 +4241,7 @@ class ExportPosedBoneMatrices(bpy.types.Operator):
         # Patch skeleton section in a copy of the file bytes.
         mod_file = _mod_file_output(src_path, overwrite=SWOMT.overwrite_existing)
 
-        # Start from existing _MOD if present, otherwise original
-        base_path = src_path
-        mod_candidate = os.path.splitext(src_path)[0] + "_MOD.mmb"
-        if os.path.isfile(mod_candidate):
-            base_path = mod_candidate
-
-        with open(base_path, 'rb') as f:
+        with open(src_path, 'rb') as f:
             file_data = bytearray(f.read())
 
         patched_skel = 0
