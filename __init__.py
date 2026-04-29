@@ -3,7 +3,7 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt, SaintBaron",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 52),
+    "version": (0, 1, 53),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 11, 12, 13, 14, 15, 16, 17.",
     "category": "Import-Export"
@@ -35,10 +35,10 @@ import copy
 import operator
 
 # Auto-update
-_RAW_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/fullExport/__init__.py"
-_LOD_CFG_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/fullExport/lod_presets.cfg"
+_RAW_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/master/__init__.py"
+_LOD_CFG_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/master/lod_presets.cfg"
 _LOD_CFG_FILENAME = "lod_presets.cfg"
-_MMB_JSON_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/fullExport/mmb_lod_presets.json"
+_MMB_JSON_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/master/mmb_lod_presets.json"
 _MMB_JSON_FILENAME = "mmb_lod_presets.json"
 _update_status = None   # None = not checked, "up_to_date", or "vX.X.X available"
 _update_error  = None   # set if network fetch failed
