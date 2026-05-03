@@ -2272,9 +2272,6 @@ class BlenderMeshExporter:
 
             # Gather per-vertex normal, tangent, bitangent-sign, and UV data from loops
             NTB = [(Vector((1.0, 0.0, 0.0)), Vector((0.0, 1.0, 0.0)), 1.0)] * len(data.vertices)
-            UVs = [[[(0.0, 0.0)] * len(data.vertices)] for _ in range(mesh.uv_count)]
-            # Build per-UV-layer data
-            uv_layers = bm.loops.layers.uv
             all_uvs = [[(0.0, 0.0)] * len(data.vertices) for _ in range(mesh.uv_count)]
 
             # Detect UV Convention
@@ -2286,30 +2283,42 @@ class BlenderMeshExporter:
                 cv_attr = data.attributes.get(f'mmb_uv{ui}_centred_v')
                 if cu_attr is not None:
                     uv_centred_u.append(bool(cu_attr.data[0].value))
-                elif ui < len(uv_layers):
+                elif ui < len(data.uv_layers):
                     uv_centred_u.append(False)
                 else:
                     uv_centred_u.append(False)
                 if cv_attr is not None:
                     uv_centred_v.append(bool(cv_attr.data[0].value))
-                elif ui < len(uv_layers):
-                    # Fallback
-                    v_vals = [loop[uv_layers[ui]].uv[1] for bface in bm.faces for loop in bface.loops]
+                elif ui < len(data.uv_layers):
+                    v_vals = [data.uv_layers[ui].data[li].uv[1] for li in range(len(data.loops))]
                     v_min, v_max = min(v_vals), max(v_vals)
                     uv_centred_v.append(v_min < -0.05 and abs((v_min + v_max) / 2.0 - 0.5) < 0.15)
                 else:
                     uv_centred_v.append(False)
 
-            for bface in bm.faces:
-                for loop in bface.loops:
-                    vi = loop.vert.index
-                    for ui in range(mesh.uv_count):
-                        if ui < len(uv_layers):
-                            u_bl = loop[uv_layers[ui]].uv[0]
-                            v_bl = loop[uv_layers[ui]].uv[1]
-                            u = u_bl
-                            v = v_bl - 0.5 if uv_centred_v[ui] else 1 - v_bl
-                            all_uvs[ui][vi] = (u, v)
+            uv_accum = [[None] * len(data.vertices) for _ in range(mesh.uv_count)]
+
+            # For vertices shared between faces with different UVs (seams), average all loop UV values
+            for ui in range(mesh.uv_count):
+                if ui >= len(data.uv_layers):
+                    continue
+                uv_data = data.uv_layers[ui].data
+                for li, loop in enumerate(data.loops):
+                    vi = loop.vertex_index
+                    u_bl, v_bl = uv_data[li].uv
+                    u = u_bl
+                    v = v_bl - 0.5 if uv_centred_v[ui] else 1 - v_bl
+                    if uv_accum[ui][vi] is None:
+                        uv_accum[ui][vi] = [u, v, 1]
+                    else:
+                        uv_accum[ui][vi][0] += u
+                        uv_accum[ui][vi][1] += v
+                        uv_accum[ui][vi][2] += 1
+            for ui in range(mesh.uv_count):
+                for vi in range(len(data.vertices)):
+                    if uv_accum[ui][vi] is not None:
+                        u_sum, v_sum, count = uv_accum[ui][vi]
+                        all_uvs[ui][vi] = (u_sum / count, v_sum / count)
 
             for l in data.loops:
                 flip = -1.0 if l.bitangent_sign == -1 else 1.0
@@ -2379,7 +2388,6 @@ class BlenderMeshExporter:
                         if abs(raw_u) > 8191:
                             uv_compact = False
                             break
-                print(f"[AFoPMT] {mesh.name} LOD{lod_index} (nt=0): uv_compact={uv_compact} uv_off={uv_off_in_stride} ns={ns} cc={cc} first_raw_u={unpack('<h', orig_file_bytes[abs_vob_src + uv_off_in_stride : abs_vob_src + uv_off_in_stride + 2])[0] if orig_vc_src > 0 else 'N/A'}")
 
                 # Build per-vertex source index using mmb_vertex_order attribute if present
                 orig_idx_attr = data.attributes.get("mmb_vertex_order")
