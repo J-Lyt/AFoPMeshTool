@@ -1530,14 +1530,15 @@ class BlenderMeshExporter:
                 orig_vd_size = orig_vc * mesh.vertex_stride
                 orig_nd_size = orig_vc * mesh.normals_stride
                 orig_fd_size = orig_ic * orig_idx_size
-                orig_trailing_size = orig_data_size - orig_vd_size - orig_nd_size - orig_fd_size
             else:
-                orig_trailing_size = orig_data_size - len(vd) - len(nd) - len(fd)
+                orig_vc = unpack('<I', file_data[lod.start_offset:lod.start_offset + 4])[0]
+                orig_ic = unpack('<I', file_data[lod.start_offset + lod.lod_field_offset + 4:lod.start_offset + lod.lod_field_offset + 8])[0]
+                orig_vd_size = orig_vc * mesh.vertex_stride
+                orig_nd_size = orig_vc * mesh.normals_stride
+                orig_fd_size = orig_ic * 2 # uint16 indices
+            orig_trailing_size = orig_data_size - orig_vd_size - orig_nd_size - orig_fd_size
             if orig_trailing_size > 0:
-                if orig_uses_uint32_pre:
-                    trailing_abs = lod.data_offset + intra_voa + orig_vd_size + orig_nd_size + orig_fd_size
-                else:
-                    trailing_abs = lod.data_offset + intra_voa + len(vd) + len(nd) + len(fd)
+                trailing_abs = lod.data_offset + intra_voa + orig_vd_size + orig_nd_size + orig_fd_size
                 trailing_bytes = bytes(file_data[trailing_abs:trailing_abs + orig_trailing_size])
             else:
                 trailing_bytes = b''
@@ -1580,9 +1581,31 @@ class BlenderMeshExporter:
                         file_data[so + fo + field_off:so + fo + field_off + 4] = pack('<I', old + delta)
 
             elif delta < 0:
-                # Shrinking: zero the freed bytes (no structural change needed)
+                # Shrinking: remove the freed bytes from file_data
                 shrink_start = lod.data_offset + intra_voa + new_data_size
-                file_data[shrink_start:insert_at] = b'\x00' * (-delta)
+                del file_data[shrink_start:insert_at]
+
+                # Update data_offset for every LOD whose block starts after this one
+                for other_mesh in asset.meshes:
+                    for other_lod in other_mesh.lods:
+                        if other_lod.data_offset > lod.data_offset:
+                            fp = other_lod.data_offset_file_pos
+                            old_val = unpack('<I', file_data[fp:fp + 4])[0]
+                            file_data[fp:fp + 4] = pack('<I', old_val + delta)
+
+                # Update asset.size if the edited LOD lives in the header section
+                if lod.data_offset < asset_size:
+                    asset_size += delta
+                    file_data[4:8] = pack('<I', asset_size)
+
+                # Update voa/vob/fb for lower-indexed LODs in this mesh
+                for li in range(0, lod_index):
+                    other_lod = mesh.lods[li]
+                    so = other_lod.start_offset
+                    shift = other_lod.lod_field_offset
+                    for field_off in (12, 16, 20): # voa, vob, fb
+                        old = unpack('<I', file_data[so + shift + field_off:so + shift + field_off + 4])[0]
+                        file_data[so + shift + field_off:so + shift + field_off + 4] = pack('<I', old + delta)
 
             # Write the new vertex/normal/face data at their correct positions.
             abs_voa     = lod.data_offset + intra_voa
@@ -1847,7 +1870,6 @@ class BlenderMeshExporter:
             bm.verts.ensure_lookup_table()
             stride = mesh.vertex_stride
             pos_length = 8 if mesh.position_type == 0 else 12
-            print(stride, mesh.position_type)
             mesh_bones = list(mesh.mesh_bones.keys())  # skeleton bone indices in mesh-slot order
 
             # Map: bone name -> mesh slot index
