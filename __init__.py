@@ -1362,28 +1362,11 @@ class BlenderMeshExporter:
         obj_data.update()
 
     @staticmethod
-    def _triangulate_object(obj, compute_normals=False):
-        """
-        Triangulate all faces of obj in-place using the Triangulate modifier with
-        Keep Normals enabled, then optionally recompute smooth normals.
-        """
-        import bpy as _bpy
-
-        mod = obj.modifiers.new(name="_tri_export", type='TRIANGULATE')
-        mod.keep_custom_normals = True
-        mod.quad_method = 'BEAUTY'
-        mod.ngon_method = 'BEAUTY'
-
-        dg = _bpy.context.evaluated_depsgraph_get()
-        eval_obj = obj.evaluated_get(dg)
-        me = _bpy.data.meshes.new_from_object(eval_obj)
-
-        obj.data = me
-        obj.modifiers.remove(mod)
-        obj.data.update()
-
-        if compute_normals:
-            BME._compute_normals_for_object(obj)
+    def _split_seam_edges(obj):
+        """Uses the 'uv_seam' attribute, falling back to iterating edges if the attribute isn't present."""
+        if obj.data.attributes.get('uv_seam') is not None:
+            return True
+        return any(e.use_seam for e in obj.data.edges)
 
     @staticmethod
     def find_object_by_name(name=""):
@@ -1391,7 +1374,7 @@ class BlenderMeshExporter:
 
     @staticmethod
     def _bake_parent_inverse(obj):
-        # If obj has a non-identity parent inverse matrix, bake it into the mesh
+        # If obj has a non-identity parent inverse matrix, bake it into the duplicate mesh's
         # vertex positions and reset it to identity so the exporter reads
         # coordinates in the correct space regardless of how the object was
         # parented or re-parented in Blender.
@@ -1407,10 +1390,60 @@ class BlenderMeshExporter:
         # Apply parent inverse into vertex positions
         for v in obj.data.vertices:
             v.co = pi @ v.co
-        # Reset to identity so future exports are clean
-        obj.matrix_parent_inverse = Matrix.Identity(4)
         obj.data.update()
-        print(f"[AFoPMT] Auto-baked parent inverse for '{obj.name}'")
+
+    @staticmethod
+    def _triangulate_object(obj, compute_normals=False, split_seams=False):
+        """
+        Temporarily modifies obj.data to apply seam split, parent inverse, and triangulation.
+        new_from_object is evaluated and then restores the original obj.data so mesh in Blender is untouched.
+        """
+        import bpy as _bpy
+        import bmesh as _bmesh
+
+        original_data = obj.data
+
+        # Copy of the mesh data for seam split, parent inverse, and triangulation
+        temp_data = original_data.copy()
+        obj.data = temp_data
+
+        try:
+            if split_seams:
+                bm = _bmesh.new()
+                bm.from_mesh(obj.data)
+                bm.edges.ensure_lookup_table()
+                bm.verts.ensure_lookup_table()
+
+                seam_edges = [e for e in bm.edges if e.seam]
+                if seam_edges:
+                    _bmesh.ops.split_edges(bm, edges=seam_edges)
+
+                bm.to_mesh(obj.data)
+                bm.free()
+                obj.data.update()
+
+            BME._bake_parent_inverse(obj)
+
+            mod = obj.modifiers.new(name="_tri_export", type='TRIANGULATE')
+            mod.keep_custom_normals = True
+            mod.quad_method = 'BEAUTY'
+            mod.ngon_method = 'BEAUTY'
+
+            dg = _bpy.context.evaluated_depsgraph_get()
+            eval_obj = obj.evaluated_get(dg)
+            me = _bpy.data.meshes.new_from_object(eval_obj)
+            obj.modifiers.remove(mod)
+        finally:
+            # Always restore original_data and clean up temp_data
+            obj.data = original_data
+            _bpy.data.meshes.remove(temp_data)
+
+        # Replace with original_data
+        obj.data = me
+        obj.data.update()
+
+        if compute_normals:
+            BME._compute_normals_for_object(obj)
 
     @staticmethod
     def _write_mod_file(edited_lod_index_per_mesh: dict, out_path: str):
@@ -3067,6 +3100,7 @@ class ExportLOD(bpy.types.Operator):
         lod  = mesh.lods[self.lod_index]
         lod_obj_name = lod.blender_obj_name or f"{mesh.name}_LOD{self.lod_index}"
         tri_obj = BME.find_object_by_name(lod_obj_name)
+        original_data = {}
 
         # Block export of LOD1-3 when vert count has changed. LOD0 is not streamed and exports correctly.
         if self.lod_index > 0 and tri_obj is not None:
@@ -3078,12 +3112,16 @@ class ExportLOD(bpy.types.Operator):
                 return {'CANCELLED'}
 
         if tri_obj:
-            BME._bake_parent_inverse(tri_obj)
-            BME._triangulate_object(tri_obj, compute_normals=context.scene.SWOMT.compute_normals_on_export)
+            original_data = tri_obj.data
+            BME._triangulate_object(tri_obj,
+                                    compute_normals=context.scene.SWOMT.compute_normals_on_export,
+                                    split_seams=SWOMT.export_uvs and BME._split_seam_edges(tri_obj))
 
         # Validate weights before writing
         unweighted_count = BME.find_unweighted_vertices(mesh, self.lod_index)
         if unweighted_count:
+            if tri_obj:
+                tri_obj.data = original_data
             self.report({'ERROR'},
                         f"Export failed: {unweighted_count} unweighted vertice(s) in "
                         f"'{mesh.name}' LOD{self.lod_index}. "
@@ -3096,8 +3134,17 @@ class ExportLOD(bpy.types.Operator):
                 out_path=mod_file,
             )
         except Exception as e:
+            if tri_obj:
+                tri_obj.data = original_data
             self.report({'ERROR'}, f"Export failed: {e}")
             return {'CANCELLED'}
+        finally:
+            # Always restore the original mesh data so the user's mesh is untouched
+            if tri_obj:
+                export_data = tri_obj.data
+                tri_obj.data = original_data
+                if export_data != original_data:
+                    bpy.data.meshes.remove(export_data)
 
         # Apply header-level patches for every mesh
         for mesh in asset.meshes:
@@ -3843,13 +3890,16 @@ class ExportAllLODs(bpy.types.Operator):
 
         # Bake parent inverse and triangulate every LOD object that exists in the scene.
         # Baking must happen before triangulation so vertex positions are correct.
+        original_data = {}  # obj_name -> (obj, original_data)
         for m in asset.meshes:
             for li, lod in enumerate(m.lods):
                 lod_obj_name = lod.blender_obj_name or f"{m.name}_LOD{li}"
                 tri_obj = BME.find_object_by_name(lod_obj_name)
                 if tri_obj:
-                    BME._bake_parent_inverse(tri_obj)
-                    BME._triangulate_object(tri_obj, compute_normals=context.scene.SWOMT.compute_normals_on_export)
+                    original_data[lod_obj_name] = (tri_obj, tri_obj.data)
+                    BME._triangulate_object(tri_obj,
+                                            compute_normals=context.scene.SWOMT.compute_normals_on_export,
+                                            split_seams=SWOMT.export_uvs and BME._split_seam_edges(tri_obj))
 
         # Validate weights before writing
         unweighted_errors = []
@@ -3862,6 +3912,11 @@ class ExportAllLODs(bpy.types.Operator):
                 if count:
                     unweighted_errors.append(f"'{m.name}' LOD{li}: {count} vertice(s)")
         if unweighted_errors:
+            for obj_name, (obj, orig_data) in original_data.items():
+                export_data = obj.data
+                obj.data = orig_data
+                if export_data != orig_data:
+                    bpy.data.meshes.remove(export_data)
             self.report({'ERROR'},
                         f"Export failed: unweighted vertice(s) in "
                         f"{', '.join(unweighted_errors)}. "
@@ -3873,29 +3928,37 @@ class ExportAllLODs(bpy.types.Operator):
         # the previous one correctly.
         exported_any = False
         skipped_lods = []  # Skipped due to vert count change
-        for lod_n in range(4):
-            edited = {}
-            for m in asset.meshes:
-                if len(m.lods) <= lod_n:
+        try:
+            for lod_n in range(4):
+                edited = {}
+                for m in asset.meshes:
+                    if len(m.lods) <= lod_n:
+                        continue
+                    lod = m.lods[lod_n]
+                    obj_name = lod.blender_obj_name or f"{m.name}_LOD{lod_n}"
+                    obj = BME.find_object_by_name(obj_name)
+                    if obj is None:
+                        continue
+                    # Block LOD1+ with changed vert count — streaming breaks in-game.
+                    if lod_n > 0 and len(obj.data.vertices) != lod.vertex_count:
+                        skipped_lods.append((m.name, lod_n, lod.vertex_count, len(obj.data.vertices)))
+                        continue
+                    edited[m.index] = lod_n
+                if not edited:
                     continue
-                lod = m.lods[lod_n]
-                obj_name = lod.blender_obj_name or f"{m.name}_LOD{lod_n}"
-                obj = BME.find_object_by_name(obj_name)
-                if obj is None:
-                    continue
-                # Block LOD1-3 with changed vert count - streaming breaks in-game.
-                if lod_n > 0 and len(obj.data.vertices) != lod.vertex_count:
-                    skipped_lods.append((m.name, lod_n, lod.vertex_count, len(obj.data.vertices)))
-                    continue
-                edited[m.index] = lod_n
-            if not edited:
-                continue
-            try:
-                BME._write_mod_file(edited_lod_index_per_mesh=edited, out_path=mod_file)
-                exported_any = True
-            except Exception as e:
-                self.report({'ERROR'}, f"Export LOD{lod_n} failed: {e}")
-                return {'CANCELLED'}
+                try:
+                    BME._write_mod_file(edited_lod_index_per_mesh=edited, out_path=mod_file)
+                    exported_any = True
+                except Exception as e:
+                    self.report({'ERROR'}, f"Export LOD{lod_n} failed: {e}")
+                    return {'CANCELLED'}
+        finally:
+            # Always restore every object's original mesh data so the user's mesh is untouched
+            for obj_name, (obj, orig_data) in original_data.items():
+                export_data = obj.data
+                obj.data = orig_data
+                if export_data != orig_data:
+                    bpy.data.meshes.remove(export_data)
 
         if skipped_lods:
             names = ', '.join(f"'{n}' LOD{li} ({oc}→{nc})" for n,li,oc,nc in skipped_lods)
