@@ -3,7 +3,7 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt, SaintBaron",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 54),
+    "version": (0, 1, 55),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 11, 12, 13, 14, 15, 16, 17.",
     "category": "Import-Export"
@@ -1362,13 +1362,6 @@ class BlenderMeshExporter:
         obj_data.update()
 
     @staticmethod
-    def _split_seam_edges(obj):
-        """Uses the 'uv_seam' attribute, falling back to iterating edges if the attribute isn't present."""
-        if obj.data.attributes.get('uv_seam') is not None:
-            return True
-        return any(e.use_seam for e in obj.data.edges)
-
-    @staticmethod
     def find_object_by_name(name=""):
         return bpy.data.objects.get(name, None)
 
@@ -1406,21 +1399,19 @@ class BlenderMeshExporter:
         # Copy of the mesh data for seam split, parent inverse, and triangulation
         temp_data = original_data.copy()
         obj.data = temp_data
-
         try:
-            if split_seams:
-                bm = _bmesh.new()
-                bm.from_mesh(obj.data)
-                bm.edges.ensure_lookup_table()
-                bm.verts.ensure_lookup_table()
+            bm = _bmesh.new()
+            bm.from_mesh(obj.data)
+            bm.edges.ensure_lookup_table()
+            bm.verts.ensure_lookup_table()
 
-                seam_edges = [e for e in bm.edges if e.seam]
-                if seam_edges:
-                    _bmesh.ops.split_edges(bm, edges=seam_edges)
-
+            seam_edges = [e for e in bm.edges if e.seam]
+            if seam_edges:
+                print(f"[AFoPMT] seam_edges: True")
+                _bmesh.ops.split_edges(bm, edges=seam_edges)
                 bm.to_mesh(obj.data)
-                bm.free()
                 obj.data.update()
+            bm.free()
 
             BME._bake_parent_inverse(obj)
 
@@ -1443,6 +1434,7 @@ class BlenderMeshExporter:
         obj.data.update()
 
         if compute_normals:
+            print(f"[AFoPMT] compute_normals: True")
             BME._compute_normals_for_object(obj)
 
     @staticmethod
@@ -3114,8 +3106,7 @@ class ExportLOD(bpy.types.Operator):
         if tri_obj:
             original_data = tri_obj.data
             BME._triangulate_object(tri_obj,
-                                    compute_normals=context.scene.SWOMT.compute_normals_on_export,
-                                    split_seams=SWOMT.export_uvs and BME._split_seam_edges(tri_obj))
+                                    compute_normals=context.scene.SWOMT.compute_normals_on_export)
 
         # Validate weights before writing
         unweighted_count = BME.find_unweighted_vertices(mesh, self.lod_index)
@@ -3898,8 +3889,7 @@ class ExportAllLODs(bpy.types.Operator):
                 if tri_obj:
                     original_data[lod_obj_name] = (tri_obj, tri_obj.data)
                     BME._triangulate_object(tri_obj,
-                                            compute_normals=context.scene.SWOMT.compute_normals_on_export,
-                                            split_seams=SWOMT.export_uvs and BME._split_seam_edges(tri_obj))
+                                            compute_normals=context.scene.SWOMT.compute_normals_on_export)
 
         # Validate weights before writing
         unweighted_errors = []
