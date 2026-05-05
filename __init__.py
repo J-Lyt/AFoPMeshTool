@@ -3,7 +3,7 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt, SaintBaron",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 55),
+    "version": (0, 1, 56),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 11, 12, 13, 14, 15, 16, 17.",
     "category": "Import-Export"
@@ -568,6 +568,27 @@ class SkeletalMeshAsset(Asset):
                         f.seek(8, 1)
                         indices = [br.uint8(f) for _ in range(4)]
                         iw[indices[0]] = 1.0
+                    elif stride == 16:
+                        if self.parent_mesh.position_type == 1:
+                            # Float XYZ position (12b) + 1x uint8 bone slot index + 3b padding.
+                            # Same as stride=12 (weight 1.0 on first index) but with float positions.
+                            f.seek(12, 1)
+                            index = br.uint8(f)
+                            iw[index] = 1.0
+                        else:
+                            # Int16 position (8b) + 4x uint8_norm weights + 4x uint8 indices
+                            f.seek(8, 1)
+                            weight_count = 4
+                            weights = []
+                            for w in range(weight_count):
+                                weight = br.uint8_norm(f)
+                                if weight > 0.0:
+                                    weights.append(weight)
+                            for i in range(weight_count):
+                                if i < len(weights):
+                                    iw[br.uint8(f)] = weights[i]
+                                else:
+                                    f.seek(1, 1)
                     elif stride == 20:
                         pos_skip = 12 if self.parent_mesh.position_type == 1 else 8
                         f.seek(pos_skip, 1)
@@ -1860,30 +1881,6 @@ class BlenderMeshExporter:
         return Vector((co[0] * -1, co[1], co[2]))
 
     @staticmethod
-    def find_unweighted_vertices(mesh: SkeletalMeshAsset.Mesh, lod_index=0):
-        """
-        Returns the count of vertices that have no bone weights.
-        """
-        obj = BME.find_object_by_name(mesh.name + f"_LOD{lod_index}")
-        if not obj:
-            return 0
-        mesh_bones = list(mesh.mesh_bones.keys())
-        name_to_mesh_slot = {
-            asset.bones[skel_idx].name: slot
-            for slot, skel_idx in enumerate(mesh_bones)
-            if skel_idx < len(asset.bones)
-        }
-        vgroup_to_mesh_slot = {vg.index: name_to_mesh_slot[vg.name]
-                               for vg in obj.vertex_groups if vg.name in name_to_mesh_slot}
-        return sum(
-            1 for v in obj.data.vertices
-            if not any(
-                vgroup_to_mesh_slot.get(vge.group) is not None and vge.weight > 0.0
-                for vge in v.groups
-            )
-        )
-
-    @staticmethod
     def write_vertices(file, mesh:SkeletalMeshAsset.Mesh, lod_index=0):
         f = file
         obj = BME.find_object_by_name(mesh.name + f"_LOD{lod_index}")
@@ -2076,11 +2073,50 @@ class BlenderMeshExporter:
                         raw_weights.append((slot, vge.weight))
                 raw_weights.sort(key=lambda x: x[1], reverse=True)
 
+                if not raw_weights:
+                    raise ValueError(
+                        f"'{mesh.name}' LOD{lod_index} has vertices with no bone weights. "
+                        f"Assign bone weights to all vertices before exporting."
+                    )
+
                 # Write bone weights
                 if stride == 12:
                     # 4x uint8 bone slot indices, no weight bytes - Weight 1.0 on first index
                     for _ in range(4):
                         f.write(bp.uint8(raw_weights[0][0] if raw_weights else 0))
+
+                elif stride == 16:
+                    if pos_length == 12:
+                        # Float XYZ position (12b) + 1x uint8 bone slot index + 3b padding.
+                        # Same as stride=12 (weight 1.0 on first index) but with float positions.
+                        slot = raw_weights[0][0] if raw_weights else 0
+                        f.write(bp.uint8(slot))
+                        f.write(b'\x00\x00\x00')  # 3 padding bytes
+                    else:
+                        # Int16 position (8b) + 4x uint8_norm weights + 4x uint8 indices
+                        wc = 4
+                        sw = BME.normalize_weights(raw_weights, wc)
+                        vert_count_matches = len(data.vertices) == lod.vertex_count
+                        if orig_slot_indices is not None and vert_count_matches and vi < len(orig_slot_indices):
+                            remaining = {s: w for s, w in BME.normalize_weights(raw_weights, wc)}
+                            slot_idxs = list(orig_slot_indices[vi])
+                            extra = sorted(remaining.keys() - set(slot_idxs),
+                                           key=lambda s: remaining[s], reverse=True)
+                            for k in range(len(slot_idxs)):
+                                if slot_idxs[k] not in remaining and extra:
+                                    slot_idxs[k] = extra.pop(0)
+                            ordered = [(slot_idxs[k], remaining.pop(slot_idxs[k], 0.0)) for k in range(len(slot_idxs))]
+                            enc = BME.encode_weights_u8(ordered)
+                            for _, e in enc:
+                                f.write(bp.uint8(e))
+                            for slot_bone in slot_idxs:
+                                f.write(bp.uint8(slot_bone))
+                        else:
+                            enc = BME.encode_weights_u8(sw)
+                            for i in range(wc):
+                                f.write(bp.uint8(enc[i][1] if i < len(enc) else 0))
+                            for i in range(wc):
+                                f.write(bp.uint8(enc[i][0] if i < len(enc) else 0))
 
                 elif stride == 20:
                     max_bones = 4
@@ -3108,17 +3144,6 @@ class ExportLOD(bpy.types.Operator):
             BME._triangulate_object(tri_obj,
                                     compute_normals=context.scene.SWOMT.compute_normals_on_export)
 
-        # Validate weights before writing
-        unweighted_count = BME.find_unweighted_vertices(mesh, self.lod_index)
-        if unweighted_count:
-            if tri_obj:
-                tri_obj.data = original_data
-            self.report({'ERROR'},
-                        f"Export failed: {unweighted_count} unweighted vertice(s) in "
-                        f"'{mesh.name}' LOD{self.lod_index}. "
-                        f"Assign bone weights to all vertices before exporting.")
-            return {'CANCELLED'}
-
         try:
             BME._write_mod_file(
                 edited_lod_index_per_mesh={self.mesh_index: self.lod_index},
@@ -3890,28 +3915,6 @@ class ExportAllLODs(bpy.types.Operator):
                     original_data[lod_obj_name] = (tri_obj, tri_obj.data)
                     BME._triangulate_object(tri_obj,
                                             compute_normals=context.scene.SWOMT.compute_normals_on_export)
-
-        # Validate weights before writing
-        unweighted_errors = []
-        for m in asset.meshes:
-            for li, lod in enumerate(m.lods):
-                obj_name = lod.blender_obj_name or f"{m.name}_LOD{li}"
-                if BME.find_object_by_name(obj_name) is None:
-                    continue
-                count = BME.find_unweighted_vertices(m, li)
-                if count:
-                    unweighted_errors.append(f"'{m.name}' LOD{li}: {count} vertice(s)")
-        if unweighted_errors:
-            for obj_name, (obj, orig_data) in original_data.items():
-                export_data = obj.data
-                obj.data = orig_data
-                if export_data != orig_data:
-                    bpy.data.meshes.remove(export_data)
-            self.report({'ERROR'},
-                        f"Export failed: unweighted vertice(s) in "
-                        f"{', '.join(unweighted_errors)}. "
-                        f"Assign bone weights to all vertices before exporting.")
-            return {'CANCELLED'}
 
         # Export each LOD level in order (0 -> 3). _write_mod_file accumulates on
         # top of _MOD.mmb when it already exists, so each pass layers on top of
