@@ -868,7 +868,8 @@ class SkeletalMeshAsset(Asset):
             self.name_offset = 0        # byte offset of the uint16 length prefix in the source file
             self.name_length = 0        # original byte count of the name field (from the uint16 prefix)
             self.pending_rename_new = ""  # staged mesh rename — applied to _MOD copy on next export
-            self.zeroed_out_in_session = False  # True if Zero Out was used this session
+            self.zeroed_out_in_session = False # True if mesh was zeroed out this session
+            self.zeroed_out_in_mmb = False     # True if mesh was zeroed out in the mmb
             self.lod_count = 0
             self.lods = []
             self.vertex_stride = 0
@@ -1709,35 +1710,6 @@ class BlenderMeshExporter:
                     other_lod.vertex_data_offset_b = unpack('<I', file_data[other_lod_so + other_lod_fo + 16:other_lod_so + other_lod_fo + 20])[0]
                     other_lod.face_block_offset = unpack('<I', file_data[other_lod_so + other_lod_fo + 20:other_lod_so + other_lod_fo + 24])[0]
 
-        # Auto-zero any mesh whose Blender object has a vert count of 0.
-        # This makes the mesh invisible in-game without breaking file structure.
-        for mesh in asset.meshes:
-            for li, lod in enumerate(mesh.lods):
-                obj_name = lod.blender_obj_name or f"{mesh.name}_LOD{li}"
-                obj = bpy.data.objects.get(obj_name)
-                if obj is None:
-                    continue  # object not in scene, leave it alone
-                if len(obj.data.vertices) != 0:
-                    continue  # has vertices, export normally
-                # Object exists but has no vertices - zero out all vertex positions.
-                pos_length = 8 if mesh.position_type == 0 else 12
-                higher_size = sum(
-                    mesh.lods[li2].data_size
-                    for li2 in range(li + 1, len(mesh.lods))
-                )
-                intra_voa = lod.vertex_data_offset_a - higher_size
-                abs_voa = lod.data_offset + intra_voa
-                stride = mesh.vertex_stride
-                for vi in range(lod.vertex_count):
-                    voff = abs_voa + vi * stride
-                    if mesh.position_type == 0:
-                        # int16 positions: write x=0, y=0, z=0, preserve w scale
-                        file_data[voff:voff + 6] = b'\x00' * 6
-                    else:
-                        # float positions: write 0.0, 0.0, 0.0
-                        file_data[voff:voff + 12] = b'\x00' * 12
-                print(f"[AFoPMT] Auto-zeroed empty mesh '{mesh.name}' LOD{li}")
-
         with open(out_path, 'wb') as out:
             out.write(file_data)
 
@@ -1820,8 +1792,7 @@ class BlenderMeshExporter:
                 for lod in mesh.lods:
                     for v in range(lod.vertex_count):
                         f.seek(lod.data_offset + v * mesh.vertex_stride)
-                        lod.write_vertex_position(f, pos=(0.0, 0.0, 0.0),
-                                                  scale=None if mesh.position_type == 1 else 1)
+                        lod.write_vertex_position(f, pos=(0.0, 0.0, 0.0), scale=None if mesh.position_type == 1 else 1)
 
         # Mesh name rename
         if mesh.pending_rename_new:
@@ -2748,6 +2719,7 @@ def _on_load_post(filepath, *args, **kwargs):
                     sk_mesh.parse(f)
                     sk_mesh.name = Path(path).stem
                     asset = sk_mesh
+                _check_vert_pos_mmb(sk_mesh, path)
                 print(f"[AFoPMT] Loaded '{sk_mesh.name}' from '{path}'")
             except Exception as e:
                 print(f"[AFoPMT] Failed to Load '{path}': {e}")
@@ -2766,6 +2738,7 @@ def _auto_load_mmb(self, context):
             sk_mesh.name = Path(path).stem
             global asset
             asset = sk_mesh
+        _check_vert_pos_mmb(sk_mesh, path)
     except Exception as e:
         print(f"MMB auto-load failed: {e}")
 
@@ -2784,6 +2757,36 @@ def _vert_count_changed():
             if obj is not None and len(obj.data.vertices) != 0 and len(obj.data.vertices) != lod.vertex_count:
                 return True
     return False
+
+def _check_vert_pos_mmb(sk_mesh, path: str):
+    """
+    Read LOD0 vertex positions for each mesh directly from the MMB file. (We assume that LODs 1-3 are zeroed)
+    If all positions for LOD0 are zero, zeroed_out_in_mmb = True
+    """
+    try:
+        merged = get_merged_mmb(path)
+    except Exception as e:
+        print(f"[AFoPMT] _check_vert_pos_mmb: could not open '{path}': {e}")
+        return
+
+    for mesh in sk_mesh.meshes:
+        if not mesh.lods:
+            continue
+        lod = mesh.lods[0]
+        if lod.vertex_count == 0:
+            continue
+        try:
+            raw = mesh.extract_mesh_file(merged)
+            positions = lod.get_vertex_positions(raw)
+            is_zeroed = all(
+                abs(x) < 1e-6 and abs(y) < 1e-6 and abs(z) < 1e-6
+                for x, y, z in positions
+            )
+        except Exception as e:
+            print(f"[AFoPMT] _check_vert_pos_mmb: error reading '{mesh.name}': {e}")
+            continue
+
+        mesh.zeroed_out_in_mmb = is_zeroed
 
 def _on_compute_normals_on_export_update(self, context):
     """Auto-enable export_normals when compute_normals_on_export is checked."""
@@ -3179,6 +3182,60 @@ class ExportLOD(bpy.types.Operator):
         else:
             SWOMT.AssetPath = mod_file
 
+        return {'FINISHED'}
+
+class RemoveMesh(bpy.types.Operator):
+    """Zero out all vertex positions for all LODs of this mesh."""
+    bl_idname = "object.remove_mesh"
+    bl_label = "Remove Mesh"
+
+    mesh_index: bpy.props.IntProperty()
+
+    @classmethod
+    def poll(cls, context):
+        return asset is not None
+
+    def execute(self, context):
+        mesh = asset.meshes[self.mesh_index]
+        mesh.zeroed_out_in_session = True
+
+        # Remove any already-imported Blender objects in the viewport
+        for li, lod in enumerate(mesh.lods):
+            obj_name = lod.blender_obj_name if lod.blender_obj_name else f"{mesh.name}_LOD{li}"
+            obj = bpy.data.objects.get(obj_name)
+            if obj is not None:
+                bpy.data.objects.remove(obj, do_unlink=True)
+
+        self.report({'INFO'}, f"'{mesh.name}' ({len(mesh.lods)} LOD(s)) will have their vertex positions zeroed out on Export.")
+        return {'FINISHED'}
+
+class RevertMesh(bpy.types.Operator):
+    """Revert vertex positions for all LODs of this mesh."""
+    bl_idname = "object.revert_mesh"
+    bl_label = "Revert Mesh"
+
+    mesh_index: bpy.props.IntProperty()
+
+    @classmethod
+    def poll(cls, context):
+        return asset is not None
+
+    def execute(self, context):
+        mesh = asset.meshes[self.mesh_index]
+
+        if not mesh.zeroed_out_in_session:
+            self.report({'WARNING'}, "Mesh was not zeroed out in this session.")
+            return {'CANCELLED'}
+
+        # Remove any already-imported Blender objects in the viewport
+        for li, lod in enumerate(mesh.lods):
+            obj_name = lod.blender_obj_name if lod.blender_obj_name else f"{mesh.name}_LOD{li}"
+            obj = bpy.data.objects.get(obj_name)
+            if obj is not None:
+                bpy.data.objects.remove(obj, do_unlink=True)
+
+        mesh.zeroed_out_in_session = False
+        self.report({'INFO'}, f"Reverted '{mesh.name}' ({len(mesh.lods)} LOD(s)) to original positions.")
         return {'FINISHED'}
 
 class RenameMesh(bpy.types.Operator):
@@ -3967,6 +4024,7 @@ class ExportAllLODs(bpy.types.Operator):
         for mesh in asset.meshes:
             BME._apply_header_patches(mod_file, mesh, asset, operator=self)
 
+        # Apply staged file rename
         if asset.pending_file_rename_new:
             new_file = str(Path(mod_file).parent / (asset.pending_file_rename_new + '.mmb'))
             try:
@@ -4136,10 +4194,21 @@ class SWOMTPanel(bpy.types.Panel):
                 name_row.label(text=m.name, icon="MESH_ICOSPHERE")
                 rename_op = name_row.operator("object.rename_mesh", text="", icon="GREASEPENCIL")
                 rename_op.mesh_index = mi
+                remove_row = name_row.row()
+                remove_row.enabled = not (m.zeroed_out_in_session or m.zeroed_out_in_mmb)
+                remove_op = remove_row.operator("object.remove_mesh", text="", icon="X")
+                remove_op.mesh_index = mi
+                revert_row = name_row.row()
+                revert_row.enabled = m.zeroed_out_in_session
+                revert_op = revert_row.operator("object.revert_mesh", text="", icon="LOOP_BACK")
+                revert_op.mesh_index = mi
                 if expanded:
                     for li,l in enumerate(m.lods):
                         row = mesh_box.row()
-                        row.label(text = f"LOD{li} - {l.vertex_count}", icon = "CON_SIZELIKE")
+                        icon = "CON_SIZELIKE"
+                        if m.zeroed_out_in_session or m.zeroed_out_in_mmb:
+                            icon = "STRIP_COLOR_01"
+                        row.label(text=f"LOD{li} - {l.vertex_count}", icon=icon)
                         lod_import_button = row.operator("object.import_lod")
                         lod_import_button.lod_index = li
                         lod_import_button.mesh_index = mi
@@ -4496,7 +4565,9 @@ classes=[SWOMTSettings,
          SelectMGraphObject,
          RenameMMBFile,
          SelectMGraphObjectFilePatch,
-         ExportPosedBoneMatrices]
+         ExportPosedBoneMatrices,
+         RemoveMesh,
+         RevertMesh]
 
 def register():
     for c in classes:
