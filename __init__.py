@@ -2813,6 +2813,41 @@ def _on_export_uvs_update(self, context):
     if self.export_uvs:
         self.export_normals = True
 
+def _get_export_normals(self):
+    if _vert_count_changed():
+        return True
+    return self.get("export_normals", False)
+
+def _set_export_normals(self, value):
+    if _vert_count_changed():
+        return
+    old = self.get("export_normals", False)
+    self["export_normals"] = value
+    if old != value:
+        _on_export_normals_update(self, None)
+
+def _get_export_weights(self):
+    if _vert_count_changed():
+        return True
+    return self.get("export_weights", False)
+
+def _set_export_weights(self, value):
+    if not _vert_count_changed():
+        self["export_weights"] = value
+
+def _get_export_uvs(self):
+    if _vert_count_changed():
+        return True
+    return self.get("export_uvs", False)
+
+def _set_export_uvs(self, value):
+    if _vert_count_changed():
+        return
+    old = self.get("export_uvs", False)
+    self["export_uvs"] = value
+    if old != value:
+        _on_export_uvs_update(self, None)
+
 class SWOMTSettings(bpy.types.PropertyGroup):
     AssetPath: bpy.props.StringProperty(name="Asset Path", update=_auto_load_mmb)
     overwrite_existing: bpy.props.BoolProperty(
@@ -2830,14 +2865,15 @@ class SWOMTSettings(bpy.types.PropertyGroup):
     )
     export_normals: bpy.props.BoolProperty(
         name="Export Normals",
-        default=False,
         description="Write normals into the exported file. When unchecked, the original normals from the .mmb are preserved. Automatically forced on when vert count has changed.",
-        update=_on_export_normals_update,
+        get=_get_export_normals,
+        set=_set_export_normals,
     )
     export_weights: bpy.props.BoolProperty(
         name="Export Weights",
-        default=False,
         description="Write bone weights into the exported file. When unchecked, the original weights from the .mmb are preserved. Automatically forced on when vert count has changed.",
+        get=_get_export_weights,
+        set=_set_export_weights,
     )
     export_vertex_colors: bpy.props.BoolProperty(
         name="Export Vertex Colors",
@@ -2847,9 +2883,9 @@ class SWOMTSettings(bpy.types.PropertyGroup):
     )
     export_uvs: bpy.props.BoolProperty(
         name="Export UVs",
-        default=False,
         description="Write UV coordinates from Blender into the exported file. When unchecked, the original UVs from the .mmb are preserved. Automatically forced on when vert count has changed.",
-        update=_on_export_uvs_update,
+        get=_get_export_uvs,
+        set=_set_export_uvs,
     )
     export_options_expanded: bpy.props.BoolProperty(
         name="Export Options",
@@ -4142,28 +4178,13 @@ class SWOMTPanel(bpy.types.Panel):
             row.label(text="Export Options")
             if SWOMT.export_options_expanded:
                 box.prop(SWOMT, "compute_normals_on_export")
-                normals_row = box.row()
-                if forced:
-                    normals_row.enabled = False
-                    normals_row.prop(SWOMT, "export_normals")
-                    normals_row.label(text="", icon='LOCKED')
-                else:
-                    normals_row.prop(SWOMT, "export_normals")
-                weights_row = box.row()
-                if forced:
-                    weights_row.enabled = False
-                    weights_row.prop(SWOMT, "export_weights")
-                    weights_row.label(text="", icon='LOCKED')
-                else:
-                    weights_row.prop(SWOMT, "export_weights")
+                for prop_name in ("export_normals", "export_weights", "export_uvs"):
+                    prop_row = box.row()
+                    prop_row.enabled = not forced
+                    prop_row.prop(SWOMT, prop_name)
+                    if forced:
+                        prop_row.label(text="", icon='LOCKED')
                 box.prop(SWOMT, "export_vertex_colors")
-                uvs_row = box.row()
-                if forced:
-                    uvs_row.enabled = False
-                    uvs_row.prop(SWOMT, "export_uvs")
-                    uvs_row.label(text="", icon='LOCKED')
-                else:
-                    uvs_row.prop(SWOMT, "export_uvs")
 
             # Warn if any LOD1-3 across all meshes has a changed vert count
             if forced:
