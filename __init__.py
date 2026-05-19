@@ -3,7 +3,7 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt, SaintBaron",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 57),
+    "version": (0, 1, 58),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 11, 12, 13, 14, 15, 16, 17.",
     "category": "Import-Export"
@@ -980,7 +980,7 @@ class SkeletalMeshAsset(Asset):
             # normals_base <= 8 -> normal_type 0 (int8_norm, 4-byte block)
             # normal_type 1: float normal(12) + tangent(12) + sign(4) = 28 bytes
             _normals_base = self.normals_stride - 4 * self.uv_count - 4 * self.color_count
-            if _normals_base == 28:
+            if _normals_base >= 28:
                 self.normal_type = 1  # float normal(12) + tangent(12) + sign(4) = 28 bytes fixed
             else:
                 self.normal_type = 0  # int8_norm normal(4) + tangent(4) = 8 bytes fixed
@@ -2532,6 +2532,7 @@ class BlenderMeshExporter:
 
                 orig_colors = []
                 orig_uvs    = []
+                orig_trailing = []
                 # color(4*cc) | normal(12) | tangent(12) | sign(4) | UV
                 color_off_in_stride = 0
                 uv_off_in_stride    = 4 * mesh.color_count + 12 + 12 + 4
@@ -2544,12 +2545,17 @@ class BlenderMeshExporter:
                         if abs(raw_u) > 8191:
                             uv_compact = False
                             break
+                written_per_vert = uv_off_in_stride + 4 * mesh.uv_count
+                trailing_per_vert = ns - written_per_vert
                 for ni in range(orig_vc_src):
                     off = abs_vob_src + ni * ns
                     if mesh.color_count > 0:
                         orig_colors.append(orig_file_bytes[off + color_off_in_stride:off + color_off_in_stride + 4 * mesh.color_count])
                     if mesh.uv_count > 0:
                         orig_uvs.append(orig_file_bytes[off + uv_off_in_stride:off + uv_off_in_stride + 4 * mesh.uv_count])
+                    if trailing_per_vert > 0:
+                        trail_off = off + written_per_vert
+                        orig_trailing.append(orig_file_bytes[trail_off:trail_off + trailing_per_vert])
 
                 orig_idx_attr = data.attributes.get("mmb_vertex_order")
                 orig_idx_for_vi = ({vi: orig_idx_attr.data[vi].value for vi in range(len(data.vertices))}
@@ -2602,6 +2608,12 @@ class BlenderMeshExporter:
                             f.write(orig_uvs[src_vi])
                         else:
                             f.write(b'\x00' * (4 * mesh.uv_count))
+
+                    # Preserve any trailing bytes
+                    if orig_trailing and src_vi < len(orig_trailing):
+                        f.write(orig_trailing[src_vi])
+                    elif trailing_per_vert > 0:
+                        f.write(b'\x00' * trailing_per_vert)
 
             bm.free()
 
