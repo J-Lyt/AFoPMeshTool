@@ -3,7 +3,7 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt, SaintBaron",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 58),
+    "version": (0, 1, 59),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 11, 12, 13, 14, 15, 16, 17.",
     "category": "Import-Export"
@@ -709,7 +709,8 @@ class SkeletalMeshAsset(Asset):
             def get_normals(self,raw_mesh_file):
                 normals = []
                 stride = self.parent_mesh.normals_stride
-                color_count = self.parent_mesh.color_count
+                color_in_normals = getattr(self.parent_mesh, 'color_in_normals', True)
+                color_count = self.parent_mesh.color_count if color_in_normals else 0
                 f = raw_mesh_file
                 f.seek(self.vertex_data_offset_b)
                 v = Vector((0.0,0.0,1.0))
@@ -719,8 +720,8 @@ class SkeletalMeshAsset(Asset):
                 for i in range(self.vertex_count):
                     stride_start = f.tell()
                     if self.parent_mesh.normal_type == 0:
-                        # Layout: color(4*color_count) | tangent(4) | normal(4) | UV(4*uv_count)
-                        f.seek(4 * color_count, 1)  # skip color
+                        # Layout: color(4*cc) | tangent(4) | normal(4) | UV(4*uv_count)
+                        f.seek(4 * color_count, 1)  # skip color (0 bytes if no color)
                         raw_x = br.int8_norm(f)
                         if raw_x < _raw_x_min:
                             _raw_x_min = raw_x
@@ -734,7 +735,7 @@ class SkeletalMeshAsset(Asset):
                         v.negate()  # TODO not sure about this
                     elif self.parent_mesh.normal_type == 1:
                         # Layout: color(4*cc) | normal(12f) | tangent(12f) | sign(4f) | UV
-                        f.seek(4 * color_count, 1)  # skip colors before float normal
+                        f.seek(4 * color_count, 1)  # skip colors before float normal (0 bytes if no color)
                         self._all_w_zero = False
                         raw_x = br.float(f)
                         if raw_x < _raw_x_min:
@@ -759,7 +760,8 @@ class SkeletalMeshAsset(Asset):
                 """
                 uvs = []
                 stride = self.parent_mesh.normals_stride
-                color_count = self.parent_mesh.color_count
+                color_in_normals = getattr(self.parent_mesh, 'color_in_normals', True)
+                color_count = self.parent_mesh.color_count if color_in_normals else 0
                 normal_type = self.parent_mesh.normal_type
                 f = raw_mesh_file
                 f.seek(self.vertex_data_offset_b)
@@ -801,10 +803,15 @@ class SkeletalMeshAsset(Asset):
 
             def get_color(self,raw_mesh_file, index=0):
                 """
-               Seeks to Lod.vertex_data_offset_b and reads all Color data.
-               :param raw_mesh_file: file that is exported by SkeletalMeshAsset.Mesh.extract_mesh_file()
-               :return: a List of Tuples containing 4 floats as RGBA coordinates.
-               """
+                Seeks to Lod.vertex_data_offset_b and reads all Color data.
+                :param raw_mesh_file: file that is exported by SkeletalMeshAsset.Mesh.extract_mesh_file()
+                :return: a List of Tuples containing 4 floats as RGBA coordinates.
+                """
+
+                # If color is not present in the normals stride, return white.
+                if not getattr(self.parent_mesh, 'color_in_normals', True):
+                    return [(1.0, 1.0, 1.0, 1.0)] * self.vertex_count
+
                 colors = []
                 stride = self.parent_mesh.normals_stride
                 normal_type = self.parent_mesh.normal_type
@@ -883,6 +890,7 @@ class SkeletalMeshAsset(Asset):
             self.color_count = 0
             self.uv_count = 0
             self.normal_type = 0 # 0:int8_norm 1:floats
+            self.color_in_normals = True # False when color_count not in normals stride
             self.position_type = 0 # 0:int16_norm 1:floats
             self.mesh_file = None  # BytesIO of reversed ordered LOD mesh data (used by create_mesh_file)
         def parse(self, f):
@@ -974,6 +982,15 @@ class SkeletalMeshAsset(Asset):
             self.vertex_stride = br.uint16(f)
             self.normals_stride = br.uint16(f)
 
+            # --- Color-in-normals detection ---
+            # color_count is declared in the header but may not be present in the
+            # normals stride (e.g. meshes store color_count=1 in the header
+            # but allocate no color bytes in the normals block).
+            # Detection: if the normals stride is large enough to hold the normal
+            # block, all UV sets and color, then color IS in the normals stride.
+            _nb_with_color = self.normals_stride - 4 * self.color_count - 4 * self.uv_count
+            _nb_without_color = self.normals_stride - 4 * self.uv_count
+            self.color_in_normals = (_nb_with_color >= 8)
             # --- Normal type detection ---
             # normals_base = normals_stride - 4*uv_count - 4*color_count
             # normals_base > 8 -> normal_type 1 or 2 (float normals)
@@ -2036,22 +2053,25 @@ class BlenderMeshExporter:
                     continue
 
                 # Gather bone weights
-                vertex = data.vertices[v.index]
                 raw_weights = []
-                for vge in vertex.groups:
-                    slot = vgroup_to_mesh_slot.get(vge.group)
-                    if slot is not None and vge.weight > 0.0:
-                        raw_weights.append((slot, vge.weight))
-                raw_weights.sort(key=lambda x: x[1], reverse=True)
+                if weight_bytes_per_vert > 0:
+                    vertex = data.vertices[v.index]
+                    for vge in vertex.groups:
+                        slot = vgroup_to_mesh_slot.get(vge.group)
+                        if slot is not None and vge.weight > 0.0:
+                            raw_weights.append((slot, vge.weight))
+                    raw_weights.sort(key=lambda x: x[1], reverse=True)
 
-                if not raw_weights:
-                    raise ValueError(
-                        f"'{mesh.name}' LOD{lod_index} has vertices with no bone weights. "
-                        f"Assign bone weights to all vertices before exporting."
-                    )
+                    if not raw_weights:
+                        raise ValueError(
+                            f"'{mesh.name}' LOD{lod_index} has vertices with no bone weights. "
+                            f"Assign bone weights to all vertices before exporting."
+                        )
 
                 # Write bone weights
-                if stride == 12:
+                if weight_bytes_per_vert == 0:
+                    pass
+                elif stride == 12:
                     # 4x uint8 bone slot indices, no weight bytes - Weight 1.0 on first index
                     for _ in range(4):
                         f.write(bp.uint8(raw_weights[0][0] if raw_weights else 0))
@@ -2393,19 +2413,19 @@ class BlenderMeshExporter:
                 orig_trailing = []  # any extra bytes after color+normal+tangent+UVs
 
                 # color(4*cc) | normal(4) | tangent(4) | UV
-                cc = mesh.color_count
-                uv_off_in_stride = 4 * cc + 4 + 4
-                written_per_vert = 4 * cc + 4 + 4 + 4 * mesh.uv_count
+                color_count = mesh.color_count if getattr(mesh, 'color_in_normals', True) else 0
+                uv_off_in_stride = 4 * color_count + 4 + 4
+                written_per_vert = 4 * color_count + 4 + 4 + 4 * mesh.uv_count
                 trailing_per_vert = ns - written_per_vert
                 for ni in range(orig_vc_src):
                     off = abs_vob_src + ni * ns
-                    normal_off = off + 4 * cc
+                    normal_off = off + 4 * color_count
                     tangent_off = normal_off + 4
                     uv_off = tangent_off + 4
                     orig_nw.append(unpack('<b', orig_file_bytes[normal_off + 3:normal_off + 4])[0])
                     orig_tangents.append(orig_file_bytes[tangent_off:tangent_off + 4])
-                    if mesh.color_count > 0:
-                        orig_colors.append(orig_file_bytes[off:off + 4 * mesh.color_count])
+                    if color_count > 0:
+                        orig_colors.append(orig_file_bytes[off:off + 4 * color_count])
                     if mesh.uv_count > 0:
                         orig_uvs.append(orig_file_bytes[uv_off:uv_off + 4 * mesh.uv_count])
                     if trailing_per_vert > 0:
@@ -2456,9 +2476,9 @@ class BlenderMeshExporter:
                     # Layout: color(4*color_count) | normal(4) | tangent(4) | UV(4*uv_count)
 
                     # Write vertex color: preserve original bytes unless Export Vertex Colors is on.
-                    if mesh.color_count > 0:
+                    if color_count > 0:
                         if SWOMT.export_vertex_colors:
-                            for ci in range(mesh.color_count):
+                            for ci in range(color_count):
                                 layer = bm.verts.layers.float_color.get(f"Color_{ci}")
                                 if layer is not None:
                                     vertex_color = bm.verts[v.index][layer]
@@ -2474,7 +2494,7 @@ class BlenderMeshExporter:
                             f.write(orig_colors[src_vi])
                         else:
                             # No source - write zeros
-                            f.write(b'\x00' * (4 * mesh.color_count))
+                            f.write(b'\x00' * (4 * color_count))
 
                     # Write normal as int8 (scale to [-127,127], flip x)
                     def clamp_i8(val):
@@ -2534,8 +2554,9 @@ class BlenderMeshExporter:
                 orig_uvs    = []
                 orig_trailing = []
                 # color(4*cc) | normal(12) | tangent(12) | sign(4) | UV
+                color_count = mesh.color_count if getattr(mesh, 'color_in_normals', True) else 0
                 color_off_in_stride = 0
-                uv_off_in_stride    = 4 * mesh.color_count + 12 + 12 + 4
+                uv_off_in_stride    = 4 * color_count + 12 + 12 + 4
                 # Detect compact UV encoding
                 uv_compact = False
                 if mesh.uv_count > 0 and orig_vc_src > 0:
@@ -2549,8 +2570,8 @@ class BlenderMeshExporter:
                 trailing_per_vert = ns - written_per_vert
                 for ni in range(orig_vc_src):
                     off = abs_vob_src + ni * ns
-                    if mesh.color_count > 0:
-                        orig_colors.append(orig_file_bytes[off + color_off_in_stride:off + color_off_in_stride + 4 * mesh.color_count])
+                    if color_count > 0:
+                        orig_colors.append(orig_file_bytes[off + color_off_in_stride:off + color_off_in_stride + 4 * color_count])
                     if mesh.uv_count > 0:
                         orig_uvs.append(orig_file_bytes[off + uv_off_in_stride:off + uv_off_in_stride + 4 * mesh.uv_count])
                     if trailing_per_vert > 0:
@@ -2568,9 +2589,9 @@ class BlenderMeshExporter:
                     src_vi  = min(orig_idx_for_vi.get(vi, vi) if orig_idx_for_vi else vi, orig_vc_src - 1)
 
                     # Colors first
-                    if mesh.color_count > 0:
+                    if color_count > 0:
                         if SWOMT.export_vertex_colors:
-                            for ci in range(mesh.color_count):
+                            for ci in range(color_count):
                                 layer = bm.verts.layers.float_color.get(f"Color_{ci}")
                                 if layer is not None:
                                     vertex_color = bm.verts[v.index][layer]
@@ -2583,7 +2604,7 @@ class BlenderMeshExporter:
                         elif orig_colors and src_vi < len(orig_colors):
                             f.write(orig_colors[src_vi])
                         else:
-                            f.write(b'\x00' * (4 * mesh.color_count))
+                            f.write(b'\x00' * (4 * color_count))
 
                     f.write(bp.float(normal[0] * -1))
                     f.write(bp.float(normal[1]))
