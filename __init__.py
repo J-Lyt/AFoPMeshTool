@@ -3,7 +3,7 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt, SaintBaron",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 59),
+    "version": (0, 1, 60),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 11, 12, 13, 14, 15, 16, 17.",
     "category": "Import-Export"
@@ -1839,29 +1839,63 @@ class BlenderMeshExporter:
     @staticmethod
     def encode_weights_u8(sw):
         """
-        Encode pairs to uint8, then fix the integer sum to exactly 255 by adjusting the weight with the largest rounding error.
+        Encode pairs to uint8, then fix the integer sum to exactly 255.
+        Applies one-unit adjustments iteratively, always picking the entry
+        with the largest rounding error that can actually absorb the step
+        without clamping.
         """
         encoded = [(s, int(round(w * 255))) for s, w in sw]
         diff = 255 - sum(e for _, e in encoded)
-        if diff != 0:
-            errors = [(abs((sw[i][1] * 255) - encoded[i][1]), i) for i in range(len(encoded))]
-            _, idx = max(errors)
-            s, e = encoded[idx]
-            encoded[idx] = (s, max(0, min(255, e + diff)))
+        if diff == 0:
+            return encoded
+        step = 1 if diff > 0 else -1
+        for _ in range(abs(diff)):
+            best_err = -1
+            best_idx = -1
+            for i, (s, e) in enumerate(encoded):
+                if step == 1 and e >= 255:
+                    continue
+                if step == -1 and e <= 0:
+                    continue
+                err = abs((sw[i][1] * 255) - e)
+                if err > best_err:
+                    best_err = err
+                    best_idx = i
+            if best_idx == -1:
+                break
+            s, e = encoded[best_idx]
+            encoded[best_idx] = (s, e + step)
         return encoded
 
     @staticmethod
     def encode_weights_u16(sw):
         """
-        Encode pairs to uint16, then fix the integer sum to exactly 32767 by adjusting the largest rounding error.
+        Encode pairs to uint16, then fix the integer sum to exactly 32767.
+        Applies one-unit adjustments iteratively, always picking the entry
+        with the largest rounding error that can actually absorb the step
+        without clamping.
         """
         encoded = [(s, int(round(w * 32767))) for s, w in sw]
         diff = 32767 - sum(e for _, e in encoded)
-        if diff != 0:
-            errors = [(abs((sw[i][1] * 32767) - encoded[i][1]), i) for i in range(len(encoded))]
-            _, idx = max(errors)
-            s, e = encoded[idx]
-            encoded[idx] = (s, max(0, min(32767, e + diff)))
+        if diff == 0:
+            return encoded
+        step = 1 if diff > 0 else -1
+        for _ in range(abs(diff)):
+            best_err = -1
+            best_idx = -1
+            for i, (s, e) in enumerate(encoded):
+                if step == 1 and e >= 32767:
+                    continue
+                if step == -1 and e <= 0:
+                    continue
+                err = abs((sw[i][1] * 32767) - e)
+                if err > best_err:
+                    best_err = err
+                    best_idx = i
+            if best_idx == -1:
+                break
+            s, e = encoded[best_idx]
+            encoded[best_idx] = (s, e + step)
         return encoded
 
     @staticmethod
@@ -1975,8 +2009,10 @@ class BlenderMeshExporter:
             orig_weight_bytes = None
             # Per-vertex data needed when export_weights=True and stride=32
             orig_stride32_data = None
-            # Per-vertex original slot indices for the else branch (strides 12, 16, 24 etc...)
-            orig_slot_indices = None
+            # Per-vertex original index bytes for packed-uint8 strides (stride=16 int16, else-branch)
+            # Used to preserve the original bone index in zero-weight padding slots, which the
+            # game may use as secondary bone references independent of weight.
+            orig_index_bytes = None
             # Detect stride=32 layout variant
             stride32_use_u16 = stride == 32 and len(mesh.mesh_bones) > 256
 
@@ -2000,12 +2036,9 @@ class BlenderMeshExporter:
                         src.seek(abs_voa_w + vi * stride + pos_length)
                         orig_weight_bytes.append(src.read(weight_bytes_per_vert))
             elif export_weights:
-                # Always read the original slot layout from the source file so we can
-                # preserve bone-slot order / secondary index data on export, regardless
-                # of whether the vertex count changed.  The per-vertex helper arrays are
-                # indexed by *original* vertex index and are only used when
-                # vert_count_matches is True inside the write loop (stride==32 path), or
-                # to supply the slot-index order for the else-stride path.
+                # Read the original weight/index data from the source file for stride=32
+                # meshes, where the layout variant (A/B/C) and active slot count must be
+                # preserved. Other strides always write weights sorted by descending weight.
                 if stride == 32 and lod.vertex_count > 0:
                     orig_stride32_data = []
                     with open(src_path, 'rb') as src:
@@ -2025,15 +2058,16 @@ class BlenderMeshExporter:
                                 all_w = unpack('<8H', src.read(16))
                                 all_i = list(src.read(8))
                             orig_stride32_data.append((all_w, all_i))
-                elif stride not in (12, 20, 36, 40, 44) and lod.vertex_count > 0:
-                    # else branch strides (12, 16 etc): wc = (stride - pos_length) / 2
-                    # weights are uint8, indices are uint8
-                    wc = int(weight_bytes_per_vert / 2)
-                    orig_slot_indices = []
+                elif stride not in (12, 20, 32, 36, 40, 44) and lod.vertex_count > 0:
+                    # Packed uint8 strides (stride=16 int16, stride=24, and any other else-branch
+                    # strides): read the original index bytes so zero-weight padding slots can
+                    # preserve the original bone index rather than being zeroed out.
+                    wc_idx = int(weight_bytes_per_vert / 2)
+                    orig_index_bytes = []
                     with open(src_path, 'rb') as src:
                         for vi in range(lod.vertex_count):
-                            src.seek(abs_voa_w + vi * stride + pos_length + wc)
-                            orig_slot_indices.append(list(src.read(wc)))
+                            src.seek(abs_voa_w + vi * stride + pos_length + wc_idx)
+                            orig_index_bytes.append(src.read(wc_idx))
 
             for vi, v in enumerate(bm.verts):
                 stride_start = f.tell()
@@ -2087,27 +2121,15 @@ class BlenderMeshExporter:
                         # Int16 position (8b) + 4x uint8_norm weights + 4x uint8 indices
                         wc = 4
                         sw = BME.normalize_weights(raw_weights, wc)
-                        vert_count_matches = len(data.vertices) == lod.vertex_count
-                        if orig_slot_indices is not None and vert_count_matches and vi < len(orig_slot_indices):
-                            remaining = {s: w for s, w in BME.normalize_weights(raw_weights, wc)}
-                            slot_idxs = list(orig_slot_indices[vi])
-                            extra = sorted(remaining.keys() - set(slot_idxs),
-                                           key=lambda s: remaining[s], reverse=True)
-                            for k in range(len(slot_idxs)):
-                                if slot_idxs[k] not in remaining and extra:
-                                    slot_idxs[k] = extra.pop(0)
-                            ordered = [(slot_idxs[k], remaining.pop(slot_idxs[k], 0.0)) for k in range(len(slot_idxs))]
-                            enc = BME.encode_weights_u8(ordered)
-                            for _, e in enc:
-                                f.write(bp.uint8(e))
-                            for slot_bone in slot_idxs:
-                                f.write(bp.uint8(slot_bone))
-                        else:
-                            enc = BME.encode_weights_u8(sw)
-                            for i in range(wc):
-                                f.write(bp.uint8(enc[i][1] if i < len(enc) else 0))
-                            for i in range(wc):
-                                f.write(bp.uint8(enc[i][0] if i < len(enc) else 0))
+                        enc = BME.encode_weights_u8(sw)
+                        for i in range(wc):
+                            f.write(bp.uint8(enc[i][1] if i < len(enc) else 0))
+                        orig_idx = orig_index_bytes[vi] if (orig_index_bytes is not None and vi < len(orig_index_bytes)) else None
+                        for i in range(wc):
+                            if i < len(enc):
+                                f.write(bp.uint8(enc[i][0]))
+                            else:
+                                f.write(bp.uint8(orig_idx[i] if orig_idx is not None else 0))
 
                 elif stride == 20:
                     max_bones = 4
@@ -2261,36 +2283,15 @@ class BlenderMeshExporter:
                 else:
                     wc = int((stride - pos_length) / 2)
                     sw = BME.normalize_weights(raw_weights, wc)
-                    vert_count_matches = len(data.vertices) == lod.vertex_count
-                    # Only use orig_slot_indices when vert count is unchanged AND this
-                    # vertex index exists in the original data. For replacement meshes
-                    # (vert count changed), the original slot order is irrelevant and
-                    # using it causes only the one slot that happens to match to get a
-                    # non-zero weight, pinning all verts to a single bone.
-                    if orig_slot_indices is not None and vert_count_matches and vi < len(orig_slot_indices):
-                        # Preserve original slot structure (vert count unchanged)
-                        # Inject any added-bone weights into zero-weight positions
-                        remaining = {s: w for s, w in BME.normalize_weights(raw_weights, wc)}
-                        slot_idxs = list(orig_slot_indices[vi])
-                        extra = sorted(remaining.keys() - set(slot_idxs),
-                                       key=lambda s: remaining[s], reverse=True)
-                        for k in range(len(slot_idxs)):
-                            if slot_idxs[k] not in remaining and extra:
-                                slot_idxs[k] = extra.pop(0)
-                        ordered = [(slot_idxs[k], remaining.pop(slot_idxs[k], 0.0)) for k in range(len(slot_idxs))]
-                        enc = BME.encode_weights_u8(ordered)
-                        for _, e in enc:
-                            f.write(bp.uint8(e))
-                        for slot_bone in slot_idxs:
-                            f.write(bp.uint8(slot_bone))
-                    else:
-                        # Replacement mesh or no original index entry: write Blender
-                        # weights sorted by descending weight into the available slots.
-                        enc = BME.encode_weights_u8(sw)
-                        for i in range(wc):
-                            f.write(bp.uint8(enc[i][1] if i < len(enc) else 0))
-                        for i in range(wc):
-                            f.write(bp.uint8(enc[i][0] if i < len(enc) else 0))
+                    enc = BME.encode_weights_u8(sw)
+                    for i in range(wc):
+                        f.write(bp.uint8(enc[i][1] if i < len(enc) else 0))
+                    orig_idx = orig_index_bytes[vi] if (orig_index_bytes is not None and vi < len(orig_index_bytes)) else None
+                    for i in range(wc):
+                        if i < len(enc):
+                            f.write(bp.uint8(enc[i][0]))
+                        else:
+                            f.write(bp.uint8(orig_idx[i] if orig_idx is not None else 0))
 
                 # Advance to next vertex slot
                 f.seek(stride_start + stride)
@@ -3760,6 +3761,380 @@ class AddMeshBone(bpy.types.Operator):
         self.report({'INFO'}, f"'{new_name}' staged for addition via {source} (will patch on export)")
         return {'FINISHED'}
 
+def _read_donor_skeleton(donor_path: str):
+    """
+    Parse a donor .mmb file and return a list of (name, mat_raw, matrix, parent_idx).
+
+    mat_raw - the original 16 floats exactly as stored in the file.
+              Used directly for the bone_blob write so no re-encoding is needed.
+    matrix  - a Blender Matrix built via the same br.matrix_4x4 convention
+              (m[r][c] = mat_raw[c*4+r]) for use in world-matrix accumulation.
+    """
+    try:
+        with open(donor_path, 'rb') as f:
+            data = f.read()
+        pos = 0
+        version = data[3]
+        pos += 8
+        if version >= 15:
+            pos += 4
+        bone_count = unpack('<I', data[pos:pos+4])[0]
+        pos += 4
+        bones = []
+        for i in range(bone_count):
+            nlen = unpack('<H', data[pos:pos+2])[0]; pos += 2
+            name = data[pos:pos+nlen].decode('ascii', errors='replace'); pos += nlen
+            mat_raw = unpack('<16f', data[pos:pos+64]); pos += 64
+            parent_idx = unpack('<H', data[pos:pos+2])[0]; pos += 2
+            # Build Matrix using br.matrix_4x4 convention: m[r][c] = mat_raw[c*4+r].
+            # br.matrix_4x4 reads floats and groups them so that the i-th outer loop
+            # feeds each row-list in column order - i.e. the file is stored column-first.
+            m = Matrix([
+                [mat_raw[0], mat_raw[4], mat_raw[8],  mat_raw[12]],
+                [mat_raw[1], mat_raw[5], mat_raw[9],  mat_raw[13]],
+                [mat_raw[2], mat_raw[6], mat_raw[10], mat_raw[14]],
+                [mat_raw[3], mat_raw[7], mat_raw[11], mat_raw[15]],
+            ])
+            bones.append((name, mat_raw, m, parent_idx))
+        return bones
+    except Exception as e:
+        print(f"[AFoPMT] _read_donor_skeleton error: {e}")
+        return None
+
+
+class MergeSkeletons(bpy.types.Operator):
+    """Merge bones from a donor .mmb skeleton into the currently-loaded asset skeleton."""
+
+    # All bones present in the donor but absent from the loaded asset are appended
+    # to the skeleton section (via a _MOD copy) and to asset.bones in memory.
+    # The Blender armature is updated to include the new bones so that bone-slot
+    # operations (Remap/Add) can reference them immediately.
+    #
+    # Parent relationships from the donor are preserved wherever the parent bone
+    # already exists in the host skeleton (matched by name). Bones whose parent is
+    # not found in the combined skeleton are attached as roots.
+
+    bl_idname = "object.merge_skeletons"
+    bl_label = "Merge Skeleton from .mmb"
+    bl_options = {'REGISTER'}
+
+    filepath: bpy.props.StringProperty(subtype="FILE_PATH")
+    filter_glob: bpy.props.StringProperty(default="*.mmb", options={'HIDDEN'})
+
+    @classmethod
+    def poll(cls, context):
+        return asset is not None
+
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        SWOMT = context.scene.SWOMT
+        src_path = SWOMT.AssetPath
+
+        if not self.filepath or not os.path.isfile(self.filepath):
+            self.report({'ERROR'}, "Please select a valid .mmb file.")
+            return {'CANCELLED'}
+
+        donor_bones = _read_donor_skeleton(self.filepath)
+        if donor_bones is None:
+            self.report({'ERROR'}, "Failed to read donor .mmb skeleton.")
+            return {'CANCELLED'}
+
+        # Build name -> index map for the host skeleton
+        host_names = {b.name: i for i, b in enumerate(asset.bones)}
+
+        # Collect only bones that are new (not in host by name)
+        new_bones = [(name, mat_raw, matrix, pidx) for name, mat_raw, matrix, pidx in donor_bones if name not in host_names]
+
+        if not new_bones:
+            self.report({'INFO'}, "No new bones to merge — donor skeleton is a subset of the loaded skeleton.")
+            return {'FINISHED'}
+
+        # Build the binary blob to insert into the file:
+        # - Each bone: uint16 name_len | name bytes | 16 floats (64 bytes) | uint16 parent_idx
+        # - Parent indices must be remapped to the combined skeleton's indices.
+        # - donor_index -> combined_index
+
+        # Map: donor bone index -> combined index (host bones first, then appended)
+        donor_to_combined = {}
+        for d_idx, (name, mat_raw, matrix, pidx) in enumerate(donor_bones):
+            if name in host_names:
+                donor_to_combined[d_idx] = host_names[name]
+        # Build a reverse map: donor name -> donor index (must precede the loop below)
+        donor_name_to_didx = {name: i for i, (name, mat_raw, matrix, pidx) in enumerate(donor_bones)}
+
+        new_start = len(asset.bones)
+        for ni, (name, mat_raw, matrix, pidx) in enumerate(new_bones):
+            donor_to_combined[donor_name_to_didx[name]] = new_start + ni
+
+        # Build bone binary blob
+        bone_blob = bytearray()
+        for name, mat_raw, matrix, pidx in new_bones:
+            # Name
+            name_bytes = name.encode('ascii', errors='replace')
+            bone_blob += pack('<H', len(name_bytes))
+            bone_blob += name_bytes
+            # Matrix - write the original raw bytes verbatim.
+            # mat_raw is the 16 floats exactly as they appear in the donor file,
+            # which is already in the correct column-first file format that br.matrix_4x4 reads.
+            bone_blob += pack('<16f', *mat_raw)
+            # Parent index - remap donor index to combined skeleton index
+            if pidx == 65535:
+                combined_pidx = 65535
+            else:
+                combined_pidx = donor_to_combined.get(pidx, 65535)
+            bone_blob += pack('<H', combined_pidx)
+
+        # Patch the .mmb file:
+        # - Increment bone_count (uint32 at a known offset)
+        # - Insert bone_blob immediately after the last existing bone
+
+        mod_file = _mod_file_output(src_path, overwrite=SWOMT.overwrite_existing)
+
+        with open(src_path, 'rb') as f:
+            file_data = bytearray(f.read())
+
+        version = file_data[3]
+        skel_count_offset = 8
+        if version >= 15:
+            skel_count_offset += 4
+
+        old_bone_count = unpack('<I', file_data[skel_count_offset:skel_count_offset+4])[0]
+        new_bone_count = old_bone_count + len(new_bones)
+        file_data[skel_count_offset:skel_count_offset+4] = pack('<I', new_bone_count)
+
+        # Walk past existing bones to find the insertion point (start of mesh section)
+        pos = skel_count_offset + 4
+        for _ in range(old_bone_count):
+            nlen = unpack('<H', file_data[pos:pos+2])[0]; pos += 2
+            pos += nlen + 64 + 2  # name + matrix + parent_idx
+
+        # pos is now at uint32 mesh_count - insert bone_blob here
+        insert_at = pos
+        file_data[insert_at:insert_at] = bone_blob
+
+        inserted = len(bone_blob)
+
+        # Update asset.size header field (bytes 4..8) - it covers the header section.
+        # Skeleton is always in the header, so bump it.
+        old_asset_size = unpack('<I', file_data[4:8])[0]
+        file_data[4:8] = pack('<I', old_asset_size + inserted)
+
+        # All data_offset fields in all mesh LODs must be incremented by `inserted`
+        # because the skeleton has grown (it lives before the mesh data in the header).
+        # We need to patch these fields in the file_data we are building.
+        # We do NOT have the in-memory asset offsets updated yet, so we must re-walk
+        # the mesh section in the modified file_data to find and patch them.
+        #
+        # Patch: scan mesh table starting after the new bone blob.
+        mesh_pos = insert_at + inserted  # points to uint32 mesh_count
+        mesh_count_val = unpack('<I', file_data[mesh_pos:mesh_pos+4])[0]
+        mp = mesh_pos + 4
+
+        for mi_scan in range(mesh_count_val):
+            nlen = unpack('<H', file_data[mp:mp+2])[0]; mp += 2
+            mp += nlen # mesh name
+            mp += 48 + 1 # matrix + flag
+            # version-specific x_count skip
+            if version == 11:
+                mp += 1 # skip x_count (uint8 in v11 too but parsed differently)
+                x_count = unpack('<H', file_data[mp:mp+2])[0]; mp += 2
+                mp += 4 * x_count
+            else:
+                x_count = file_data[mp]; mp += 1
+                mp += 1 + 4 * x_count
+            u_count = unpack('<H', file_data[mp:mp+2])[0]; mp += 2
+            for _ in range(u_count):
+                mp += 64 # matrix
+                mp += 2 # skeleton index
+            # Pre-LOD bytes
+            if u_count > 0 and version not in (11, 12):
+                mp += 1 if version in (13, 14) else 2 # root_bone_index
+                lod_info_type = file_data[mp]; mp += 1
+            else:
+                if version in (11, 12, 13):
+                    lod_info_type = 0
+                else:
+                    lod_info_type = file_data[mp]; mp += 1
+            lod_count_scan = file_data[mp]; mp += 1
+            mp += 4 # unknown 4 bytes
+            lod_field_size = 40 if version == 11 else 36
+            for li_scan in range(lod_count_scan):
+                lod_start = mp
+                # data_offset field is at byte offset 24 within the 36-byte LOD header
+                # (or 28 in v11 due to the extra uint32)
+                lod_fo = 4 if version == 11 else 0  # lod_field_offset
+                do_field = lod_start + 4 + lod_fo + 20  # start+vc(4)+lod_fo+ic(4)+sa(4)+voa(4)+vob(4)
+                old_do = unpack('<I', file_data[do_field:do_field+4])[0]
+                file_data[do_field:do_field+4] = pack('<I', old_do + inserted)
+                # Also update the in-memory lod.data_offset_file_pos value - we patch the file
+                # positions here, and will sync asset afterwards.
+                mp += lod_field_size
+                if lod_info_type == 2:
+                    mp += 28
+            # Tail section - skip to next mesh
+            uv_count_scan = file_data[mp]; mp += 1
+            mp += 4 * uv_count_scan
+            if version == 11:
+                pass # no color_count in v11
+            elif version in (16, 17):
+                cc = file_data[mp]; mp += 1
+                mp += 4 * cc + 4
+                count_c = file_data[mp]; mp += 1
+                mp += 4 * count_c
+            else:
+                mp += 4 # unk
+                cc = file_data[mp]; mp += 1
+                mp += 4 * cc
+            mp += 4 # vs + ns (uint16 each)
+            mp += 20 if version == 17 else 16 # post-stride skip
+
+        # Write the patched file
+        with open(mod_file, 'wb') as f:
+            f.write(file_data)
+
+        # Update in-memory asset.bones so the rest of the session works
+        for name, mat_raw, matrix, pidx in new_bones:
+            if pidx == 65535:
+                combined_pidx = 65535
+            else:
+                combined_pidx = donor_to_combined.get(pidx, 65535)
+            new_b = SkeletalMeshAsset.Bone.__new__(SkeletalMeshAsset.Bone)
+            new_b.name = name
+            new_b.matrix = matrix
+            new_b.parent_index = combined_pidx
+            asset.bones.append(new_b)
+        asset.bone_count = len(asset.bones)
+
+        # Sync lod.data_offset values in memory (they were bumped in the file)
+        for m_mem in asset.meshes:
+            for lod_mem in m_mem.lods:
+                lod_mem.data_offset += inserted
+                lod_mem.data_offset_file_pos += inserted
+                lod_mem.start_offset += inserted
+
+        # Rebuild the Blender armature from the merged skeleton
+        arm_obj = bpy.data.objects.get(asset.name)
+        if arm_obj is not None and arm_obj.type == 'ARMATURE':
+            # Collect names of every mesh object currently parented to the armature so we can re-parent them afterwards.
+            child_meshes = [obj for obj in arm_obj.children if obj.type == 'MESH']
+
+            # Remove the old armature object and data entirely.
+            old_arm_data = arm_obj.data
+            bpy.data.objects.remove(arm_obj, do_unlink=True)
+            bpy.data.armatures.remove(old_arm_data)
+
+            # Re-import the skeleton. import_skeleton reads asset.bones (already updated
+            # in to include the new bones) and builds a new correctly-transformed
+            # armature via the exact same path as a normal LOD import.
+            new_arm_obj = BMI.import_skeleton(asset)
+
+            # import_skeleton only applies the X-flip. rotate_model applies the 90deg X
+            # rotation that brings the armature into the correct viewport orientation.
+            # It is normally called from ImportLOD, so we call it explicitly here.
+            dummy = child_meshes[0] if child_meshes else new_arm_obj
+            BMI.rotate_model(dummy, new_arm_obj)
+
+            # Restore armature modifiers and parenting on all child meshes.
+            # Reset matrix_parent_inverse to identity so the mesh sits correctly
+            # relative to the rebuilt armature (same as the original import).
+            for mesh_obj in child_meshes:
+                mesh_obj.parent = new_arm_obj
+                mesh_obj.matrix_parent_inverse = Matrix.Identity(4)
+                arm_mod = mesh_obj.modifiers.get('Armature')
+                if arm_mod is not None:
+                    arm_mod.object = new_arm_obj
+
+        SWOMT.AssetPath = mod_file
+        self.report({'INFO'},
+            f"Merged {len(new_bones)} new bone(s) from '{os.path.basename(self.filepath)}' "
+            f"into '{os.path.basename(mod_file)}'. "
+            f"Skeleton now has {len(asset.bones)} bones.")
+        return {'FINISHED'}
+
+
+class AddBonesFromVertexGroups(bpy.types.Operator):
+    """Add a bone slot for every vertex group to this mesh's bone table"""
+
+    # Scan the imported mesh objects for this asset entry and add a bone slot for every
+    # vertex group whose name matches a skeleton bone but is not yet in the bone table.
+    # Inverse bind matrices are derived automatically from the loaded skeleton.
+
+    bl_idname = "object.add_bones_from_vertex_groups"
+    bl_label = "Add Bone Slots from Vertex Groups"
+    bl_options = {'REGISTER'}
+
+    mesh_index: bpy.props.IntProperty()
+
+    @classmethod
+    def poll(cls, context):
+        return asset is not None
+
+    def execute(self, context):
+        mesh = asset.meshes[self.mesh_index]
+
+        # Build a set of skeleton bone names for lookup
+        skel_name_to_idx = {b.name: i for i, b in enumerate(asset.bones)}
+
+        # Build the set of skeleton indices already in this mesh's bone table
+        # (including any pending additions not yet written to file)
+        existing_skel_indices = set(mesh.mesh_bones.keys())
+        existing_skel_indices.update(idx for idx, _ in mesh.pending_bone_additions)
+
+        # Collect vertex group names from all imported LOD objects for this mesh
+        vg_names = set()
+        for li, lod in enumerate(mesh.lods):
+            obj_name = lod.blender_obj_name if lod.blender_obj_name else f"{mesh.name}_LOD{li}"
+            obj = bpy.data.objects.get(obj_name)
+            if obj is not None and obj.type == 'MESH':
+                for vg in obj.vertex_groups:
+                    vg_names.add(vg.name)
+
+        if not vg_names:
+            self.report({'WARNING'}, "No vertex groups found on any imported LOD for this mesh.")
+            return {'CANCELLED'}
+
+        added = []
+        skipped_no_bone = []
+        skipped_already = []
+
+        for vg_name in sorted(vg_names):
+            skel_idx = skel_name_to_idx.get(vg_name)
+            if skel_idx is None:
+                skipped_no_bone.append(vg_name)
+                continue
+            if skel_idx in existing_skel_indices:
+                skipped_already.append(vg_name)
+                continue
+
+            inv_bind = _compute_inv_bind_from_skeleton(vg_name)
+            if inv_bind is None:
+                self.report({'WARNING'}, f"Could not compute inv_bind for '{vg_name}' - skipping.")
+                continue
+
+            mesh.pending_bone_additions.append((skel_idx, inv_bind))
+            mesh.mesh_bones[skel_idx] = inv_bind
+            existing_skel_indices.add(skel_idx)
+            added.append(vg_name)
+
+        if added:
+            self.report({'INFO'},
+                f"Added {len(added)} bone slot(s): {', '.join(added)}")
+        elif skipped_already and not skipped_no_bone:
+            self.report({'INFO'}, "All vertex groups are already in the bone table.")
+        else:
+            missing = [n for n in sorted(vg_names) if n not in skel_name_to_idx]
+            self.report({'WARNING'},
+                f"No new slots added. "
+                f"{len(skipped_already)} already present, "
+                f"{len(skipped_no_bone)} not in skeleton: {', '.join(skipped_no_bone[:5])}"
+                + (" ..." if len(skipped_no_bone) > 5 else ""))
+
+        return {'FINISHED'}
+
+
 class SelectMGraphObject(bpy.types.Operator):
     """Select the MGraphObject file and patch the mesh name inside it"""
     bl_idname = "object.select_mgraphobject"
@@ -4281,6 +4656,9 @@ class SWOMTPanel(bpy.types.Panel):
                         bone_header.label(text="Bone Slots", icon="BONE_DATA")
                         add_op = bone_header.operator("object.add_mesh_bone", text="", icon="ADD")
                         add_op.mesh_index = mi
+                        vg_op = bone_header.operator("object.add_bones_from_vertex_groups", text="", icon="GROUP_VERTEX")
+                        vg_op.mesh_index = mi
+                        bone_header.operator("object.merge_skeletons", text="", icon="ARMATURE_DATA")
                         if bs_expanded:
                             bone_box = mesh_box.box()
                             mesh_bones_list = list(m.mesh_bones.keys())
@@ -4396,11 +4774,7 @@ class ApplyUpdate(bpy.types.Operator):
 
 
 class ExportPosedBoneMatrices(bpy.types.Operator):
-    """
-    Export the armature's current pose.
-
-    Use this after posing the armature in 'Pose Mode'.
-    """
+    """Export the armature's current pose. Use this after posing the armature in 'Pose Mode'."""
     bl_idname = "object.export_posed_bone_matrices"
     bl_label = "Export Pose as New Rest Pose"
     bl_options = {'REGISTER'}
@@ -4609,6 +4983,8 @@ classes=[SWOMTSettings,
          ForceLOD0,
          RemapMeshBone,
          AddMeshBone,
+         MergeSkeletons,
+         AddBonesFromVertexGroups,
          CheckForUpdates,
          ApplyUpdate,
          SWOMTPanel,
