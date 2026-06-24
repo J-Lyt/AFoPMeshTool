@@ -3523,6 +3523,103 @@ class RevertMesh(bpy.types.Operator):
         self.report({'INFO'}, f"Reverted '{mesh.name}' ({len(mesh.lods)} LOD(s)) to original positions.")
         return {'FINISHED'}
 
+def _scale_uvs_uv_items(self, context):
+    """Populate UV set enum from the mesh's uv_count."""
+    if asset is None:
+        return []
+    try:
+        mesh = asset.meshes[self.mesh_index]
+    except (IndexError, AttributeError):
+        return []
+    return [(str(i), f"UVMap_{i}", f"UV set {i}") for i in range(mesh.uv_count)]
+
+def _scale_u_update(self, context):
+    if self.link:
+        self["scale_v"] = self.scale_u
+
+def _scale_v_update(self, context):
+    if self.link:
+        self["scale_u"] = self.scale_v
+
+class ScaleUVs(bpy.types.Operator):
+    """Scale a UV layer on all imported LODs of this mesh"""
+    bl_idname = "object.scale_uvs"
+    bl_label = "Scale UVs"
+
+    mesh_index: bpy.props.IntProperty()
+    uv_set: bpy.props.EnumProperty(
+        name="UV Set",
+        description="Which UV map to scale",
+        items=_scale_uvs_uv_items,
+    )
+    scale_u: bpy.props.FloatProperty(name="Scale U", default=1.0, min=0.001, max=1000.0, step=100, update=_scale_u_update)
+    scale_v: bpy.props.FloatProperty(name="Scale V", default=1.0, min=0.001, max=1000.0, step=100, update=_scale_v_update)
+    link: bpy.props.BoolProperty(name="Link", default=True, description="Link Scale U and Scale V together")
+    pivot_u: bpy.props.FloatProperty(name="Pivot U", default=0.0, step=100, description="U coordinate to scale from")
+    pivot_v: bpy.props.FloatProperty(name="Pivot V", default=1.0, step=100, description="V coordinate to scale from")
+
+    @classmethod
+    def poll(cls, context):
+        return asset is not None
+
+    def invoke(self, context, event):
+        self.scale_u = 1.0
+        self.scale_v = 1.0
+        self.link = True
+        self.pivot_u = 0.0
+        self.pivot_v = 1.0
+        context.window.cursor_warp(context.window.width // 2, context.window.height // 2)
+        return context.window_manager.invoke_props_dialog(self, width=260)
+
+    def draw(self, context):
+        mesh = asset.meshes[self.mesh_index]
+        layout = self.layout
+        layout.label(text=f"Mesh: {mesh.name}")
+        if mesh.uv_count > 1:
+            layout.prop(self, "uv_set")
+        row = layout.row(align=True)
+        row.prop(self, "scale_u")
+        row.prop(self, "link", text="", icon='LINKED' if self.link else 'UNLINKED')
+        row.prop(self, "scale_v")
+        pivot_row = layout.row(align=True)
+        pivot_row.prop(self, "pivot_u")
+        pivot_row.prop(self, "pivot_v")
+
+    def execute(self, context):
+        # Exit edit mode first - UV data changes on obj.data are not reflected while the object is being edited.
+        if context.active_object and context.active_object.mode == 'EDIT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        mesh = asset.meshes[self.mesh_index]
+        uv_index = int(self.uv_set) if self.uv_set else 0
+        layer_name = f"UVMap_{uv_index}"
+        affected = 0
+        seen_data = set() # guard against LODs that share the same mesh data block
+        for li, lod in enumerate(mesh.lods):
+            obj_name = lod.blender_obj_name if lod.blender_obj_name else f"{mesh.name}_LOD{li}"
+            obj = bpy.data.objects.get(obj_name)
+            if obj is None or obj.type != 'MESH':
+                continue
+            if obj.data.name in seen_data:
+                continue
+            seen_data.add(obj.data.name)
+            uv_layer = obj.data.uv_layers.get(layer_name)
+            if uv_layer is None:
+                continue
+            # Scale from the chosen pivot: new = pivot + (uv - pivot) * scale
+            pu, pv = self.pivot_u, self.pivot_v
+            for loop_uv in uv_layer.data:
+                loop_uv.uv = (pu + (loop_uv.uv[0] - pu) * self.scale_u,
+                              pv + (loop_uv.uv[1] - pv) * self.scale_v)
+            obj.data.update()
+            affected += 1
+        if affected == 0:
+            self.report({'WARNING'}, f"No imported LODs found for '{mesh.name}' with UV layer '{layer_name}'")
+        else:
+            self.report({'INFO'}, f"Scaled {layer_name} by ({self.scale_u}, {self.scale_v}) from pivot ({self.pivot_u}, {self.pivot_v}) on {affected} LOD(s) of '{mesh.name}'")
+        return {'FINISHED'}
+
+
 class RenameMesh(bpy.types.Operator):
     """Rename a mesh and patch its name in the .mmb file in place"""
     bl_idname = "object.rename_mesh"
@@ -4836,6 +4933,8 @@ class SWOMTPanel(bpy.types.Panel):
                 name_row.prop(SWOMT, "mesh_expanded", index=mi, text="",
                               icon='TRIA_DOWN' if expanded else 'TRIA_RIGHT', emboss=False)
                 name_row.label(text=m.name, icon="MESH_ICOSPHERE")
+                scale_uv_op = name_row.operator("object.scale_uvs", text="", icon="UV")
+                scale_uv_op.mesh_index = mi
                 rename_op = name_row.operator("object.rename_mesh", text="", icon="GREASEPENCIL")
                 rename_op.mesh_index = mi
                 remove_row = name_row.row()
@@ -5206,6 +5305,7 @@ classes=[SWOMTSettings,
          LoadMMB,
          ImportLOD,
          ExportLOD,
+         ScaleUVs,
          RenameMesh,
          SelectMGraphObject,
          RenameMMBFile,
