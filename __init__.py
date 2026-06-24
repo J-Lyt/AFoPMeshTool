@@ -766,38 +766,126 @@ class SkeletalMeshAsset(Asset):
                 f = raw_mesh_file
                 f.seek(self.vertex_data_offset_b)
 
-                # Detect whether UVs are compact or int16_norm.
-                if self.vertex_count > 0:
-                    if normal_type == 0:
-                        uv_field_off = 4 * color_count + 4 + 4 + index * 4
-                    else:  # normal_type == 1
-                        uv_field_off = 4 * color_count + 12 + 12 + 4 + index * 4
-                    start_pos = f.tell()
-                    use_compact = True
-                    for i in range(self.vertex_count):
-                        f.seek(start_pos + i * stride + uv_field_off)
-                        raw_u = unpack('<h', f.read(2))[0]  # signed
-                        if abs(raw_u) > 8191:
+                # --- UV encoding detection ---
+                # Encodings across different meshes:
+                #  float32    : 8-byte float pair, full tiling range
+                #  fold       : int16 raw/32767 where values > 1.0 are tiled and folded back into [0,1] via % 1.0 (mirrored islands)
+                #  compact    : (uint16 % 4096) / 4095, lower 12 bits, [0,1] only
+                #  int16_norm : signed int16 / 32767, [0,1]
+                #  wide       : signed int16 / 4096
+
+                # Normal block before the UV region
+                #  normal_type 0 :  8 bytes (tangent(4)+normal(4))
+                #  normal_type 1 : 28 bytes (float normal(12)+tangent(12)+sign(4))
+                #  Float32 UV sets are 8 bytes wide, so field offsets accumulate variable widths.
+                if normal_type == 0:
+                    _normal_block_size = 8
+                else:
+                    _normal_block_size = 12 + 12 + 4
+                _color_prefix = 4 * color_count
+
+                # Build the per-set layout (offset + width) up to and including `index`.
+                # float32 sets are detected with a plausibility probe: reading the
+                # 4-byte slot as float32 yields plausible values (exact 0.0 or 1e-4<|f|<500)
+                # for >90% of verts only when the data really is float32;
+                # compact/int16 data reads as subnormals or erratic large floats.
+                _cur_off = _color_prefix + _normal_block_size
+                _uv_field_off = _cur_off
+                _is_float32 = False
+                start_pos = f.tell()
+                for _ui in range(index + 1):
+                    if self.vertex_count > 0 and normal_type == 0:
+                        _plausible = 0
+                        for _vi in range(self.vertex_count):
+                            f.seek(start_pos + _vi * stride + _cur_off)
+                            _fv = unpack('<f', f.read(4))[0]
+                            if _fv == _fv and (_fv == 0.0 or 1e-4 < abs(_fv) < 500):
+                                _plausible += 1
+                        _set_is_f32 = (_plausible / self.vertex_count) > 0.90
+                    else:
+                        _set_is_f32 = False
+                    _uv_field_off = _cur_off
+                    _is_float32 = _set_is_f32
+                    _cur_off += 8 if _set_is_f32 else 4
+                f.seek(start_pos)
+
+                # For the target (non-float32) set, detect fold vs wide vs compact vs int16_norm.
+                #  wide : signed int16 / 4096, NO modulo - native range ~[-8, 8].
+                #
+                #  Distinguished from fold by total-variation smoothness:
+                #   Genuinely fold-encoded data is far smoother when decoded with modulo wrapping than without,
+                #   whereas wide-encoded data is comparably smooth either way (no real wrap occurs).
+                use_compact = True
+                use_fold = False
+                use_wide = False
+                _u_divisor = 32767.0
+                _v_divisor = 32767.0
+                if not _is_float32 and self.vertex_count > 0:
+                    _has_large_u = False
+                    _has_large_v = False
+                    _upper4 = set()
+                    _tv_fold = 0.0
+                    _tv_wide = 0.0
+                    _prev_fold = None
+                    _prev_wide = None
+                    for _vi in range(self.vertex_count):
+                        f.seek(start_pos + _vi * stride + _uv_field_off)
+                        _ru = unpack('<H', f.read(2))[0]
+                        _rv = unpack('<H', f.read(2))[0]
+                        _upper4.add(_ru >> 12)
+                        if _ru > 32767: _has_large_u = True
+                        if _rv > 32767: _has_large_v = True
+                        _fold_u = (_ru / 32767.0) % 1.0
+                        _wide_u = ((_ru ^ 32768) - 32768) / 4096.0
+                        if _prev_fold is not None:
+                            _tv_fold += abs(_fold_u - _prev_fold)
+                            _tv_wide += abs(_wide_u - _prev_wide)
+                        _prev_fold = _fold_u
+                        _prev_wide = _wide_u
+                    if _has_large_u and len(_upper4) >= 4:
+                        # Candidate for fold or wide. Use total-variation ratio to decide:
+                        # Genuine fold data is smoother when wrapped (ratio wide/fold typically >= 9),
+                        # wide data shows a much smaller gap.
+                        _tv_ratio = (_tv_wide / _tv_fold) if _tv_fold > 0 else 0.0
+                        if _tv_ratio >= 9.0:
                             use_compact = False
-                            break
+                            use_fold = True
+                            _u_divisor = 32767.0
+                            _v_divisor = 32767.0 if not _has_large_v else 65535.0
+                        else:
+                            use_compact = False
+                            use_wide = True
+                    else:
+                        use_compact = True
+                        for _vi in range(self.vertex_count):
+                            f.seek(start_pos + _vi * stride + _uv_field_off)
+                            _rs = unpack('<h', f.read(2))[0]
+                            if abs(_rs) > 8191:
+                                use_compact = False
+                                break
                     f.seek(start_pos)
 
                 for i in range(self.vertex_count):
-                    stride_start = f.tell()
-                    if normal_type == 0:
-                        # color(4*cc) | normal(4) | tangent(4) | UV(4*uv)
-                        f.seek(4 * color_count + 4 + 4, 1)
-                    elif normal_type == 1:
-                        # color(4*cc) | normal(12) | tangent(12) | sign(4) | UV(4*uv)
-                        f.seek(4 * color_count + 12 + 12 + 4, 1)
-                    f.seek(index * 4, 1)  # skip previous uv sets
-                    if use_compact:
+                    f.seek(start_pos + i * stride + _uv_field_off)
+                    if _is_float32:
+                        u = br.float(f)
+                        v = br.float(f)
+                    elif use_fold:
+                        _ru = unpack('<H', f.read(2))[0]
+                        _rv = unpack('<H', f.read(2))[0]
+                        u = (_ru / _u_divisor) % 1.0
+                        v = (_rv / _v_divisor) % 1.0
+                    elif use_wide:
+                        _ru = unpack('<H', f.read(2))[0]
+                        _rv = unpack('<H', f.read(2))[0]
+                        u = ((_ru ^ 32768) - 32768) / 4096.0
+                        v = ((_rv ^ 32768) - 32768) / 4096.0
+                    elif use_compact:
                         u = br.uv_unorm_u(f)
                         v = br.uv_unorm_v(f)
                     else:
                         u = br.int16_norm(f)
                         v = br.int16_norm(f)
-                    f.seek(stride_start + stride)
                     uvs.append((u,v))
                 return uvs
 
@@ -2413,14 +2501,88 @@ class BlenderMeshExporter:
                 orig_uvs      = []  # list of raw 4*uv_count byte chunks per vertex
                 orig_trailing = []  # any extra bytes after color+normal+tangent+UVs
 
-                # color(4*cc) | normal(4) | tangent(4) | UV
+                # color(4*cc) | normal(4) | tangent(4) | UV (per-set, variable width)
                 color_count = mesh.color_count if getattr(mesh, 'color_in_normals', True) else 0
-                uv_off_in_stride = 4 * color_count + 4 + 4
-                written_per_vert = 4 * color_count + 4 + 4 + 4 * mesh.uv_count
+                _normal_block = 8  # tangent(4) + normal(4)
+                _color_prefix = 4 * color_count
+
+                # Detect per-UV-set encoding from the original file bytes.
+                # _uv_is_float32[ui] : 8-byte float pair
+                # _uv_fold[ui]       : int16/32767 tiling folded into [0,1]
+                # _uv_wide[ui]       : signed int16/4096, no modulo, native range ~[-8,8]
+                # _uv_compact[ui]    : uv_unorm; else int16_norm.
+                _uv_is_float32 = []
+                _uv_fold = []
+                _uv_wide = []
+                _uv_compact = []
+                _uv_u_divisor = []
+                _uv_v_divisor = []
+                _uv_field_offs = []
+                _cur = _color_prefix + _normal_block
+                for _ui in range(mesh.uv_count):
+                    if orig_vc_src > 0:
+                        _plausible = 0
+                        for _ni in range(orig_vc_src):
+                            _b = orig_file_bytes[abs_vob_src + _ni * ns + _cur: abs_vob_src + _ni * ns + _cur + 4]
+                            _fv = unpack('<f', _b)[0]
+                            if _fv == _fv and (_fv == 0.0 or 1e-4 < abs(_fv) < 500):
+                                _plausible += 1
+                        _is_f32 = (_plausible / orig_vc_src) > 0.90
+                    else:
+                        _is_f32 = False
+                    _uv_field_offs.append(_cur)
+                    _uv_is_float32.append(_is_f32)
+                    if _is_f32:
+                        _uv_fold.append(False); _uv_wide.append(False); _uv_compact.append(False)
+                        _uv_u_divisor.append(1.0); _uv_v_divisor.append(1.0)
+                        _cur += 8
+                    else:
+                        _has_large_u = False; _has_large_v = False; _upper4 = set()
+                        _tv_fold = 0.0; _tv_wide = 0.0; _prev_fold = None; _prev_wide = None
+                        for _ni in range(orig_vc_src):
+                            _off = abs_vob_src + _ni * ns + _cur
+                            _ru = unpack('<H', orig_file_bytes[_off:_off + 2])[0]
+                            _rv = unpack('<H', orig_file_bytes[_off + 2:_off + 4])[0]
+                            _upper4.add(_ru >> 12)
+                            if _ru > 32767: _has_large_u = True
+                            if _rv > 32767: _has_large_v = True
+                            _fold_u = (_ru / 32767.0) % 1.0
+                            _wide_u = ((_ru ^ 32768) - 32768) / 4096.0
+                            if _prev_fold is not None:
+                                _tv_fold += abs(_fold_u - _prev_fold)
+                                _tv_wide += abs(_wide_u - _prev_wide)
+                            _prev_fold = _fold_u; _prev_wide = _wide_u
+                        if _has_large_u and len(_upper4) >= 4:
+                            # Candidate for fold or wide. Use total-variation ratio to decide:
+                            # Genuine fold data is smoother when wrapped (ratio wide/fold typically >= 9),
+                            # wide data shows a much smaller gap.
+                            _tv_ratio = (_tv_wide / _tv_fold) if _tv_fold > 0 else 0.0
+                            if _tv_ratio >= 9.0:
+                                _uv_fold.append(True); _uv_wide.append(False); _uv_compact.append(False)
+                                _uv_u_divisor.append(32767.0)
+                                _uv_v_divisor.append(32767.0 if not _has_large_v else 65535.0)
+                            else:
+                                _uv_fold.append(False); _uv_wide.append(True); _uv_compact.append(False)
+                                _uv_u_divisor.append(4096.0); _uv_v_divisor.append(4096.0)
+                        else:
+                            _uv_fold.append(False); _uv_wide.append(False)
+                            _uv_u_divisor.append(1.0); _uv_v_divisor.append(1.0)
+                            _compact = True
+                            for _ni in range(orig_vc_src):
+                                _off = abs_vob_src + _ni * ns + _cur
+                                _rs = unpack('<h', orig_file_bytes[_off:_off + 2])[0]
+                                if abs(_rs) > 8191:
+                                    _compact = False
+                                    break
+                            _uv_compact.append(_compact)
+                        _cur += 4
+                _total_uv_bytes = _cur - (_color_prefix + _normal_block)
+                uv_off_in_stride = _color_prefix + _normal_block
+                written_per_vert = _color_prefix + _normal_block + _total_uv_bytes
                 trailing_per_vert = ns - written_per_vert
                 for ni in range(orig_vc_src):
                     off = abs_vob_src + ni * ns
-                    normal_off = off + 4 * color_count
+                    normal_off = off + _color_prefix
                     tangent_off = normal_off + 4
                     uv_off = tangent_off + 4
                     orig_nw.append(unpack('<b', orig_file_bytes[normal_off + 3:normal_off + 4])[0])
@@ -2428,19 +2590,10 @@ class BlenderMeshExporter:
                     if color_count > 0:
                         orig_colors.append(orig_file_bytes[off:off + 4 * color_count])
                     if mesh.uv_count > 0:
-                        orig_uvs.append(orig_file_bytes[uv_off:uv_off + 4 * mesh.uv_count])
+                        orig_uvs.append(orig_file_bytes[uv_off:uv_off + _total_uv_bytes])
                     if trailing_per_vert > 0:
                         trail_off = off + written_per_vert
                         orig_trailing.append(orig_file_bytes[trail_off:trail_off + trailing_per_vert])
-                # Detect compact UVs
-                uv_compact = False
-                if mesh.uv_count > 0 and orig_vc_src > 0:
-                    uv_compact = True
-                    for ni in range(orig_vc_src):
-                        raw_u = unpack('<h', orig_file_bytes[abs_vob_src + ni * ns + uv_off_in_stride: abs_vob_src + ni * ns + uv_off_in_stride + 2])[0]
-                        if abs(raw_u) > 8191:
-                            uv_compact = False
-                            break
 
                 # Build per-vertex source index using mmb_vertex_order attribute if present
                 orig_idx_attr = data.attributes.get("mmb_vertex_order")
@@ -2517,7 +2670,24 @@ class BlenderMeshExporter:
                         if export_uvs:
                             for ui in range(mesh.uv_count):
                                 u, v_uv = all_uvs[ui][v.index]
-                                if uv_compact:
+                                if _uv_is_float32[ui]:
+                                    f.write(bp.float(u))
+                                    f.write(bp.float(v_uv))
+                                elif _uv_fold[ui]:
+                                    # Blender values are in [0,1]; write raw = u * divisor
+                                    _u_raw = int(max(0.0, min(1.0, u)) * _uv_u_divisor[ui])
+                                    _v_raw = int(max(0.0, min(1.0, v_uv)) * _uv_v_divisor[ui])
+                                    f.write(pack('<H', min(int(_uv_u_divisor[ui]), _u_raw)))
+                                    f.write(pack('<H', min(int(_uv_v_divisor[ui]), _v_raw)))
+                                elif _uv_wide[ui]:
+                                    # signed int16 = round(u * 4096), no folding/clamping
+                                    # to [0,1] since wide encoding represents the full
+                                    # tiled value directly.
+                                    _u_raw = max(-32768, min(32767, int(round(u * _uv_u_divisor[ui]))))
+                                    _v_raw = max(-32768, min(32767, int(round(v_uv * _uv_v_divisor[ui]))))
+                                    f.write(pack('<h', _u_raw))
+                                    f.write(pack('<h', _v_raw))
+                                elif _uv_compact[ui]:
                                     f.write(bp.uv_unorm_u(max(0.0, min(1.0, u))))
                                     f.write(bp.uv_unorm_v(max(0.0, min(1.0, v_uv))))
                                 else:
@@ -2526,7 +2696,7 @@ class BlenderMeshExporter:
                         elif orig_uvs and src_vi < len(orig_uvs):
                             f.write(orig_uvs[src_vi])
                         else:
-                            f.write(b'\x00' * (4 * mesh.uv_count))
+                            f.write(b'\x00' * _total_uv_bytes)
 
                     # Preserve any trailing bytes
                     if orig_trailing and src_vi < len(orig_trailing):
@@ -2558,15 +2728,50 @@ class BlenderMeshExporter:
                 color_count = mesh.color_count if getattr(mesh, 'color_in_normals', True) else 0
                 color_off_in_stride = 0
                 uv_off_in_stride    = 4 * color_count + 12 + 12 + 4
-                # Detect compact UV encoding
-                uv_compact = False
-                if mesh.uv_count > 0 and orig_vc_src > 0:
-                    uv_compact = True
-                    for ni in range(orig_vc_src):
-                        raw_u = unpack('<h', orig_file_bytes[abs_vob_src + ni*ns + uv_off_in_stride : abs_vob_src + ni*ns + uv_off_in_stride + 2])[0]
-                        if abs(raw_u) > 8191:
-                            uv_compact = False
-                            break
+                # Detect per-UV-set encoding: fold vs wide vs compact vs int16_norm.
+                # normal_type 1 UV sets are always 4-bytes.
+                _uv_fold = []
+                _uv_wide = []
+                _uv_compact = []
+                _uv_u_divisor = []
+                _uv_v_divisor = []
+                for _ui in range(mesh.uv_count):
+                    _off0 = uv_off_in_stride + _ui * 4
+                    _has_large_u = False; _has_large_v = False; _upper4 = set()
+                    _tv_fold = 0.0; _tv_wide = 0.0; _prev_fold = None; _prev_wide = None
+                    for _ni in range(orig_vc_src):
+                        _off = abs_vob_src + _ni * ns + _off0
+                        _ru = unpack('<H', orig_file_bytes[_off:_off + 2])[0]
+                        _rv = unpack('<H', orig_file_bytes[_off + 2:_off + 4])[0]
+                        _upper4.add(_ru >> 12)
+                        if _ru > 32767: _has_large_u = True
+                        if _rv > 32767: _has_large_v = True
+                        _fold_u = (_ru / 32767.0) % 1.0
+                        _wide_u = ((_ru ^ 32768) - 32768) / 4096.0
+                        if _prev_fold is not None:
+                            _tv_fold += abs(_fold_u - _prev_fold)
+                            _tv_wide += abs(_wide_u - _prev_wide)
+                        _prev_fold = _fold_u; _prev_wide = _wide_u
+                    if _has_large_u and len(_upper4) >= 4:
+                        _tv_ratio = (_tv_wide / _tv_fold) if _tv_fold > 0 else 0.0
+                        if _tv_ratio >= 9.0:
+                            _uv_fold.append(True); _uv_wide.append(False); _uv_compact.append(False)
+                            _uv_u_divisor.append(32767.0)
+                            _uv_v_divisor.append(32767.0 if not _has_large_v else 65535.0)
+                        else:
+                            _uv_fold.append(False); _uv_wide.append(True); _uv_compact.append(False)
+                            _uv_u_divisor.append(4096.0); _uv_v_divisor.append(4096.0)
+                    else:
+                        _uv_fold.append(False); _uv_wide.append(False)
+                        _uv_u_divisor.append(1.0); _uv_v_divisor.append(1.0)
+                        _compact = True
+                        for _ni in range(orig_vc_src):
+                            _off = abs_vob_src + _ni * ns + _off0
+                            _rs = unpack('<h', orig_file_bytes[_off:_off + 2])[0]
+                            if abs(_rs) > 8191:
+                                _compact = False
+                                break
+                        _uv_compact.append(_compact)
                 written_per_vert = uv_off_in_stride + 4 * mesh.uv_count
                 trailing_per_vert = ns - written_per_vert
                 for ni in range(orig_vc_src):
@@ -2620,7 +2825,17 @@ class BlenderMeshExporter:
                         if export_uvs:
                             for ui in range(mesh.uv_count):
                                 u, v_uv = all_uvs[ui][v.index]
-                                if uv_compact:
+                                if _uv_fold[ui]:
+                                    _u_raw = int(max(0.0, min(1.0, u)) * _uv_u_divisor[ui])
+                                    _v_raw = int(max(0.0, min(1.0, v_uv)) * _uv_v_divisor[ui])
+                                    f.write(pack('<H', min(int(_uv_u_divisor[ui]), _u_raw)))
+                                    f.write(pack('<H', min(int(_uv_v_divisor[ui]), _v_raw)))
+                                elif _uv_wide[ui]:
+                                    _u_raw = max(-32768, min(32767, int(round(u * _uv_u_divisor[ui]))))
+                                    _v_raw = max(-32768, min(32767, int(round(v_uv * _uv_v_divisor[ui]))))
+                                    f.write(pack('<h', _u_raw))
+                                    f.write(pack('<h', _v_raw))
+                                elif _uv_compact[ui]:
                                     f.write(bp.uv_unorm_u(max(0.0, min(1.0, u))))
                                     f.write(bp.uv_unorm_v(max(0.0, min(1.0, v_uv))))
                                 else:
