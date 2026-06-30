@@ -1108,6 +1108,8 @@ class SkeletalMeshAsset(Asset):
                 self.position_type = 0  # int16
             elif self.vertex_stride in (28, 36):
                 self.position_type = 1  # float
+            elif self.vertex_stride == 12:
+                self.position_type = 1 if u_count == 0 else 0
             elif _normals_base >= 28:
                 self.position_type = 1  # float
             else:
