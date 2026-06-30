@@ -3,7 +3,7 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt, SaintBaron",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 63),
+    "version": (0, 1, 64),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 11, 12, 13, 14, 15, 16, 17.",
     "category": "Import-Export"
@@ -40,6 +40,8 @@ _LOD_CFG_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/master/lod_
 _LOD_CFG_FILENAME = "lod_presets.cfg"
 _MMB_JSON_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/master/mmb_lod_presets.json"
 _MMB_JSON_FILENAME = "mmb_lod_presets.json"
+_UV_ENC_JSON_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/master/uv_encoding_overrides.json"
+_UV_ENC_JSON_FILENAME = "uv_encoding_overrides.json"
 _update_status = None   # None = not checked, "up_to_date", or "vX.X.X available"
 _update_error  = None   # set if network fetch failed
 
@@ -86,6 +88,7 @@ def _check_data_files():
     for url, filename in [
         (_LOD_CFG_URL,   _LOD_CFG_FILENAME),
         (_MMB_JSON_URL,  _MMB_JSON_FILENAME),
+        (_UV_ENC_JSON_URL, _UV_ENC_JSON_FILENAME),
     ]:
         if not os.path.isfile(os.path.join(plugin_dir, filename)):
             missing.append((url, filename))
@@ -124,6 +127,28 @@ def _check_update_thread():
     else:
         _update_status = "up_to_date"
 
+# --- UV encoding override table ---
+# Loaded once from 'uv_encoding_overrides.json'
+# Maps (mmb_stem, mesh_name) -> encoding name.
+# A trailing '_MOD' on the MMB stem is stripped so modified files are matched.
+def _load_uv_overrides():
+    _json_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uv_encoding_overrides.json")
+    if not os.path.isfile(_json_path):
+        return {}
+    try:
+        with open(_json_path, 'r', encoding='utf-8') as _f:
+            _data = json.load(_f)
+        _table = {}
+        for _enc, _entries in _data.items():
+            for _entry in _entries:
+                _key = (_entry["file"].lower(), _entry["mesh"].lower())
+                _table[_key] = _enc
+        return _table
+    except Exception as _e:
+        print(f"[AFoPMT] Failed to load uv_encoding_overrides.json: {_e}")
+        return {}
+
+_uv_encoding_overrides = _load_uv_overrides()
 
 class ByteReader:
     @staticmethod
@@ -769,10 +794,18 @@ class SkeletalMeshAsset(Asset):
                 # --- UV encoding detection ---
                 # Encodings across different meshes:
                 #  float32    : 8-byte float pair, full tiling range
-                #  fold       : int16 raw/32767 where values > 1.0 are tiled and folded back into [0,1] via % 1.0 (mirrored islands)
                 #  compact    : (uint16 % 4096) / 4095, lower 12 bits, [0,1] only
-                #  int16_norm : signed int16 / 32767, [0,1]
-                #  wide       : signed int16 / 4096
+                #  int16_norm : signed int16 / 32767, [-1,1]
+                #  wide       : signed int16 / 4096, native range ~[-8,8]
+                #
+                # 'wide' cannot be reliably auto-detected from raw bytes alone.
+                # It is identical to int16_norm scaled by a constant 8x, with nothing that distinguishes them.
+                # Instead, 'wide' is looked up from uv_encoding_overrides.json, keyed by (mmb_stem, mesh_name).
+                # A trailing '_MOD' on the stem is stripped so modified files match their base entry.
+                _asset_stem = re.sub(r'_mod$', '', self.parent_mesh.parent_sk_mesh.name,
+                                     flags=re.IGNORECASE).lower()
+                _mesh_name  = self.parent_mesh.name.lower()
+                _json_override = _uv_encoding_overrides.get((_asset_stem, _mesh_name))
 
                 # Normal block before the UV region
                 #  normal_type 0 :  8 bytes (tangent(4)+normal(4))
@@ -809,54 +842,16 @@ class SkeletalMeshAsset(Asset):
                     _cur_off += 8 if _set_is_f32 else 4
                 f.seek(start_pos)
 
-                # For the target (non-float32) set, detect fold vs wide vs compact vs int16_norm.
-                #  wide : signed int16 / 4096, NO modulo - native range ~[-8, 8].
-                #
-                #  Distinguished from fold by total-variation smoothness:
-                #   Genuinely fold-encoded data is far smoother when decoded with modulo wrapping than without,
-                #   whereas wide-encoded data is comparably smooth either way (no real wrap occurs).
+                # For the target (non-float32) set: check the JSON override table first,
+                # then fall back to the simple compact/int16_norm heuristic.
+                # 'wide' is never auto-detected - it requires an explicit JSON entry.
                 use_compact = True
-                use_fold = False
                 use_wide = False
-                _u_divisor = 32767.0
-                _v_divisor = 32767.0
-                if not _is_float32 and self.vertex_count > 0:
-                    _has_large_u = False
-                    _has_large_v = False
-                    _upper4 = set()
-                    _tv_fold = 0.0
-                    _tv_wide = 0.0
-                    _prev_fold = None
-                    _prev_wide = None
-                    for _vi in range(self.vertex_count):
-                        f.seek(start_pos + _vi * stride + _uv_field_off)
-                        _ru = unpack('<H', f.read(2))[0]
-                        _rv = unpack('<H', f.read(2))[0]
-                        _upper4.add(_ru >> 12)
-                        if _ru > 32767: _has_large_u = True
-                        if _rv > 32767: _has_large_v = True
-                        _fold_u = (_ru / 32767.0) % 1.0
-                        _wide_u = ((_ru ^ 32768) - 32768) / 4096.0
-                        if _prev_fold is not None:
-                            _tv_fold += abs(_fold_u - _prev_fold)
-                            _tv_wide += abs(_wide_u - _prev_wide)
-                        _prev_fold = _fold_u
-                        _prev_wide = _wide_u
-                    if _has_large_u and len(_upper4) >= 4:
-                        # Candidate for fold or wide. Use total-variation ratio to decide:
-                        # Genuine fold data is smoother when wrapped (ratio wide/fold typically >= 9),
-                        # wide data shows a much smaller gap.
-                        _tv_ratio = (_tv_wide / _tv_fold) if _tv_fold > 0 else 0.0
-                        if _tv_ratio >= 9.0:
-                            use_compact = False
-                            use_fold = True
-                            _u_divisor = 32767.0
-                            _v_divisor = 32767.0 if not _has_large_v else 65535.0
-                        else:
-                            use_compact = False
-                            use_wide = True
-                    else:
-                        use_compact = True
+                if not _is_float32:
+                    if _json_override == 'wide':
+                        use_compact = False
+                        use_wide = True
+                    elif self.vertex_count > 0:
                         for _vi in range(self.vertex_count):
                             f.seek(start_pos + _vi * stride + _uv_field_off)
                             _rs = unpack('<h', f.read(2))[0]
@@ -870,11 +865,6 @@ class SkeletalMeshAsset(Asset):
                     if _is_float32:
                         u = br.float(f)
                         v = br.float(f)
-                    elif use_fold:
-                        _ru = unpack('<H', f.read(2))[0]
-                        _rv = unpack('<H', f.read(2))[0]
-                        u = (_ru / _u_divisor) % 1.0
-                        v = (_rv / _v_divisor) % 1.0
                     elif use_wide:
                         _ru = unpack('<H', f.read(2))[0]
                         _rv = unpack('<H', f.read(2))[0]
@@ -887,6 +877,20 @@ class SkeletalMeshAsset(Asset):
                         u = br.int16_norm(f)
                         v = br.int16_norm(f)
                     uvs.append((u,v))
+
+                # Record which encoding was used for this UV set so callers can report it without re-running detection.
+                if _is_float32:
+                    _encoding_name = 'Float32'
+                elif use_wide:
+                    _encoding_name = 'Wide'
+                elif use_compact:
+                    _encoding_name = 'Compact'
+                else:
+                    _encoding_name = 'Int16'
+                if not hasattr(self, 'last_uv_encodings'):
+                    self.last_uv_encodings = {}
+                self.last_uv_encodings[index] = _encoding_name
+
                 return uvs
 
             def get_color(self,raw_mesh_file, index=0):
@@ -1285,6 +1289,11 @@ class BlenderMeshImporter:
         bm.to_mesh(obj_data)
         bm.free()
         obj_data.update()
+
+        if mesh.uv_count > 0:
+            _enc_map = getattr(lod, 'last_uv_encodings', {})
+            _enc_list = '/'.join(_enc_map.get(i, '?') for i in range(mesh.uv_count))
+            print(f'UV Encoding: {mesh.uv_count} ({_enc_list})')
 
         # Store per-UV-layer centred flags as mesh attributes so export can
         # reverse the correct transform without re-detecting from Blender values.
@@ -2508,11 +2517,9 @@ class BlenderMeshExporter:
 
                 # Detect per-UV-set encoding from the original file bytes.
                 # _uv_is_float32[ui] : 8-byte float pair
-                # _uv_fold[ui]       : int16/32767 tiling folded into [0,1]
                 # _uv_wide[ui]       : signed int16/4096, no modulo, native range ~[-8,8]
                 # _uv_compact[ui]    : uv_unorm; else int16_norm.
                 _uv_is_float32 = []
-                _uv_fold = []
                 _uv_wide = []
                 _uv_compact = []
                 _uv_u_divisor = []
@@ -2533,39 +2540,19 @@ class BlenderMeshExporter:
                     _uv_field_offs.append(_cur)
                     _uv_is_float32.append(_is_f32)
                     if _is_f32:
-                        _uv_fold.append(False); _uv_wide.append(False); _uv_compact.append(False)
+                        _uv_wide.append(False); _uv_compact.append(False)
                         _uv_u_divisor.append(1.0); _uv_v_divisor.append(1.0)
                         _cur += 8
                     else:
-                        _has_large_u = False; _has_large_v = False; _upper4 = set()
-                        _tv_fold = 0.0; _tv_wide = 0.0; _prev_fold = None; _prev_wide = None
-                        for _ni in range(orig_vc_src):
-                            _off = abs_vob_src + _ni * ns + _cur
-                            _ru = unpack('<H', orig_file_bytes[_off:_off + 2])[0]
-                            _rv = unpack('<H', orig_file_bytes[_off + 2:_off + 4])[0]
-                            _upper4.add(_ru >> 12)
-                            if _ru > 32767: _has_large_u = True
-                            if _rv > 32767: _has_large_v = True
-                            _fold_u = (_ru / 32767.0) % 1.0
-                            _wide_u = ((_ru ^ 32768) - 32768) / 4096.0
-                            if _prev_fold is not None:
-                                _tv_fold += abs(_fold_u - _prev_fold)
-                                _tv_wide += abs(_wide_u - _prev_wide)
-                            _prev_fold = _fold_u; _prev_wide = _wide_u
-                        if _has_large_u and len(_upper4) >= 4:
-                            # Candidate for fold or wide. Use total-variation ratio to decide:
-                            # Genuine fold data is smoother when wrapped (ratio wide/fold typically >= 9),
-                            # wide data shows a much smaller gap.
-                            _tv_ratio = (_tv_wide / _tv_fold) if _tv_fold > 0 else 0.0
-                            if _tv_ratio >= 9.0:
-                                _uv_fold.append(True); _uv_wide.append(False); _uv_compact.append(False)
-                                _uv_u_divisor.append(32767.0)
-                                _uv_v_divisor.append(32767.0 if not _has_large_v else 65535.0)
-                            else:
-                                _uv_fold.append(False); _uv_wide.append(True); _uv_compact.append(False)
-                                _uv_u_divisor.append(4096.0); _uv_v_divisor.append(4096.0)
+                        # Check JSON override for wide; otherwise use compact/int16_norm heuristic.
+                        _exp_stem = re.sub(r'_mod$', '', mesh.parent_sk_mesh.name,
+                                           flags=re.IGNORECASE).lower()
+                        _exp_mesh = mesh.name.lower()
+                        if _uv_encoding_overrides.get((_exp_stem, _exp_mesh)) == 'wide':
+                            _uv_wide.append(True); _uv_compact.append(False)
+                            _uv_u_divisor.append(4096.0); _uv_v_divisor.append(4096.0)
                         else:
-                            _uv_fold.append(False); _uv_wide.append(False)
+                            _uv_wide.append(False)
                             _uv_u_divisor.append(1.0); _uv_v_divisor.append(1.0)
                             _compact = True
                             for _ni in range(orig_vc_src):
@@ -2673,12 +2660,6 @@ class BlenderMeshExporter:
                                 if _uv_is_float32[ui]:
                                     f.write(bp.float(u))
                                     f.write(bp.float(v_uv))
-                                elif _uv_fold[ui]:
-                                    # Blender values are in [0,1]; write raw = u * divisor
-                                    _u_raw = int(max(0.0, min(1.0, u)) * _uv_u_divisor[ui])
-                                    _v_raw = int(max(0.0, min(1.0, v_uv)) * _uv_v_divisor[ui])
-                                    f.write(pack('<H', min(int(_uv_u_divisor[ui]), _u_raw)))
-                                    f.write(pack('<H', min(int(_uv_v_divisor[ui]), _v_raw)))
                                 elif _uv_wide[ui]:
                                     # signed int16 = round(u * 4096), no folding/clamping
                                     # to [0,1] since wide encoding represents the full
@@ -2728,41 +2709,23 @@ class BlenderMeshExporter:
                 color_count = mesh.color_count if getattr(mesh, 'color_in_normals', True) else 0
                 color_off_in_stride = 0
                 uv_off_in_stride    = 4 * color_count + 12 + 12 + 4
-                # Detect per-UV-set encoding: fold vs wide vs compact vs int16_norm.
+                # Detect per-UV-set encoding: wide vs compact vs int16_norm.
                 # normal_type 1 UV sets are always 4-bytes.
-                _uv_fold = []
                 _uv_wide = []
                 _uv_compact = []
                 _uv_u_divisor = []
                 _uv_v_divisor = []
                 for _ui in range(mesh.uv_count):
                     _off0 = uv_off_in_stride + _ui * 4
-                    _has_large_u = False; _has_large_v = False; _upper4 = set()
-                    _tv_fold = 0.0; _tv_wide = 0.0; _prev_fold = None; _prev_wide = None
-                    for _ni in range(orig_vc_src):
-                        _off = abs_vob_src + _ni * ns + _off0
-                        _ru = unpack('<H', orig_file_bytes[_off:_off + 2])[0]
-                        _rv = unpack('<H', orig_file_bytes[_off + 2:_off + 4])[0]
-                        _upper4.add(_ru >> 12)
-                        if _ru > 32767: _has_large_u = True
-                        if _rv > 32767: _has_large_v = True
-                        _fold_u = (_ru / 32767.0) % 1.0
-                        _wide_u = ((_ru ^ 32768) - 32768) / 4096.0
-                        if _prev_fold is not None:
-                            _tv_fold += abs(_fold_u - _prev_fold)
-                            _tv_wide += abs(_wide_u - _prev_wide)
-                        _prev_fold = _fold_u; _prev_wide = _wide_u
-                    if _has_large_u and len(_upper4) >= 4:
-                        _tv_ratio = (_tv_wide / _tv_fold) if _tv_fold > 0 else 0.0
-                        if _tv_ratio >= 9.0:
-                            _uv_fold.append(True); _uv_wide.append(False); _uv_compact.append(False)
-                            _uv_u_divisor.append(32767.0)
-                            _uv_v_divisor.append(32767.0 if not _has_large_v else 65535.0)
-                        else:
-                            _uv_fold.append(False); _uv_wide.append(True); _uv_compact.append(False)
-                            _uv_u_divisor.append(4096.0); _uv_v_divisor.append(4096.0)
+                    # Check JSON override for wide; otherwise use compact/int16_norm heuristic.
+                    _exp_stem = re.sub(r'_mod$', '', mesh.parent_sk_mesh.name,
+                                       flags=re.IGNORECASE).lower()
+                    _exp_mesh = mesh.name.lower()
+                    if _uv_encoding_overrides.get((_exp_stem, _exp_mesh)) == 'wide':
+                        _uv_wide.append(True); _uv_compact.append(False)
+                        _uv_u_divisor.append(4096.0); _uv_v_divisor.append(4096.0)
                     else:
-                        _uv_fold.append(False); _uv_wide.append(False)
+                        _uv_wide.append(False)
                         _uv_u_divisor.append(1.0); _uv_v_divisor.append(1.0)
                         _compact = True
                         for _ni in range(orig_vc_src):
@@ -2825,12 +2788,7 @@ class BlenderMeshExporter:
                         if export_uvs:
                             for ui in range(mesh.uv_count):
                                 u, v_uv = all_uvs[ui][v.index]
-                                if _uv_fold[ui]:
-                                    _u_raw = int(max(0.0, min(1.0, u)) * _uv_u_divisor[ui])
-                                    _v_raw = int(max(0.0, min(1.0, v_uv)) * _uv_v_divisor[ui])
-                                    f.write(pack('<H', min(int(_uv_u_divisor[ui]), _u_raw)))
-                                    f.write(pack('<H', min(int(_uv_v_divisor[ui]), _v_raw)))
-                                elif _uv_wide[ui]:
+                                if _uv_wide[ui]:
                                     _u_raw = max(-32768, min(32767, int(round(u * _uv_u_divisor[ui]))))
                                     _v_raw = max(-32768, min(32767, int(round(v_uv * _uv_v_divisor[ui]))))
                                     f.write(pack('<h', _u_raw))
@@ -5073,6 +5031,7 @@ class ApplyUpdate(bpy.types.Operator):
         for url, filename in [
             (_LOD_CFG_URL, _LOD_CFG_FILENAME),
             (_MMB_JSON_URL, _MMB_JSON_FILENAME),
+            (_UV_ENC_JSON_URL, _UV_ENC_JSON_FILENAME),
         ]:
             ok, err = _download_data_file(url, filename)
             if not ok:
