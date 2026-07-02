@@ -3,9 +3,9 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt, SaintBaron",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 64),
+    "version": (0, 1, 65),
     "blender": (5, 0, 0),
-    "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 11, 12, 13, 14, 15, 16, 17.",
+    "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 11-17.",
     "category": "Import-Export"
     }
 
@@ -40,8 +40,6 @@ _LOD_CFG_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/master/lod_
 _LOD_CFG_FILENAME = "lod_presets.cfg"
 _MMB_JSON_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/master/mmb_lod_presets.json"
 _MMB_JSON_FILENAME = "mmb_lod_presets.json"
-_UV_ENC_JSON_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/master/uv_encoding_overrides.json"
-_UV_ENC_JSON_FILENAME = "uv_encoding_overrides.json"
 _update_status = None   # None = not checked, "up_to_date", or "vX.X.X available"
 _update_error  = None   # set if network fetch failed
 
@@ -88,7 +86,6 @@ def _check_data_files():
     for url, filename in [
         (_LOD_CFG_URL,   _LOD_CFG_FILENAME),
         (_MMB_JSON_URL,  _MMB_JSON_FILENAME),
-        (_UV_ENC_JSON_URL, _UV_ENC_JSON_FILENAME),
     ]:
         if not os.path.isfile(os.path.join(plugin_dir, filename)):
             missing.append((url, filename))
@@ -127,28 +124,66 @@ def _check_update_thread():
     else:
         _update_status = "up_to_date"
 
-# --- UV encoding override table ---
-# Loaded once from 'uv_encoding_overrides.json'
-# Maps (mmb_stem, mesh_name) -> encoding name.
-# A trailing '_MOD' on the MMB stem is stripped so modified files are matched.
-def _load_uv_overrides():
-    _json_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uv_encoding_overrides.json")
-    if not os.path.isfile(_json_path):
-        return {}
-    try:
-        with open(_json_path, 'r', encoding='utf-8') as _f:
-            _data = json.load(_f)
-        _table = {}
-        for _enc, _entries in _data.items():
-            for _entry in _entries:
-                _key = (_entry["file"].lower(), _entry["mesh"].lower())
-                _table[_key] = _enc
-        return _table
-    except Exception as _e:
-        print(f"[AFoPMT] Failed to load uv_encoding_overrides.json: {_e}")
-        return {}
+# --- UV encoding from the binary divisor table ---
+# Every mesh stores, per UV set, the dequantization divisor as a float32. The
+# table's location moved between format versions:
+#   v12/v13/v15 : the 4-byte block following the post-uv-hash 'unk' (parsed as the
+#                 color block); count == uv_count.
+#   v16/v17     : a dedicated 'count_c' block after the real color hashes;
+#                 count_c == uv_count.
+# The only divisor values the format uses are:
+#   0.0      -> the set is stored as float32 (8 bytes/vert), not quantized
+#   4095.0   -> compact 12-bit unorm  ((uint16 % 4096) / 4095)
+#   4096.0   -> "wide"  : signed int16 / 4096   (hair-card tiling coordinate, the x8)
+#   32767.0  -> int16_norm : signed int16 / 32767  ([-1,1])
+# A candidate table is only accepted when every entry is one of these, so a block
+# of genuine hashes (v16/v17 color hashes) can never be mistaken for divisors.
+# This replaces the old uv_encoding_overrides.json: 'wide' is now read from the
+# file instead of guessed or looked up.
+_UV_KNOWN_DIVISORS = (0.0, 4095.0, 4096.0, 32767.0)
 
-_uv_encoding_overrides = _load_uv_overrides()
+def _uv_divisor_candidates(raw4_list):
+    """Decode a list of 4-byte chunks to float32 divisors, or return None if any
+    value is not a recognised divisor (i.e. the block is not a divisor table)."""
+    out = []
+    for _b in raw4_list:
+        if len(_b) != 4:
+            return None
+        _v = unpack('<f', _b)[0]
+        if _v not in _UV_KNOWN_DIVISORS:
+            return None
+        out.append(_v)
+    return out
+
+def _encoding_from_divisor(div):
+    """Map a divisor float to an encoding name, or None if not a usable divisor."""
+    if div == 0.0:
+        return 'float32'
+    if div == 4096.0:
+        return 'wide'
+    if div == 32767.0:
+        return 'int16_norm'
+    if div == 4095.0:
+        return 'compact'
+    return None
+
+def _resolve_uv_encoding(divisor, probe_plausible_f32, compact_ok):
+    """Single source of truth for a UV set's encoding, shared by import and export.
+    Returns one of: 'float32', 'wide', 'compact', 'int16_norm'.
+    The binary divisor table is authoritative; a 'float32' divisor is only honoured
+    when the bytes actually read as plausible floats (guards against a stray table
+    entry producing NaN geometry). When a mesh carries no divisor table the fallback
+    runs: float32 byte-probe, then compact/int16_norm from the sample magnitudes.
+    """
+    if divisor is not None:
+        _enc = _encoding_from_divisor(divisor)
+        if _enc == 'float32':
+            return 'float32' if probe_plausible_f32 else 'int16_norm'
+        if _enc is not None:
+            return _enc
+    if probe_plausible_f32:
+        return 'float32'
+    return 'compact' if compact_ok else 'int16_norm'
 
 class ByteReader:
     @staticmethod
@@ -601,19 +636,17 @@ class SkeletalMeshAsset(Asset):
                             index = br.uint8(f)
                             iw[index] = 1.0
                         else:
-                            # Int16 position (8b) + 4x uint8_norm weights + 4x uint8 indices
+                            # Int16 position (8b) + 2x uint8_norm weights + 2b pad + 2x uint16 bone indices
                             f.seek(8, 1)
-                            weight_count = 4
-                            weights = []
-                            for w in range(weight_count):
-                                weight = br.uint8_norm(f)
-                                if weight > 0.0:
-                                    weights.append(weight)
-                            for i in range(weight_count):
-                                if i < len(weights):
-                                    iw[br.uint8(f)] = weights[i]
-                                else:
-                                    f.seek(1, 1)
+                            w0 = br.uint8_norm(f)
+                            w1 = br.uint8_norm(f)
+                            f.seek(2, 1) # 2 padding bytes (always zero)
+                            i0 = br.uint16(f)
+                            i1 = br.uint16(f)
+                            if w0 > 0.0:
+                                iw[i0] = iw.get(i0, 0.0) + w0
+                            if w1 > 0.0:
+                                iw[i1] = iw.get(i1, 0.0) + w1
                     elif stride == 20:
                         pos_skip = 12 if self.parent_mesh.position_type == 1 else 8
                         f.seek(pos_skip, 1)
@@ -792,20 +825,15 @@ class SkeletalMeshAsset(Asset):
                 f.seek(self.vertex_data_offset_b)
 
                 # --- UV encoding detection ---
-                # Encodings across different meshes:
-                #  float32    : 8-byte float pair, full tiling range
-                #  compact    : (uint16 % 4096) / 4095, lower 12 bits, [0,1] only
-                #  int16_norm : signed int16 / 32767, [-1,1]
-                #  wide       : signed int16 / 4096, native range ~[-8,8]
-                #
-                # 'wide' cannot be reliably auto-detected from raw bytes alone.
-                # It is identical to int16_norm scaled by a constant 8x, with nothing that distinguishes them.
-                # Instead, 'wide' is looked up from uv_encoding_overrides.json, keyed by (mmb_stem, mesh_name).
-                # A trailing '_MOD' on the stem is stripped so modified files match their base entry.
-                _asset_stem = re.sub(r'_mod$', '', self.parent_mesh.parent_sk_mesh.name,
-                                     flags=re.IGNORECASE).lower()
-                _mesh_name  = self.parent_mesh.name.lower()
-                _json_override = _uv_encoding_overrides.get((_asset_stem, _mesh_name))
+                # Per-set encoding comes straight from the binary divisor table
+                # (self.parent_mesh.uv_divisors), read during parsing:
+                #  0.0     -> float32   (8 bytes/vert)
+                #  4095.0  -> compact   : (uint16 % 4096) / 4095
+                #  4096.0  -> wide      : signed int16 / 4096  (hair-card tiling, x8)
+                #  32767.0 -> int16_norm: signed int16 / 32767 ([-1,1])
+                # When a mesh has no table (older variants, or a non-divisor block)
+                # the fallback runs: float32 byte-probe, then compact/int16_norm.
+                _divs = getattr(self.parent_mesh, 'uv_divisors', None)
 
                 # Normal block before the UV region
                 #  normal_type 0 :  8 bytes (tangent(4)+normal(4))
@@ -817,48 +845,55 @@ class SkeletalMeshAsset(Asset):
                     _normal_block_size = 12 + 12 + 4
                 _color_prefix = 4 * color_count
 
-                # Build the per-set layout (offset + width) up to and including `index`.
-                # float32 sets are detected with a plausibility probe: reading the
-                # 4-byte slot as float32 yields plausible values (exact 0.0 or 1e-4<|f|<500)
-                # for >90% of verts only when the data really is float32;
-                # compact/int16 data reads as subnormals or erratic large floats.
+                # Walk the UV sets in order up to `index`, resolving each set's
+                # encoding (which sets its 8-vs-4 byte width and the running offset).
+                # A float32 divisor is confirmed with a plausibility probe so a stray
+                # table entry can never inject NaN geometry.
+                # The packed UV sets sit at the END of the normals stride. The forward
+                # guess (colour prefix + a FIXED normal-block size) mis-sizes meshes
+                # whose normal block isn't the assumed 8/28 bytes (e.g. some v15 kuru
+                # meshes carry a 16-byte block, leaving the UV walk 8 bytes early).
+                # When the file provides a divisor table each set's exact width is
+                # known, so anchor the walk to the end of the stride instead - correct
+                # regardless of the normal-block size. No table -> keep the forward guess.
                 _cur_off = _color_prefix + _normal_block_size
+                if _divs:
+                    _nuv = max(1, self.parent_mesh.uv_count)
+                    _total_uv_bytes = sum(8 if d == 0.0 else 4 for d in _divs[:_nuv])
+                    _cur_off = max(_cur_off, stride - _total_uv_bytes)
                 _uv_field_off = _cur_off
-                _is_float32 = False
+                _target_enc = 'int16_norm'
                 start_pos = f.tell()
                 for _ui in range(index + 1):
-                    if self.vertex_count > 0 and normal_type == 0:
-                        _plausible = 0
+                    _div = _divs[_ui] if (_divs is not None and _ui < len(_divs)) else None
+                    _plausible_f32 = False
+                    _compact_ok = True
+                    if self.vertex_count > 0:
+                        _pl = 0
                         for _vi in range(self.vertex_count):
                             f.seek(start_pos + _vi * stride + _cur_off)
                             _fv = unpack('<f', f.read(4))[0]
                             if _fv == _fv and (_fv == 0.0 or 1e-4 < abs(_fv) < 500):
-                                _plausible += 1
-                        _set_is_f32 = (_plausible / self.vertex_count) > 0.90
-                    else:
-                        _set_is_f32 = False
+                                _pl += 1
+                            if _div is None:
+                                # Compact test both axes: a small U with a large V
+                                # (or vice-versa) must not be routed to compact, whose
+                                # % 4096 wrap would shred the larger axis.
+                                f.seek(start_pos + _vi * stride + _cur_off)
+                                _ru = unpack('<h', f.read(2))[0]
+                                _rv = unpack('<h', f.read(2))[0]
+                                if abs(_ru) > 8191 or abs(_rv) > 8191:
+                                    _compact_ok = False
+                        _plausible_f32 = (_pl / self.vertex_count) > 0.90
+                    _enc = _resolve_uv_encoding(_div, _plausible_f32, _compact_ok)
                     _uv_field_off = _cur_off
-                    _is_float32 = _set_is_f32
-                    _cur_off += 8 if _set_is_f32 else 4
+                    _target_enc = _enc
+                    _cur_off += 8 if _enc == 'float32' else 4
                 f.seek(start_pos)
 
-                # For the target (non-float32) set: check the JSON override table first,
-                # then fall back to the simple compact/int16_norm heuristic.
-                # 'wide' is never auto-detected - it requires an explicit JSON entry.
-                use_compact = True
-                use_wide = False
-                if not _is_float32:
-                    if _json_override == 'wide':
-                        use_compact = False
-                        use_wide = True
-                    elif self.vertex_count > 0:
-                        for _vi in range(self.vertex_count):
-                            f.seek(start_pos + _vi * stride + _uv_field_off)
-                            _rs = unpack('<h', f.read(2))[0]
-                            if abs(_rs) > 8191:
-                                use_compact = False
-                                break
-                    f.seek(start_pos)
+                _is_float32 = (_target_enc == 'float32')
+                use_wide = (_target_enc == 'wide')
+                use_compact = (_target_enc == 'compact')
 
                 for i in range(self.vertex_count):
                     f.seek(start_pos + i * stride + _uv_field_off)
@@ -1058,6 +1093,14 @@ class SkeletalMeshAsset(Asset):
             self.uv_count = br.uint8(f)
             f.seek(4 * self.uv_count, 1)
 
+            # uv_divisors: per-UV-set dequantization divisor read straight from the
+            # file. Its block differs by version (see _UV_KNOWN_DIVISORS notes).
+            # count_c (v16/v17) or color_count (v12/v13/v15) is the AUTHORITATIVE
+            # UV count when all its entries are recognised divisors -- the header
+            # uv_count can undercount (e.g. some weapon meshes have uv_count=1 in
+            # the header but count_c=2 with valid divisors for both UV sets).
+            # When the divisor table validates, self.uv_count is updated to match.
+            self.uv_divisors = None
             if version == 11:
                 self.color_count = 0 # v11 does not store color_count; always 0
             elif version in (16, 17):
@@ -1065,11 +1108,19 @@ class SkeletalMeshAsset(Asset):
                 f.seek(4 * self.color_count, 1)
                 f.seek(4, 1) # unk after color (v16/v17)
                 count_c = br.uint8(f)
-                f.seek(4 * count_c, 1)
+                _div_raw = [f.read(4) for _ in range(count_c)]
+                _candidates = _uv_divisor_candidates(_div_raw)
+                if _candidates is not None:
+                    self.uv_divisors = _candidates
+                    self.uv_count = count_c
             else:
                 f.seek(4, 1) # unk before color (v12/v13/v15)
                 self.color_count = br.uint8(f)
-                f.seek(4 * self.color_count, 1)
+                _div_raw = [f.read(4) for _ in range(self.color_count)]
+                _candidates = _uv_divisor_candidates(_div_raw)
+                if _candidates is not None:
+                    self.uv_divisors = _candidates
+                    self.uv_count = self.color_count
 
             self.vertex_stride = br.uint16(f)
             self.normals_stride = br.uint16(f)
@@ -1326,6 +1377,10 @@ class BlenderMeshImporter:
         # Some VAT meshes store animation-texture lookup data in the normals stream
         # rather than actual surface normals (e.g. geckofish: all ny=0, nz=0).
         # Detect degenerate normals (all pointing the same direction) and fall back to computing normals.
+        # Faces must be smooth-shaded for custom split normals to actually render smooth
+        # (flat-shaded faces ignore per-vertex normals, giving harsh per-facet lighting).
+        for poly in obj_data.polygons:
+            poly.use_smooth = True
         computed_normals = lod.get_normals(raw_mesh_file)
         degenerate = False
         if computed_normals:
@@ -2533,42 +2588,40 @@ class BlenderMeshExporter:
                 _uv_v_divisor = []
                 _uv_field_offs = []
                 _cur = _color_prefix + _normal_block
+                _exp_divs = getattr(mesh, 'uv_divisors', None)
                 for _ui in range(mesh.uv_count):
+                    _div = _exp_divs[_ui] if (_exp_divs is not None and _ui < len(_exp_divs)) else None
+                    _plausible = 0
+                    _compact_ok = True
                     if orig_vc_src > 0:
-                        _plausible = 0
                         for _ni in range(orig_vc_src):
-                            _b = orig_file_bytes[abs_vob_src + _ni * ns + _cur: abs_vob_src + _ni * ns + _cur + 4]
-                            _fv = unpack('<f', _b)[0]
+                            _o = abs_vob_src + _ni * ns + _cur
+                            _fv = unpack('<f', orig_file_bytes[_o:_o + 4])[0]
                             if _fv == _fv and (_fv == 0.0 or 1e-4 < abs(_fv) < 500):
                                 _plausible += 1
-                        _is_f32 = (_plausible / orig_vc_src) > 0.90
+                            if _div is None:
+                                _rs = unpack('<h', orig_file_bytes[_o:_o + 2])[0]
+                                if abs(_rs) > 8191:
+                                    _compact_ok = False
+                        _plausible_f32 = (_plausible / orig_vc_src) > 0.90
                     else:
-                        _is_f32 = False
+                        _plausible_f32 = False
+                    _enc = _resolve_uv_encoding(_div, _plausible_f32, _compact_ok)
                     _uv_field_offs.append(_cur)
+                    _is_f32 = (_enc == 'float32')
                     _uv_is_float32.append(_is_f32)
                     if _is_f32:
                         _uv_wide.append(False); _uv_compact.append(False)
                         _uv_u_divisor.append(1.0); _uv_v_divisor.append(1.0)
                         _cur += 8
+                    elif _enc == 'wide':
+                        _uv_wide.append(True); _uv_compact.append(False)
+                        _uv_u_divisor.append(4096.0); _uv_v_divisor.append(4096.0)
+                        _cur += 4
                     else:
-                        # Check JSON override for wide; otherwise use compact/int16_norm heuristic.
-                        _exp_stem = re.sub(r'_mod$', '', mesh.parent_sk_mesh.name,
-                                           flags=re.IGNORECASE).lower()
-                        _exp_mesh = mesh.name.lower()
-                        if _uv_encoding_overrides.get((_exp_stem, _exp_mesh)) == 'wide':
-                            _uv_wide.append(True); _uv_compact.append(False)
-                            _uv_u_divisor.append(4096.0); _uv_v_divisor.append(4096.0)
-                        else:
-                            _uv_wide.append(False)
-                            _uv_u_divisor.append(1.0); _uv_v_divisor.append(1.0)
-                            _compact = True
-                            for _ni in range(orig_vc_src):
-                                _off = abs_vob_src + _ni * ns + _cur
-                                _rs = unpack('<h', orig_file_bytes[_off:_off + 2])[0]
-                                if abs(_rs) > 8191:
-                                    _compact = False
-                                    break
-                            _uv_compact.append(_compact)
+                        _uv_wide.append(False)
+                        _uv_u_divisor.append(1.0); _uv_v_divisor.append(1.0)
+                        _uv_compact.append(_enc == 'compact')
                         _cur += 4
                 _total_uv_bytes = _cur - (_color_prefix + _normal_block)
                 uv_off_in_stride = _color_prefix + _normal_block
@@ -2716,32 +2769,34 @@ class BlenderMeshExporter:
                 color_count = mesh.color_count if getattr(mesh, 'color_in_normals', True) else 0
                 color_off_in_stride = 0
                 uv_off_in_stride    = 4 * color_count + 12 + 12 + 4
-                # Detect per-UV-set encoding: wide vs compact vs int16_norm.
-                # normal_type 1 UV sets are always 4-bytes.
+                # Per-set encoding from the binary divisor table (this float-normal
+                # path stores every UV set as a 4-byte int form).
                 _uv_wide = []
                 _uv_compact = []
                 _uv_u_divisor = []
                 _uv_v_divisor = []
+                _exp_divs = getattr(mesh, 'uv_divisors', None)
                 for _ui in range(mesh.uv_count):
                     _off0 = uv_off_in_stride + _ui * 4
-                    # Check JSON override for wide; otherwise use compact/int16_norm heuristic.
-                    _exp_stem = re.sub(r'_mod$', '', mesh.parent_sk_mesh.name,
-                                       flags=re.IGNORECASE).lower()
-                    _exp_mesh = mesh.name.lower()
-                    if _uv_encoding_overrides.get((_exp_stem, _exp_mesh)) == 'wide':
+                    _div = _exp_divs[_ui] if (_exp_divs is not None and _ui < len(_exp_divs)) else None
+                    _compact_ok = True
+                    if _div is None:
+                        for _ni in range(orig_vc_src):
+                            _off = abs_vob_src + _ni * ns + _off0
+                            _rs = unpack('<h', orig_file_bytes[_off:_off + 2])[0]
+                            if abs(_rs) > 8191:
+                                _compact_ok = False
+                                break
+                    # 4-byte fixed stride here, so a float32 divisor cannot widen the
+                    # layout; fall back to int16_norm in that (unseen) case.
+                    _enc = _resolve_uv_encoding(_div, False, _compact_ok)
+                    if _enc == 'wide':
                         _uv_wide.append(True); _uv_compact.append(False)
                         _uv_u_divisor.append(4096.0); _uv_v_divisor.append(4096.0)
                     else:
                         _uv_wide.append(False)
                         _uv_u_divisor.append(1.0); _uv_v_divisor.append(1.0)
-                        _compact = True
-                        for _ni in range(orig_vc_src):
-                            _off = abs_vob_src + _ni * ns + _off0
-                            _rs = unpack('<h', orig_file_bytes[_off:_off + 2])[0]
-                            if abs(_rs) > 8191:
-                                _compact = False
-                                break
-                        _uv_compact.append(_compact)
+                        _uv_compact.append(_enc == 'compact')
                 written_per_vert = uv_off_in_stride + 4 * mesh.uv_count
                 trailing_per_vert = ns - written_per_vert
                 for ni in range(orig_vc_src):
@@ -5353,7 +5408,6 @@ class ApplyUpdate(bpy.types.Operator):
         for url, filename in [
             (_LOD_CFG_URL, _LOD_CFG_FILENAME),
             (_MMB_JSON_URL, _MMB_JSON_FILENAME),
-            (_UV_ENC_JSON_URL, _UV_ENC_JSON_FILENAME),
         ]:
             ok, err = _download_data_file(url, filename)
             if not ok:
