@@ -124,22 +124,17 @@ def _check_update_thread():
     else:
         _update_status = "up_to_date"
 
-# --- UV encoding from the binary divisor table ---
-# Every mesh stores, per UV set, the dequantization divisor as a float32. The
-# table's location moved between format versions:
-#   v12/v13/v15 : the 4-byte block following the post-uv-hash 'unk' (parsed as the
-#                 color block); count == uv_count.
-#   v16/v17     : a dedicated 'count_c' block after the real color hashes;
-#                 count_c == uv_count.
-# The only divisor values the format uses are:
-#   0.0      -> the set is stored as float32 (8 bytes/vert), not quantized
-#   4095.0   -> compact 12-bit unorm  ((uint16 % 4096) / 4095)
-#   4096.0   -> "wide"  : signed int16 / 4096   (hair-card tiling coordinate, the x8)
-#   32767.0  -> int16_norm : signed int16 / 32767  ([-1,1])
-# A candidate table is only accepted when every entry is one of these, so a block
-# of genuine hashes (v16/v17 color hashes) can never be mistaken for divisors.
-# This replaces the old uv_encoding_overrides.json: 'wide' is now read from the
-# file instead of guessed or looked up.
+# --- UV encoding: binary divisor table ---
+# Each UV set stores its dequantization divisor as a float32.
+#
+# Known values:
+#   0.0     -> float32   : (8 bytes/vert, unquantized)
+#   4095.0  -> compact   : (uint16 % 4096) / 4095
+#   4096.0  -> wide      : signed int16 / 4096
+#   32767.0 -> int16_norm: signed int16 / 32767
+#
+# A block is only accepted as a divisor table when every entry matches one of
+# these values, so genuine hashes are never mistaken for divisors.
 _UV_KNOWN_DIVISORS = (0.0, 4095.0, 4096.0, 32767.0)
 
 def _uv_divisor_candidates(raw4_list):
@@ -168,13 +163,10 @@ def _encoding_from_divisor(div):
     return None
 
 def _resolve_uv_encoding(divisor, probe_plausible_f32, compact_ok):
-    """Single source of truth for a UV set's encoding, shared by import and export.
-    Returns one of: 'float32', 'wide', 'compact', 'int16_norm'.
-    The binary divisor table is authoritative; a 'float32' divisor is only honoured
-    when the bytes actually read as plausible floats (guards against a stray table
-    entry producing NaN geometry). When a mesh carries no divisor table the fallback
-    runs: float32 byte-probe, then compact/int16_norm from the sample magnitudes.
-    """
+    """Returns the encoding for one UV set: 'float32', 'wide', 'compact', or 'int16_norm'.
+    Divisor table is authoritative; float32 is double-checked via byte probe to guard
+    against a stray entry producing NaN geometry. Falls back to probe + magnitude
+    heuristic when no table is present."""
     if divisor is not None:
         _enc = _encoding_from_divisor(divisor)
         if _enc == 'float32':
@@ -184,6 +176,7 @@ def _resolve_uv_encoding(divisor, probe_plausible_f32, compact_ok):
     if probe_plausible_f32:
         return 'float32'
     return 'compact' if compact_ok else 'int16_norm'
+
 
 class ByteReader:
     @staticmethod
@@ -825,14 +818,8 @@ class SkeletalMeshAsset(Asset):
                 f.seek(self.vertex_data_offset_b)
 
                 # --- UV encoding detection ---
-                # Per-set encoding comes straight from the binary divisor table
-                # (self.parent_mesh.uv_divisors), read during parsing:
-                #  0.0     -> float32   (8 bytes/vert)
-                #  4095.0  -> compact   : (uint16 % 4096) / 4095
-                #  4096.0  -> wide      : signed int16 / 4096  (hair-card tiling, x8)
-                #  32767.0 -> int16_norm: signed int16 / 32767 ([-1,1])
-                # When a mesh has no table (older variants, or a non-divisor block)
-                # the fallback runs: float32 byte-probe, then compact/int16_norm.
+                # Per-set encoding comes from the binary divisor table (uv_divisors).
+                # Falls back to float32 probe then compact/int16_norm when mesh has no table.
                 _divs = getattr(self.parent_mesh, 'uv_divisors', None)
 
                 # Normal block before the UV region
@@ -845,17 +832,10 @@ class SkeletalMeshAsset(Asset):
                     _normal_block_size = 12 + 12 + 4
                 _color_prefix = 4 * color_count
 
-                # Walk the UV sets in order up to `index`, resolving each set's
-                # encoding (which sets its 8-vs-4 byte width and the running offset).
-                # A float32 divisor is confirmed with a plausibility probe so a stray
-                # table entry can never inject NaN geometry.
-                # The packed UV sets sit at the END of the normals stride. The forward
-                # guess (colour prefix + a FIXED normal-block size) mis-sizes meshes
-                # whose normal block isn't the assumed 8/28 bytes (e.g. some v15 kuru
-                # meshes carry a 16-byte block, leaving the UV walk 8 bytes early).
-                # When the file provides a divisor table each set's exact width is
-                # known, so anchor the walk to the end of the stride instead - correct
-                # regardless of the normal-block size. No table -> keep the forward guess.
+                # UV sets are packed at the END of the normals stride. When the
+                # divisor table is present, anchor the start offset from the stride
+                # end (stride - total_uv_bytes) so meshes with non-standard normal
+                # block sizes land correctly. Without a table, use the forward guess.
                 _cur_off = _color_prefix + _normal_block_size
                 if _divs:
                     _nuv = max(1, self.parent_mesh.uv_count)
@@ -876,9 +856,8 @@ class SkeletalMeshAsset(Asset):
                             if _fv == _fv and (_fv == 0.0 or 1e-4 < abs(_fv) < 500):
                                 _pl += 1
                             if _div is None:
-                                # Compact test both axes: a small U with a large V
-                                # (or vice-versa) must not be routed to compact, whose
-                                # % 4096 wrap would shred the larger axis.
+                                # Both axes must be small for compact; large values
+                                # on either axis rule it out (% 4096 would shred them).
                                 f.seek(start_pos + _vi * stride + _cur_off)
                                 _ru = unpack('<h', f.read(2))[0]
                                 _rv = unpack('<h', f.read(2))[0]
@@ -1093,13 +1072,10 @@ class SkeletalMeshAsset(Asset):
             self.uv_count = br.uint8(f)
             f.seek(4 * self.uv_count, 1)
 
-            # uv_divisors: per-UV-set dequantization divisor read straight from the
-            # file. Its block differs by version (see _UV_KNOWN_DIVISORS notes).
-            # count_c (v16/v17) or color_count (v12/v13/v15) is the AUTHORITATIVE
-            # UV count when all its entries are recognised divisors -- the header
-            # uv_count can undercount (e.g. some weapon meshes have uv_count=1 in
+            # uv_divisors: divisor table read from file (see _UV_KNOWN_DIVISORS).
+            # count_c/color_count is the authoritative UV set count when all entries
+            # are valid divisors -- the header uv_count can undercount (e.g. some meshes have uv_count=1 in
             # the header but count_c=2 with valid divisors for both UV sets).
-            # When the divisor table validates, self.uv_count is updated to match.
             self.uv_divisors = None
             if version == 11:
                 self.color_count = 0 # v11 does not store color_count; always 0
