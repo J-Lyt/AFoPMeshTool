@@ -659,17 +659,19 @@ class SkeletalMeshAsset(Asset):
                             index = br.uint8(f)
                             iw[index] = 1.0
                         else:
-                            # Int16 position (8b) + 2x uint8_norm weights + 2b pad + 2x uint16 bone indices
+                            # Int16 position (8b) + 4x uint8_norm weights + 4x uint8 indices
                             f.seek(8, 1)
-                            w0 = br.uint8_norm(f)
-                            w1 = br.uint8_norm(f)
-                            f.seek(2, 1) # 2 padding bytes (always zero)
-                            i0 = br.uint16(f)
-                            i1 = br.uint16(f)
-                            if w0 > 0.0:
-                                iw[i0] = iw.get(i0, 0.0) + w0
-                            if w1 > 0.0:
-                                iw[i1] = iw.get(i1, 0.0) + w1
+                            weight_count = 4
+                            weights = []
+                            for w in range(weight_count):
+                                weight = br.uint8_norm(f)
+                                if weight > 0.0:
+                                    weights.append(weight)
+                            for i in range(weight_count):
+                                if i < len(weights):
+                                    iw[br.uint8(f)] = weights[i]
+                                else:
+                                    f.seek(1, 1)
                     elif stride == 20:
                         pos_skip = 12 if self.parent_mesh.position_type == 1 else 8
                         f.seek(pos_skip, 1)
