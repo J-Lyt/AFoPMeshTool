@@ -3,7 +3,7 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt, SaintBaron",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 66),
+    "version": (0, 1, 67),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 11-17.",
     "category": "Import-Export"
@@ -40,6 +40,8 @@ _LOD_CFG_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/master/lod_
 _LOD_CFG_FILENAME = "lod_presets.cfg"
 _MMB_JSON_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/master/mmb_lod_presets.json"
 _MMB_JSON_FILENAME = "mmb_lod_presets.json"
+_MCLOTH_PY_URL = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/master/mcloth.py"
+_MCLOTH_PY_FILENAME = "mcloth.py"
 _update_status = None   # None = not checked, "up_to_date", or "vX.X.X available"
 _update_error  = None   # set if network fetch failed
 
@@ -86,6 +88,7 @@ def _check_data_files():
     for url, filename in [
         (_LOD_CFG_URL,   _LOD_CFG_FILENAME),
         (_MMB_JSON_URL,  _MMB_JSON_FILENAME),
+        (_MCLOTH_PY_URL, _MCLOTH_PY_FILENAME),
     ]:
         if not os.path.isfile(os.path.join(plugin_dir, filename)):
             missing.append((url, filename))
@@ -123,6 +126,26 @@ def _check_update_thread():
         _update_status = f"v{remote[0]}.{remote[1]}.{remote[2]} available"
     else:
         _update_status = "up_to_date"
+
+# .mcloth reader/writer (no bpy). Package import with a path
+# fallback for single-file installs and headless runs; _check_data_files
+# downloads mcloth.py when missing (cloth export is disabled until restart).
+# NOTE: do NOT pre-assign `mcloth = None` before the relative import - the
+# `from . import` mechanism would bind the existing package attribute without
+# importing the submodule.
+try:
+    from . import mcloth
+except ImportError:
+    try:
+        import importlib.util as _ilu
+        _mc_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), _MCLOTH_PY_FILENAME)
+        _mc_spec = _ilu.spec_from_file_location("afop_mcloth", _mc_path)
+        mcloth = _ilu.module_from_spec(_mc_spec)
+        _mc_spec.loader.exec_module(mcloth)
+    except Exception as _mc_err:
+        mcloth = None
+        print(f"[AFoPMT] mcloth.py not available ({_mc_err}) - "
+              f"cloth export support disabled until Blender is restarted.")
 
 # --- UV encoding: binary divisor table ---
 # Each UV set stores its dequantization divisor as a float32.
@@ -504,6 +527,13 @@ class SkeletalMeshAsset(Asset):
                 self.faces_end_bytes = None
                 self.data_start = 0  # offset within mesh_file BytesIO where this LOD's block begins
                 self.lod_unk = 0  # v11 only: unknown uint32
+                # exported vc when _write_mod_file used the cloth slot-preserving layout
+                self.exported_slot_identity = 0
+                # appended slot -> mmb_vertex_order source, from the export-time
+                # vertex set (includes seam-split duplicates the Blender mesh lacks)
+                self.exported_append_sources = {}
+                # first appended slot index (== original vc) of the last slot export
+                self.exported_append_base = 0
 
             @property
             def lod_field_offset(self):
@@ -986,6 +1016,7 @@ class SkeletalMeshAsset(Asset):
             self.zeroed_out_in_session = False # True if mesh was zeroed out this session
             self.zeroed_out_in_mmb = False     # True if mesh was zeroed out in the mmb
             self.lod_count = 0
+            self.lod_info_type = 0
             self.lods = []
             self.vertex_stride = 0
             self.normals_stride = 0
@@ -1048,13 +1079,24 @@ class SkeletalMeshAsset(Asset):
                 else:                  # v14, v15, v16, v17 with u_count == 0
                     lod_info_type = br.uint8(f)
 
+            self.lod_info_type = lod_info_type
             self.lod_count = br.uint8(f)
             f.seek(4, 1)  # unknown 4 bytes before LOD list
 
             # --- LOD list ---
             # v11: Each LOD is 40 bytes.
             # v12-v17: Each LOD is 36 bytes.
-            # lod_info_type == 2: 28 extra bytes per LOD (v15/v16/v17)
+            # lod_info_type == 2: 28 extra bytes per LOD (v15/v16/v17).
+            #   These hold a second per-LOD data block table (meshlet-style GPU data
+            #   stored after all primary LOD blocks) as 7 uint32s:
+            #     [0] cumulative offset of this LOD's block within the mesh's
+            #         reverse-ordered second-section data (like voa's base)
+            #     [1] meshlet descriptor count (32 bytes each)
+            #     [2..4] cumulative end offsets of descriptor/vertex/normal sub-blocks
+            #     [5] ABSOLUTE file offset of this LOD's second block
+            #     [6] size of this LOD's second block
+            #   Field [5] is the only absolute offset and must be shifted whenever
+            #   bytes are inserted/removed anywhere before it in the file.
             for l in range(self.lod_count):
                 lod = self.LOD(self, l)
                 lod.parse(f)
@@ -1609,7 +1651,7 @@ class BlenderMeshExporter:
             BME._compute_normals_for_object(obj)
 
     @staticmethod
-    def _write_mod_file(edited_lod_index_per_mesh: dict, out_path: str):
+    def _write_mod_file(edited_lod_index_per_mesh: dict, out_path: str, src_path: str = None):
         """
         For each mesh/LOD pair in edited_lod_index_per_mesh, the vertex, normal,
         and face data are rewritten from the current Blender mesh. All other LODs
@@ -1622,10 +1664,13 @@ class BlenderMeshExporter:
         :param edited_lod_index_per_mesh: dict mapping mesh_index -> lod_index to rewrite.
                A value of -1 means copy all LODs verbatim (no Blender mesh needed).
         :param out_path: destination file path to write.
+        :param src_path: file to copy unedited data from. Defaults to SWOMT.AssetPath.
+               ExportAllLODs passes the partially-written mod file here so each LOD
+               level accumulates on top of the previous one.
         """
         SWOMT = bpy.context.scene.SWOMT
-        src_path = SWOMT.AssetPath
-        export_normals = SWOMT.export_normals or _vert_count_changed()
+        if src_path is None:
+            src_path = SWOMT.AssetPath
 
         with open(src_path, 'rb') as src:
             file_data = bytearray(src.read())
@@ -1656,17 +1701,60 @@ class BlenderMeshExporter:
             new_vert_count  = len(obj.data.vertices)
             new_index_count = len(obj.data.polygons) * 3
 
+            # --- Slot-preserving layout for cloth render meshes ---
+            # The cloth runtime keys to the original vertex numbering: renumbering
+            # shreds the cloth in-game even with a fully consistent .mcloth.
+            # So every vertex keeps its ORIGINAL index slot - deleted vertices remain
+            # as face-less orphans copied verbatim, new vertices are appended.
+            slot_map = None # blender vertex index -> final slot index
+            slot_final_vc = new_vert_count
+            lod.exported_append_sources = {}
+            lod.exported_append_base = 0
+            if mesh.name.endswith('_CLOTH_RENDER'):
+                _orig_vc_file = unpack('<I', file_data[lod.start_offset:lod.start_offset + 4])[0]
+                if _orig_vc_file > 0:
+                    _attr = obj.data.attributes.get('mmb_vertex_order')
+                    # mmb_vertex_order values are valid slot claims only
+                    # when they refer to THIS LOD's original numbering.
+                    # Generated LODs carry LOD0 indices (mmb_lod_source) and from-scratch replacements
+                    # have no attribute: all their vertices are appended instead,
+                    # after the full set of orphaned original slots.
+                    _can_claim = (_attr is not None
+                                  and obj.get('mmb_lod_source', lod_index) == lod_index)
+                    slot_map = {}
+                    _claimed = set()
+                    _extras = []
+                    for _vi in range(new_vert_count):
+                        _ov = _attr.data[_vi].value if _can_claim else -1
+                        if 0 <= _ov < _orig_vc_file and _ov not in _claimed:
+                            slot_map[_vi] = _ov
+                            _claimed.add(_ov)
+                        else:
+                            _extras.append(_vi)
+                    for _k, _vi in enumerate(_extras):
+                        _slot = _orig_vc_file + _k
+                        slot_map[_vi] = _slot
+                        # Record each appended slot's source vertex for the
+                        # .mcloth row synthesis. Built here, from the EXPORT-time
+                        # vertex set: seam splitting may have appended duplicate
+                        # vertices that the restored Blender mesh doesn't have.
+                        if _attr is not None:
+                            lod.exported_append_sources[_slot] = _attr.data[_vi].value
+                    slot_final_vc = _orig_vc_file + len(_extras)
+                    lod.exported_append_base = _orig_vc_file
+
+            # The preserve-bytes path below copies a normals block sized for the
+            # original count, so rebuild whenever this LOD's count changed.
+            # Slot mode also rebuilds: rows are written into slot order.
+            export_normals = (SWOMT.export_normals or new_vert_count != lod.vertex_count or slot_map is not None)
+
             # Build new data blocks
             verts_buf = io.BytesIO()
             BME.write_vertices(verts_buf, mesh, lod_index)
-            if lod.vertex_end_bytes:
-                verts_buf.write(lod.vertex_end_bytes)
 
             norms_buf = io.BytesIO()
             if export_normals:
                 BME.write_normals(norms_buf, mesh, lod_index)
-                if lod.normals_end_bytes:
-                    norms_buf.write(lod.normals_end_bytes)
             else:
                 # Preserve the original normals bytes from the source file unchanged.
                 orig_higher_size = sum(
@@ -1689,13 +1777,54 @@ class BlenderMeshExporter:
             orig_sa_pre = unpack('<I', file_data[lod.start_offset + lod.lod_field_offset + 8: lod.start_offset + lod.lod_field_offset + 12])[0]
             orig_fb_pre = unpack('<I', file_data[lod.start_offset + lod.lod_field_offset + 20: lod.start_offset + lod.lod_field_offset + 24])[0]
             orig_uses_uint32_pre = (orig_fb_pre > 0 and orig_sa_pre == orig_fb_pre // 4)
-            BME.write_triangles(faces_buf, mesh, lod_index, force_uint32=orig_uses_uint32_pre or new_vert_count > 65535)
-            if lod.faces_end_bytes:
-                faces_buf.write(lod.faces_end_bytes)
+            use_uint32_faces = orig_uses_uint32_pre or slot_final_vc > 65535
+            BME.write_triangles(faces_buf, mesh, lod_index, force_uint32=use_uint32_faces)
 
             vd = verts_buf.getvalue()
             nd = norms_buf.getvalue()
             fd = faces_buf.getvalue()
+
+            if slot_map is not None:
+                # Write the Blender-order rows into original-slot order.
+                # Unclaimed slots (deleted vertices) keep their original bytes.
+                _orig_vc_file = unpack('<I', file_data[lod.start_offset:lod.start_offset + 4])[0]
+                _higher = sum(mesh.lods[li].data_size
+                              for li in range(lod_index + 1, len(mesh.lods)))
+                _abs_voa = lod.data_offset + (lod.vertex_data_offset_a - _higher)
+                _abs_vob = lod.data_offset + (lod.vertex_data_offset_b - _higher)
+                vs = mesh.vertex_stride
+                ns = mesh.normals_stride
+
+                _vd_out = bytearray(slot_final_vc * vs)
+                _vd_out[:_orig_vc_file * vs] = file_data[_abs_voa:_abs_voa + _orig_vc_file * vs]
+                _nd_out = bytearray(slot_final_vc * ns)
+                _nd_out[:_orig_vc_file * ns] = file_data[_abs_vob:_abs_vob + _orig_vc_file * ns]
+                for _vi, _slot in slot_map.items():
+                    _vd_out[_slot * vs:(_slot + 1) * vs] = vd[_vi * vs:(_vi + 1) * vs]
+                    _nd_out[_slot * ns:(_slot + 1) * ns] = nd[_vi * ns:(_vi + 1) * ns]
+                vd = bytes(_vd_out)
+                nd = bytes(_nd_out)
+
+                # Remap face indices from Blender numbering to slot numbering.
+                _isz = 4 if use_uint32_faces else 2
+                _ifmt = '<I' if use_uint32_faces else '<H'
+                _fd_out = bytearray(len(fd))
+                for _o in range(0, len(fd), _isz):
+                    _bvi = unpack(_ifmt, fd[_o:_o + _isz])[0]
+                    _fd_out[_o:_o + _isz] = pack(_ifmt, slot_map[_bvi])
+                fd = bytes(_fd_out)
+
+                new_vert_count = slot_final_vc
+
+            if lod.vertex_end_bytes:
+                vd += lod.vertex_end_bytes
+            if export_normals and lod.normals_end_bytes:
+                nd += lod.normals_end_bytes
+            if lod.faces_end_bytes:
+                fd += lod.faces_end_bytes
+
+            # Signal the .mcloth rewriter to keep every row (identity mapping)
+            lod.exported_slot_identity = (slot_final_vc if slot_map is not None else 0)
 
             # higher_size: sum of data_size for LODs with index -> lod_index in this mesh.
             higher_size = sum(
@@ -1753,7 +1882,12 @@ class BlenderMeshExporter:
             if delta > 0:
                 # Growing: insert delta bytes into file_data at insert_at
                 file_data[insert_at:insert_at] = b'\x00' * delta
+            elif delta < 0:
+                # Shrinking: remove the freed bytes from file_data
+                shrink_start = lod.data_offset + intra_voa + new_data_size
+                del file_data[shrink_start:insert_at]
 
+            if delta != 0:
                 # Update data_offset for every LOD in every mesh whose block starts after the insertion point
                 for other_mesh in asset.meshes:
                     for other_lod in other_mesh.lods:
@@ -1767,41 +1901,35 @@ class BlenderMeshExporter:
                     asset_size += delta
                     file_data[4:8] = pack('<I', asset_size)
 
-                # Update voa/vob/fb for lower-indexed LODs in this mesh.
+                # Update voa/vob/fb AND size_a for lower-indexed LODs in this mesh.
+                # size_a must stay fb//2 (fb//4 for uint32 indices) or the mesh
+                # corrupts in-game.
                 for li in range(0, lod_index):
                     other_lod = mesh.lods[li]
                     so = other_lod.start_offset
                     fo = other_lod.lod_field_offset
+                    old_fb = unpack('<I', file_data[so + fo + 20:so + fo + 24])[0]
+                    old_sa = unpack('<I', file_data[so + fo + 8:so + fo + 12])[0]
                     for field_off in (12, 16, 20):  # voa, vob, fb
                         old = unpack('<I', file_data[so + fo + field_off:so + fo + field_off + 4])[0]
                         file_data[so + fo + field_off:so + fo + field_off + 4] = pack('<I', old + delta)
+                    other_uses_uint32 = (old_fb > 0 and old_sa == old_fb // 4)
+                    new_sa = (old_fb + delta) // 4 if other_uses_uint32 else (old_fb + delta) // 2
+                    file_data[so + fo + 8:so + fo + 12] = pack('<I', new_sa)
 
-            elif delta < 0:
-                # Shrinking: remove the freed bytes from file_data
-                shrink_start = lod.data_offset + intra_voa + new_data_size
-                del file_data[shrink_start:insert_at]
-
-                # Update data_offset for every LOD whose block starts after this one
+                # Shift the second-section ABSOLUTE offsets - field [5] of the 28
+                # extra LOD header bytes (see the LOD list notes in Mesh.parse),
+                # located at data_offset field + 32. Those blocks live after all
+                # primary LOD blocks, so resizing any LOD moves them. '>=' matters:
+                # the first block starts exactly at insert_at when LOD0 grows.
                 for other_mesh in asset.meshes:
+                    if getattr(other_mesh, 'lod_info_type', 0) != 2:
+                        continue
                     for other_lod in other_mesh.lods:
-                        if other_lod.data_offset > lod.data_offset:
-                            fp = other_lod.data_offset_file_pos
-                            old_val = unpack('<I', file_data[fp:fp + 4])[0]
-                            file_data[fp:fp + 4] = pack('<I', old_val + delta)
-
-                # Update asset.size if the edited LOD lives in the header section
-                if lod.data_offset < asset_size:
-                    asset_size += delta
-                    file_data[4:8] = pack('<I', asset_size)
-
-                # Update voa/vob/fb for lower-indexed LODs in this mesh
-                for li in range(0, lod_index):
-                    other_lod = mesh.lods[li]
-                    so = other_lod.start_offset
-                    shift = other_lod.lod_field_offset
-                    for field_off in (12, 16, 20): # voa, vob, fb
-                        old = unpack('<I', file_data[so + shift + field_off:so + shift + field_off + 4])[0]
-                        file_data[so + shift + field_off:so + shift + field_off + 4] = pack('<I', old + delta)
+                        sp = other_lod.data_offset_file_pos + 32
+                        old_val = unpack('<I', file_data[sp:sp + 4])[0]
+                        if old_val >= insert_at:
+                            file_data[sp:sp + 4] = pack('<I', old_val + delta)
 
             # Write the new vertex/normal/face data at their correct positions.
             abs_voa     = lod.data_offset + intra_voa
@@ -1910,6 +2038,10 @@ class BlenderMeshExporter:
             old_u = unpack('<H', file_data[mesh.u_count_offset:mesh.u_count_offset + 2])[0]
             file_data[mesh.u_count_offset:mesh.u_count_offset + 2] = pack('<H', old_u + n)
 
+            # The bone table lives in the header section - grow asset.size to match.
+            old_asset_size = unpack('<I', file_data[4:8])[0]
+            file_data[4:8] = pack('<I', old_asset_size + inserted_bytes)
+
             for other_mesh in skeletal_mesh.meshes:
                 for lod in other_mesh.lods:
                     if lod.data_offset_file_pos > insert_at:
@@ -1919,6 +2051,13 @@ class BlenderMeshExporter:
                     old_val = unpack('<I', file_data[field_pos:field_pos + 4])[0]
                     if old_val > 0:
                         file_data[field_pos:field_pos + 4] = pack('<I', old_val + inserted_bytes)
+                    # Shift the second-section absolute offset (field [5], data_offset field
+                    # + 32; see Mesh.parse) too.
+                    if getattr(other_mesh, 'lod_info_type', 0) == 2:
+                        sp = field_pos + 32
+                        sec2_val = unpack('<I', file_data[sp:sp + 4])[0]
+                        if sec2_val > 0:
+                            file_data[sp:sp + 4] = pack('<I', sec2_val + inserted_bytes)
                     lod.data_offset += inserted_bytes
                     lod.data_offset_file_pos = field_pos
 
@@ -2126,8 +2265,10 @@ class BlenderMeshExporter:
             else:
                 original_w = [None] * len(data.vertices)
 
-            # Read original weight+index bytes per vertex when vert count is unchanged and export_weights is unchecked.
-            export_weights = bpy.context.scene.SWOMT.export_weights or _vert_count_changed()
+            # Read original weight+index bytes per vertex when THIS LOD's vert count
+            # is unchanged (they are indexed by vertex index) and export_weights is unchecked.
+            export_weights = (bpy.context.scene.SWOMT.export_weights
+                              or len(data.vertices) != lod.vertex_count)
             weight_bytes_per_vert = stride - pos_length
 
             # Compute abs_voa once for weight reading (use orig_data_offset from file)
@@ -2441,6 +2582,16 @@ class BlenderMeshExporter:
         f = file
         obj = BME.find_object_by_name(mesh.name + f"_LOD{lod_index}")
         lod: SkeletalMeshAsset.Mesh.LOD = mesh.lods[lod_index]
+
+        # Per-vertex preservation data (colors/UVs/trailing/tangents) must be read from the
+        # LOD whose numbering mmb_vertex_order refers to - generated LODs carry LOD0 indices (mmb_lod_source).
+        # Vertex colors in particular hold the cloth driven-mask, so a wrong source scrambles it.
+        pres_li = lod_index
+        if obj is not None:
+            _src = obj.get('mmb_lod_source', lod_index)
+            if isinstance(_src, int) and 0 <= _src < len(mesh.lods):
+                pres_li = _src
+        pres_lod = mesh.lods[pres_li]
         if obj:
             data = obj.data
 
@@ -2515,7 +2666,7 @@ class BlenderMeshExporter:
                 NTB[l.vertex_index] = (l.normal, l.tangent, flip)
 
             SWOMT = bpy.context.scene.SWOMT
-            export_uvs = SWOMT.export_uvs or _vert_count_changed()
+            export_uvs = SWOMT.export_uvs or len(data.vertices) != lod.vertex_count
 
             if mesh.normal_type == 0:
                 # int8_norm format:
@@ -2527,19 +2678,24 @@ class BlenderMeshExporter:
                 # Read original nw and tangent bytes from source for all vertices.
                 SWOMT = bpy.context.scene.SWOMT
                 # Always read nw and tangent bytes from the original asset file.
-                higher_size = sum(
-                    mesh.lods[li].data_size
-                    for li in range(lod_index + 1, len(mesh.lods))
-                )
                 vert_count_unchanged = len(data.vertices) == lod.vertex_count
                 with open(SWOMT.AssetPath, 'rb') as orig_src:
                     orig_file_bytes = orig_src.read()
-                orig_do  = unpack('<I', orig_file_bytes[lod.data_offset_file_pos:lod.data_offset_file_pos+4])[0]
-                orig_vob = unpack('<I', orig_file_bytes[lod.start_offset + lod.lod_field_offset + 16:lod.start_offset + lod.lod_field_offset + 20])[0]
-                orig_voa = unpack('<I', orig_file_bytes[lod.start_offset + lod.lod_field_offset + 12:lod.start_offset + lod.lod_field_offset + 16])[0]
+                # Higher-LOD data sizes must come from the ORIGINAL file too:
+                # in-memory sizes already reflect earlier passes of a multi-LOD
+                # export, which would corrupt the preservation read offsets.
+                higher_size = sum(
+                    unpack('<I', orig_file_bytes[
+                        mesh.lods[li].start_offset + mesh.lods[li].lod_field_offset + 28:
+                        mesh.lods[li].start_offset + mesh.lods[li].lod_field_offset + 32])[0]
+                    for li in range(pres_li + 1, len(mesh.lods))
+                )
+                orig_do  = unpack('<I', orig_file_bytes[pres_lod.data_offset_file_pos:pres_lod.data_offset_file_pos+4])[0]
+                orig_vob = unpack('<I', orig_file_bytes[pres_lod.start_offset + pres_lod.lod_field_offset + 16:pres_lod.start_offset + pres_lod.lod_field_offset + 20])[0]
+                orig_voa = unpack('<I', orig_file_bytes[pres_lod.start_offset + pres_lod.lod_field_offset + 12:pres_lod.start_offset + pres_lod.lod_field_offset + 16])[0]
                 abs_vob_src = orig_do + (orig_vob - higher_size)
                 abs_voa_src = orig_do + (orig_voa - higher_size)
-                orig_vc_src = unpack('<I', orig_file_bytes[lod.start_offset:lod.start_offset+4])[0]
+                orig_vc_src = unpack('<I', orig_file_bytes[pres_lod.start_offset:pres_lod.start_offset+4])[0]
                 ns = mesh.normals_stride
                 vs = mesh.vertex_stride
 
@@ -2727,17 +2883,22 @@ class BlenderMeshExporter:
                 # float format (normal_type == 1 or 2).
                 # normal_type 1: color(4*cc) | normal(12f) | tangent(12f) | sign(4f) | UV(4*uv)
                 SWOMT = bpy.context.scene.SWOMT
-                higher_size = sum(
-                    mesh.lods[li].data_size
-                    for li in range(lod_index + 1, len(mesh.lods))
-                )
                 vert_count_unchanged = len(data.vertices) == lod.vertex_count
                 with open(SWOMT.AssetPath, 'rb') as orig_src:
                     orig_file_bytes = orig_src.read()
-                orig_do  = unpack('<I', orig_file_bytes[lod.data_offset_file_pos:lod.data_offset_file_pos+4])[0]
-                orig_vob = unpack('<I', orig_file_bytes[lod.start_offset+lod.lod_field_offset+16:lod.start_offset+lod.lod_field_offset+20])[0]
+                # Higher-LOD data sizes must come from the ORIGINAL file too:
+                # in-memory sizes already reflect earlier passes of a multi-LOD
+                # export, which would corrupt the preservation read offsets.
+                higher_size = sum(
+                    unpack('<I', orig_file_bytes[
+                        mesh.lods[li].start_offset + mesh.lods[li].lod_field_offset + 28:
+                        mesh.lods[li].start_offset + mesh.lods[li].lod_field_offset + 32])[0]
+                    for li in range(pres_li + 1, len(mesh.lods))
+                )
+                orig_do  = unpack('<I', orig_file_bytes[pres_lod.data_offset_file_pos:pres_lod.data_offset_file_pos+4])[0]
+                orig_vob = unpack('<I', orig_file_bytes[pres_lod.start_offset+pres_lod.lod_field_offset+16:pres_lod.start_offset+pres_lod.lod_field_offset+20])[0]
                 abs_vob_src = orig_do + (orig_vob - higher_size)
-                orig_vc_src = unpack('<I', orig_file_bytes[lod.start_offset:lod.start_offset+4])[0]
+                orig_vc_src = unpack('<I', orig_file_bytes[pres_lod.start_offset:pres_lod.start_offset+4])[0]
                 ns = mesh.normals_stride
 
                 orig_colors = []
@@ -3022,13 +3183,11 @@ def _auto_load_mmb(self, context):
         print(f"MMB auto-load failed: {e}")
 
 def _vert_count_changed():
-    """Return True if any imported LOD0 Blender object has a different vert count than the MMB."""
+    """Return True if any imported LOD Blender object has a different vert count than the MMB."""
     if asset is None:
         return False
     for m in asset.meshes:
         for li, lod in enumerate(m.lods):
-            if li != 0:
-                continue
             if lod.vertex_count == 0:
                 continue
             obj_name = lod.blender_obj_name or f"{m.name}_LOD{li}"
@@ -3159,6 +3318,15 @@ class SWOMTSettings(bpy.types.PropertyGroup):
         default=False,
         description="Write vertex colors from Blender into the exported file. When unchecked, the original vertex colors from the .mmb are preserved.",
         update=_on_export_vertex_colors_update,
+    )
+    cloth_donor_radius: bpy.props.FloatProperty(
+        name="Cloth Donor Radius",
+        default=0.05,
+        min=0.001,
+        soft_max=0.5,
+        precision=3,
+        subtype='DISTANCE',
+        description="Verts added to a '_CLOTH_RENDER' mesh inherit cloth behavior from the nearest original vertex within this distance.",
     )
     export_uvs: bpy.props.BoolProperty(
         name="Export UVs",
@@ -3448,15 +3616,6 @@ class ExportLOD(bpy.types.Operator):
         tri_obj = BME.find_object_by_name(lod_obj_name)
         original_data = {}
 
-        # Block export of LOD1-3 when vert count has changed. LOD0 is not streamed and exports correctly.
-        if self.lod_index > 0 and tri_obj is not None:
-            new_vc = len(tri_obj.data.vertices)
-            if new_vc != lod.vertex_count:
-                self.report({'ERROR'},
-                    f"Cannot export '{mesh.name}' LOD{self.lod_index}: vertex count changed "
-                    f"({lod.vertex_count} -> {new_vc}). Only LOD0 supports vertex count changes.")
-                return {'CANCELLED'}
-
         if tri_obj:
             original_data = tri_obj.data
             BME._triangulate_object(tri_obj,
@@ -3484,11 +3643,17 @@ class ExportLOD(bpy.types.Operator):
         for mesh in asset.meshes:
             BME._apply_header_patches(mod_file, mesh, asset, operator=self)
 
+        # Rewrite the paired .mcloth (if any) so the cloth vertex mapping matches this export
+        _export_mcloth_for_asset(mod_file, operator=self)
+
         # Apply staged file rename
         if asset.pending_file_rename_new:
             new_file = str(Path(mod_file).parent / (asset.pending_file_rename_new + '.mmb'))
             try:
                 os.replace(mod_file, new_file)
+                _mc_out = os.path.splitext(mod_file)[0] + '.mcloth'
+                if os.path.isfile(_mc_out):
+                    os.replace(_mc_out, os.path.splitext(new_file)[0] + '.mcloth')
             except Exception as e:
                 self.report({'ERROR'}, f"Failed to rename mod file: {e}")
                 return {'FINISHED'}
@@ -3497,6 +3662,502 @@ class ExportLOD(bpy.types.Operator):
         else:
             SWOMT.AssetPath = mod_file
 
+        return {'FINISHED'}
+
+def _max_weights_for_mesh(mesh):
+    """Max bone influences per vertex that the mesh's vertex stride can store.
+    Mirrors the per-stride weight layouts in get_bone_weights/write_vertices."""
+    stride = mesh.vertex_stride
+    pos_length = 12 if mesh.position_type == 1 else 8
+    if stride == 12:
+        return 1   # 4x uint8 index, weight 1.0 on first index
+    if stride == 16:
+        return 1 if mesh.position_type == 1 else 2  # float pos: single index; int16 pos: 2 weights
+    if stride == 20:
+        return 2 if mesh.position_type == 1 else 4
+    if stride == 32:
+        # Layout B (>256 bone slots) holds 6; layout A holds 8 (C holds 12 but 8 is a safe cap).
+        return 6 if len(mesh.mesh_bones) > 256 else 8
+    if stride in (36, 40):
+        return 8
+    if stride == 44:
+        return 12
+    return max(1, (stride - pos_length) // 2)  # packed uint8 weight+index pairs
+
+def _limit_vertex_weights(obj, limit):
+    """Keep the highest vertex-group weights per vertex, removing the lowest and
+    normalizing the remaining. Returns the number of vertices that were trimmed."""
+    trimmed = 0
+    for v in obj.data.vertices:
+        entries = [(g.group, g.weight) for g in v.groups]
+        if len(entries) <= limit:
+            continue
+        entries.sort(key=lambda e: e[1], reverse=True)
+        for gi, _w in entries[limit:]:
+            obj.vertex_groups[gi].remove([v.index])
+        keep = entries[:limit]
+        total = sum(w for _gi, w in keep)
+        if total > 0:
+            for gi, w in keep:
+                obj.vertex_groups[gi].add([v.index], w / total, 'REPLACE')
+        trimmed += 1
+    return trimmed
+
+
+# --- .mcloth support ---
+# Format documentation and the pure reader/writer live in mcloth.py.
+# Below is only the Blender-side layer that collects vertex mappings from the
+# scene and drives mcloth.rewrite() after an mmb export.
+
+def _export_mcloth_for_asset(out_mmb_path, operator=None):
+    """
+    After the mmb has been exported, remap the paired .mcloth for every cloth
+    render mesh LOD object present in the scene and write it next to the
+    exported mmb. No-op when the asset has no _CLOTH_RENDER meshes.
+    """
+    cloth_meshes = [m for m in asset.meshes if m.name.endswith('_CLOTH_RENDER')]
+    if not cloth_meshes:
+        return
+    if mcloth is None:
+        if operator:
+            operator.report({'WARNING'},
+                "mcloth.py is missing - cloth vertex mapping was NOT updated. "
+                "Restart Blender to let the plugin download it.")
+        return
+    SWOMT = bpy.context.scene.SWOMT
+    src_path = mcloth.source_path(SWOMT.AssetPath)
+    if src_path is None:
+        if operator:
+            operator.report({'WARNING'},
+                "Asset has cloth meshes but no paired .mcloth file was found - "
+                "cloth vertex mapping was NOT updated.")
+        return
+    with open(src_path, 'rb') as f:
+        data = f.read()
+    try:
+        _stream_end, blocks = mcloth.parse_blocks(data)
+    except ValueError as e:
+        if operator:
+            operator.report({'WARNING'}, f"Could not parse '{os.path.basename(src_path)}': {e}")
+        return
+
+    remaps = {}
+    gen_info = {} # block_name -> (obj, lod, li) for slot exports with appended verts
+    for mesh in cloth_meshes:
+        for li, lod in enumerate(mesh.lods):
+            obj_name = lod.blender_obj_name or f"{mesh.name}_LOD{li}"
+            obj = bpy.data.objects.get(obj_name)
+            if obj is None or len(obj.data.vertices) == 0:
+                continue
+            block_name = mesh.name if li == 0 else f"{mesh.name}_LOD{li}"
+            if block_name not in blocks:
+                continue
+            slot_vc = getattr(lod, 'exported_slot_identity', 0)
+            if slot_vc:
+                # Slot-preserving export: original indices kept, keep every row.
+                # Appended vertices with a driven source vertex (generated LODs)
+                # additionally get COMPUTED rows below - the row values are a
+                # pure function of (rest position/normal/tangent, sim triangle).
+                remaps[block_name] = (slot_vc, block_name,
+                                      {i: i for i in range(slot_vc)})
+                # Register for row synthesis whenever appended slots exist:
+                # generated LODs, added verts, seam splits, custom meshes.
+                if slot_vc > getattr(lod, 'exported_append_base', slot_vc):
+                    gen_info[block_name] = (obj, lod, li)
+                continue
+            # Renumbered fallback (non-slot exports).
+            # Generated LODs carry LOD0-based mmb_vertex_order values, so their rows must be pulled
+            # from LOD0's block (see GenerateLODs).
+            src_li = obj.get('mmb_lod_source', li)
+            src_block = mesh.name if src_li == 0 else f"{mesh.name}_LOD{src_li}"
+            if src_block not in blocks:
+                continue
+            new_vc = len(obj.data.vertices)
+            attr = obj.data.attributes.get('mmb_vertex_order')
+            old_to_new = {}
+            if attr is not None:
+                for vi in range(new_vc):
+                    ov = attr.data[vi].value
+                    if ov not in old_to_new:
+                        old_to_new[ov] = vi
+            else:
+                # No mapping attribute (fully replaced mesh): fall back to identity
+                old_to_new = {i: i for i in range(new_vc)}
+            remaps[block_name] = (new_vc, src_block, old_to_new)
+
+    if not remaps:
+        return
+
+    # Read sim geometry + new render geometry from the exported mmb: used to
+    # rebind heights (moved vertices) and to build full rows for appended
+    # vertices (generated LODs, added verts, seam splits, custom meshes).
+    rebind = {}
+    computed = {}
+    mmb_color_patches = []
+    try:
+        with open(out_mmb_path, 'rb') as f:
+            new_bytes = f.read()
+        new_asset = SkeletalMeshAsset()
+        new_asset.parse(io.BytesIO(new_bytes))
+        for mesh in cloth_meshes:
+            sim_name = mesh.name[:-len('_RENDER')] + '_SIM'
+            new_render = next((m for m in new_asset.meshes if m.name == mesh.name), None)
+            new_sim = next((m for m in new_asset.meshes if m.name == sim_name), None)
+            if new_render is None or new_sim is None or not new_sim.lods:
+                continue
+            sim_verts = mcloth.mmb_lod_float_positions(new_bytes, new_sim, 0)
+            sim_tris = mcloth.mmb_lod_u16_tris(new_bytes, new_sim, 0)
+            if sim_verts is None or sim_tris is None:
+                continue
+            for li in range(len(new_render.lods)):
+                block_name = mesh.name if li == 0 else f"{mesh.name}_LOD{li}"
+                if block_name not in remaps:
+                    continue
+                pos = mcloth.mmb_lod_float_positions(new_bytes, new_render, li)
+                if pos is None:
+                    continue
+                rebind[block_name] = (sim_verts, sim_tris, pos)
+
+                # Computed rows for appended slots. Three sources of binding:
+                #   1. a driven mmb_vertex_order source vertex (edited/generated
+                #      meshes) - inherit its sim triangle;
+                #   2. no usable source (custom from-scratch meshes, attribute
+                #      interpolation noise) - inherit driven status, triangle
+                #      AND mask/blend colors from the NEAREST ORIGINAL vertex
+                #      (the orphan slots 0..append_base carry the originals);
+                #   3. vanilla rules: overlapping twins of driven verts and
+                #      mask-flagged verts get rows too.
+                # Row values are always computed from the vertex's own exported
+                # geometry; colors are patched into the mmb where computed.
+                gi = gen_info.get(block_name)
+                if gi is None:
+                    continue
+                obj, lod_mem, li_ = gi
+                append_sources = getattr(lod_mem, 'exported_append_sources', {})
+                append_base = getattr(lod_mem, 'exported_append_base', 0)
+                slot_total = getattr(lod_mem, 'exported_slot_identity', 0)
+                src_li = obj.get('mmb_lod_source', li_)
+                src_block = mesh.name if src_li == 0 else f"{mesh.name}_LOD{src_li}"
+                nt = mcloth.mmb_lod_normals_tangents(new_bytes, new_render, li_)
+                if nt is None or slot_total <= append_base:
+                    continue
+
+                def _tri_map(bname):
+                    bb = blocks[bname]
+                    i3, s3 = bb['chunks'][mcloth.T_INDICES]
+                    nB = (s3 - 8) // 4
+                    six = unpack(f'<{nB}I', data[i3 + 8:i3 + s3])
+                    t3 = bb['chunks'][mcloth.T_TRI][0] + 8
+                    return {ov: unpack('<H', data[t3 + r * 2:t3 + r * 2 + 2])[0]
+                            for r, ov in enumerate(six)}
+
+                src_tri = _tri_map(src_block) if src_block in blocks else {}
+                own_tri = (src_tri if src_block == block_name
+                           else _tri_map(block_name))
+                colors = mcloth.mmb_lod_color_bytes(new_bytes, new_render, li_)
+                attr_present = obj.data.attributes.get('mmb_vertex_order') is not None
+                # Donor color patching is the fallback for meshes without
+                # authored cloth colors. With 'Export Vertex Colors' checked the
+                # user's own colors are already in the file - leave them alone,
+                # and let their mask also decide driven status: verts painted
+                # black get no row at all (vanilla non-driven verts have no
+                # rows - the engine honors driven status, not just blend 0).
+                # Vanilla rule: non-driven flag is EXACTLY 0; driven runs
+                # 18..255 - so only flag 0 opts out.
+                donor_colors = None if SWOMT.export_vertex_colors else colors
+                user_mask = SWOMT.export_vertex_colors and colors is not None
+
+                # Spatial grid over the original (orphan) vertices for
+                # nearest-original lookups.
+                _MAXD = SWOMT.cloth_donor_radius # inherit nothing beyond this
+                _CELL = max(0.02, _MAXD / 2.0)   # keep the probe loop bounded
+                grid = {}
+                for v in range(min(append_base, len(pos))):
+                    p = pos[v]
+                    grid.setdefault((int(p[0] / _CELL), int(p[1] / _CELL),
+                                     int(p[2] / _CELL)), []).append(v)
+
+                def _nearest_original(p):
+                    cx, cy, cz = int(p[0] / _CELL), int(p[1] / _CELL), int(p[2] / _CELL)
+                    rng = int(_MAXD / _CELL) + 1
+                    best, bd = None, _MAXD * _MAXD
+                    for dx in range(-rng, rng + 1):
+                        for dy in range(-rng, rng + 1):
+                            for dz in range(-rng, rng + 1):
+                                for v in grid.get((cx + dx, cy + dy, cz + dz), ()):
+                                    q = pos[v]
+                                    d = ((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2
+                                         + (p[2] - q[2]) ** 2)
+                                    if d < bd:
+                                        bd, best = d, v
+                    return best
+
+                def _computed_row(slot, ti):
+                    vals = mcloth.compute_row_values(
+                        sim_verts, sim_tris, ti,
+                        pos[slot], nt[slot][0], nt[slot][1])
+                    # Re-attach to the truly nearest triangle when the foot
+                    # lands far outside the given one - keeps the quantization
+                    # ranges tight and the binding local.
+                    if vals is not None and not mcloth.bary_within(vals):
+                        ti2 = mcloth.nearest_tri(sim_verts, sim_tris, pos[slot])
+                        if ti2 is not None and ti2 != ti:
+                            v2 = mcloth.compute_row_values(
+                                sim_verts, sim_tris, ti2,
+                                pos[slot], nt[slot][0], nt[slot][1])
+                            if v2 is not None:
+                                return v2, True
+                    return vals, False
+
+                rows = {}
+                pos_twin = {} # position -> a driven appended slot there
+                color_patches = [] # (slot, donor vertex index)
+                retargeted = twins = flagged = transferred = 0
+
+                # Pass 1: driven source vertex, else nearest-original transfer
+                for slot in range(append_base, min(slot_total, len(pos))):
+                    if user_mask and colors[slot][0] == 0:
+                        continue
+                    ov = append_sources.get(slot)
+                    if ov is not None and ov in src_tri:
+                        vals, retg = _computed_row(slot, src_tri[ov])
+                        if vals is not None:
+                            rows[slot] = vals
+                            retargeted += int(retg)
+                            pos_twin.setdefault(pos[slot], slot)
+                        continue
+                    o = _nearest_original(pos[slot])
+                    if o is None:
+                        continue
+                    if o in own_tri:
+                        vals, _ = _computed_row(slot, own_tri[o])
+                        if vals is not None:
+                            rows[slot] = vals
+                            transferred += 1
+                            pos_twin.setdefault(pos[slot], slot)
+                            if donor_colors is not None:
+                                color_patches.append((slot, o)) # driven needs the donor's mask/blend colors
+                    elif not attr_present and donor_colors is not None:
+                        # non-driven region: still give custom meshes proper (non-driven) mask colors
+                        color_patches.append((slot, o))
+
+                # Pass 2: vanilla rules for the remaining slots -
+                # overlapping twins of driven verts get rows + the twin's colors
+                # (blend weight); mask-flagged verts get nearest-tri rows.
+                for slot in range(append_base, min(slot_total, len(pos))):
+                    if slot in rows or (user_mask and colors[slot][0] == 0):
+                        continue
+                    twin = pos_twin.get(pos[slot])
+                    if twin is not None:
+                        vals, _ = _computed_row(slot, rows[twin]['tri'])
+                        if vals is not None:
+                            rows[slot] = vals
+                            twins += 1
+                            if donor_colors is not None:
+                                color_patches.append((slot, twin))
+                        continue
+                    # File colors are reliable when they came from the
+                    # original (attr present) or from the user's own layers
+                    # (Export Vertex Colors) - never for attr-less appends.
+                    # User colors follow the vanilla >0 rule; preserved colors
+                    # keep the conservative 128 cut (interp noise).
+                    if (colors is not None
+                            and ((user_mask and colors[slot][0] > 0)
+                                 or (attr_present and colors[slot][0] >= 128))):
+                        ti = mcloth.nearest_tri(sim_verts, sim_tris, pos[slot])
+                        if ti is not None:
+                            vals, _ = _computed_row(slot, ti)
+                            if vals is not None:
+                                rows[slot] = vals
+                                flagged += 1
+
+                if rows:
+                    computed[block_name] = sorted(rows.items())
+                    print(f"[AFoPMT] {block_name}: computed rows for {len(rows)}"
+                          f"/{slot_total - append_base} appended vert(s) "
+                          f"({retargeted} re-attached, {transferred} nearest-"
+                          f"transferred, {twins} twin(s), {flagged} mask-flagged)")
+                if color_patches:
+                    lodn = new_render.lods[li_]
+                    hi = sum(new_render.lods[k].data_size
+                             for k in range(li_ + 1, len(new_render.lods)))
+                    vob_abs = lodn.data_offset + (lodn.vertex_data_offset_b - hi)
+                    ns_ = new_render.normals_stride
+                    for slot, donor in color_patches:
+                        mmb_color_patches.append(
+                            (vob_abs + slot * ns_, bytes(colors[donor])))
+    except Exception as e:
+        print(f"[AFoPMT] mcloth geometry pass skipped: {e}")
+        rebind = {}
+        computed = {}
+        mmb_color_patches = []
+
+    # Computed verts need their donor's cloth mask/blend colors in the
+    # exported mmb as well - a row alone blends to fully skinned at blend 0.
+    if mmb_color_patches:
+        try:
+            with open(out_mmb_path, 'r+b') as f:
+                for _off, _byts in mmb_color_patches:
+                    f.seek(_off)
+                    f.write(_byts)
+            print(f"[AFoPMT] patched cloth mask colors for "
+                  f"{len(mmb_color_patches)} appended vert(s)")
+        except OSError as e:
+            print(f"[AFoPMT] cloth color patch failed: {e}")
+
+    out_bytes, stats = mcloth.rewrite(data, remaps, rebind=rebind, computed=computed)
+    out_path = os.path.splitext(out_mmb_path)[0] + '.mcloth'
+    with open(out_path, 'wb') as f:
+        f.write(out_bytes)
+    if operator:
+        parts = ', '.join(f"{name.rsplit('_CLOTH_RENDER', 1)[-1] or 'LOD0'} {ob}->{nb}"
+                          for name, (ob, nb) in stats.items())
+        operator.report({'INFO'},
+            f"Cloth mapping updated -> {os.path.basename(out_path)} (driven verts: {parts})")
+
+
+class GenerateLODs(bpy.types.Operator):
+    """Generate LOD meshes by decimating the imported LOD0 mesh"""
+    bl_idname = 'object.generate_lods'
+    bl_label = 'Generate LODs'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    mesh_index: bpy.props.IntProperty(options={'HIDDEN'})
+    ratio_lod1: bpy.props.FloatProperty(
+        name="LOD1 Ratio", default=0.5, min=0.01, max=1.0,
+        description="Decimate ratio for LOD1, relative to LOD0")
+    ratio_lod2: bpy.props.FloatProperty(
+        name="LOD2 Ratio", default=0.25, min=0.01, max=1.0,
+        description="Decimate ratio for LOD2, relative to LOD0")
+    ratio_lod3: bpy.props.FloatProperty(
+        name="LOD3 Ratio", default=0.125, min=0.01, max=1.0,
+        description="Decimate ratio for LOD3, relative to LOD0")
+    replace_existing: bpy.props.BoolProperty(
+        name="Replace Existing LOD Objects", default=True,
+        description="Replace LOD 1-3 objects already in the scene")
+
+    @classmethod
+    def poll(cls, context):
+        return asset is not None
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        layout = self.layout
+        mesh = asset.meshes[self.mesh_index]
+        layout.label(text=f"Generate LODs for '{mesh.name}' from LOD0")
+        layout.label(text=f"Max weights per vertex: {_max_weights_for_mesh(mesh)} (vertex stride {mesh.vertex_stride})")
+        for li in range(1, min(len(mesh.lods), 4)):
+            layout.prop(self, f"ratio_lod{li}")
+        layout.prop(self, "replace_existing")
+
+    def execute(self, context):
+        if bpy.context.active_object and bpy.context.active_object.mode == 'EDIT':
+            for window in bpy.context.window_manager.windows:
+                for area in window.screen.areas:
+                    if area.type == 'VIEW_3D':
+                        with bpy.context.temp_override(window=window, area=area):
+                            bpy.ops.object.mode_set(mode='OBJECT')
+                        break
+
+        mesh = asset.meshes[self.mesh_index]
+        if len(mesh.lods) < 2:
+            self.report({'ERROR'}, f"'{mesh.name}' has no LOD1+ entries in the MMB.")
+            return {'CANCELLED'}
+
+        lod0 = mesh.lods[0]
+        lod0_obj = BME.find_object_by_name(lod0.blender_obj_name or f"{mesh.name}_LOD0")
+        if lod0_obj is None or len(lod0_obj.data.vertices) == 0:
+            self.report({'ERROR'}, f"Import '{mesh.name}' LOD0 first.")
+            return {'CANCELLED'}
+
+        # Place generated LODs in the same collection as LOD0
+        if lod0_obj.users_collection:
+            collection = lod0_obj.users_collection[0]
+        else:
+            collection = context.scene.collection
+
+        max_w = _max_weights_for_mesh(mesh)
+        ratios = {1: self.ratio_lod1, 2: self.ratio_lod2, 3: self.ratio_lod3}
+        created, skipped = [], []
+
+        for li in range(1, min(len(mesh.lods), 4)):
+            lod = mesh.lods[li]
+            target_name = f"{mesh.name}_LOD{li}"
+
+            existing = bpy.data.objects.get(lod.blender_obj_name) if lod.blender_obj_name else None
+            if existing is None:
+                existing = bpy.data.objects.get(target_name)
+            if existing is not None:
+                if not self.replace_existing:
+                    skipped.append(target_name)
+                    continue
+                old_data = existing.data
+                bpy.data.objects.remove(existing, do_unlink=True)
+                if old_data is not None and old_data.users == 0:
+                    bpy.data.meshes.remove(old_data)
+
+            # Duplicate LOD0: obj.copy() keeps the parent, matrix_parent_inverse,
+            # modifiers (incl. Armature) and vertex groups.
+            new_obj = lod0_obj.copy()
+            collection.objects.link(new_obj)
+
+            # Strip every other modifier so only the decimate modifier is baked.
+            # (A visible armature modifier would bake the current pose, and hiding it via show_viewport
+            # would instead make the depsgraph return the original un-modified mesh.)
+            #
+            # Strip BEFORE creating the decimate modifier - as removing collection items
+            # invalidates modifier references.
+            #
+            # Armature modifiers are re-created after the bake.
+            arm_mods = [(m.name, m.object) for m in new_obj.modifiers
+                        if m.type == 'ARMATURE']
+            for m in list(new_obj.modifiers):
+                new_obj.modifiers.remove(m)
+
+            dec = new_obj.modifiers.new(name="_gen_lod_decimate", type='DECIMATE')
+            dec.decimate_type = 'COLLAPSE'
+            dec.ratio = ratios[li]
+            dec.use_collapse_triangulate = True
+            try:
+                dg = context.evaluated_depsgraph_get()
+                eval_obj = new_obj.evaluated_get(dg)
+                # preserve_all_data_layers keeps vertex groups, UVs, colors and the
+                # mmb_vertex_order attribute through the decimate.
+                new_data = bpy.data.meshes.new_from_object(
+                    eval_obj, preserve_all_data_layers=True, depsgraph=dg)
+            finally:
+                dec = new_obj.modifiers.get("_gen_lod_decimate")
+                if dec is not None:
+                    new_obj.modifiers.remove(dec)
+                for m_name, m_target in arm_mods:
+                    am = new_obj.modifiers.new(name=m_name, type='ARMATURE')
+                    am.object = m_target
+
+            new_obj.data = new_data
+            new_obj.name = target_name
+            new_obj.data.name = target_name
+
+            # Generated LODs carry LOD0 original indices in mmb_vertex_order;
+            # consumers (e.g. the .mcloth rewriter) pick their source data by this.
+            new_obj["mmb_lod_source"] = 0
+
+            trimmed = _limit_vertex_weights(new_obj, max_w)
+            lod.blender_obj_name = new_obj.name
+            created.append((li, len(new_data.vertices), trimmed))
+
+        if not created and skipped:
+            self.report({'WARNING'},
+                f"Failed to generate - objects already exist: {', '.join(skipped)}. "
+                f"Enable 'Replace Existing LOD Objects' to overwrite them.")
+            return {'CANCELLED'}
+
+        parts = ', '.join(f"LOD{li} ({vc} verts, {tr} trimmed)" for li, vc, tr in created)
+        msg = f"Generated {len(created)} LOD(s) for '{mesh.name}' [max {max_w} weights/vert]: {parts}"
+        if skipped:
+            msg += f" | Skipped existing: {', '.join(skipped)}"
+        self.report({'INFO'}, msg)
         return {'FINISHED'}
 
 class RemoveMesh(bpy.types.Operator):
@@ -4474,6 +5135,13 @@ def _do_merge_skeletons(context, operator, src_filepath, donor_bones, mode_label
             do_field = lod_start + 4 + lod_fo + 20 # start+vc(4)+lod_fo+ic(4)+sa(4)+voa(4)+vob(4)
             old_do = unpack('<I', file_data[do_field:do_field+4])[0]
             file_data[do_field:do_field+4] = pack('<I', old_do + inserted)
+            # Shift the second-section absolute offset (field [5], data_offset field + 32;
+            # see Mesh.parse) too.
+            if lod_info_type == 2:
+                sp = do_field + 32
+                sec2_val = unpack('<I', file_data[sp:sp+4])[0]
+                if sec2_val > 0:
+                    file_data[sp:sp+4] = pack('<I', sec2_val + inserted)
             # Also update the in-memory lod.data_offset_file_pos value - we patch the file
             # positions here, and will sync asset afterwards.
             mp += lod_field_size
@@ -5042,11 +5710,11 @@ class ExportAllLODs(bpy.types.Operator):
                     BME._triangulate_object(tri_obj,
                                             compute_normals=context.scene.SWOMT.compute_normals_on_export)
 
-        # Export each LOD level in order (0 -> 3). _write_mod_file accumulates on
-        # top of _MOD.mmb when it already exists, so each pass layers on top of
-        # the previous one correctly.
+        # Export each LOD level in order (0 -> 3). After the first pass has
+        # written mod_file, subsequent passes read from it so each LOD level
+        # accumulates on top of the previous one.
         exported_any = False
-        skipped_lods = []  # Skipped due to vert count change
+        current_src = None  # None -> _write_mod_file reads SWOMT.AssetPath
         try:
             for lod_n in range(4):
                 edited = {}
@@ -5058,16 +5726,14 @@ class ExportAllLODs(bpy.types.Operator):
                     obj = BME.find_object_by_name(obj_name)
                     if obj is None:
                         continue
-                    # Block LOD1+ with changed vert count — streaming breaks in-game.
-                    if lod_n > 0 and len(obj.data.vertices) != lod.vertex_count:
-                        skipped_lods.append((m.name, lod_n, lod.vertex_count, len(obj.data.vertices)))
-                        continue
                     edited[m.index] = lod_n
                 if not edited:
                     continue
                 try:
-                    BME._write_mod_file(edited_lod_index_per_mesh=edited, out_path=mod_file)
+                    BME._write_mod_file(edited_lod_index_per_mesh=edited, out_path=mod_file,
+                                        src_path=current_src)
                     exported_any = True
+                    current_src = mod_file
                 except Exception as e:
                     self.report({'ERROR'}, f"Export LOD{lod_n} failed: {e}")
                     return {'CANCELLED'}
@@ -5079,12 +5745,6 @@ class ExportAllLODs(bpy.types.Operator):
                 if export_data != orig_data:
                     bpy.data.meshes.remove(export_data)
 
-        if skipped_lods:
-            names = ', '.join(f"'{n}' LOD{li} ({oc}→{nc})" for n,li,oc,nc in skipped_lods)
-            self.report({'WARNING'},
-                f"Skipped {len(skipped_lods)} LOD(s) with changed vertex count: {names}."
-                f"Only LOD0 supports vertex count changes.")
-
         if not exported_any:
             self.report({'WARNING'}, "No LOD objects found in scene to export.")
             return {'CANCELLED'}
@@ -5093,11 +5753,17 @@ class ExportAllLODs(bpy.types.Operator):
         for mesh in asset.meshes:
             BME._apply_header_patches(mod_file, mesh, asset, operator=self)
 
+        # Rewrite the paired .mcloth (if any) so the cloth vertex mapping matches this export
+        _export_mcloth_for_asset(mod_file, operator=self)
+
         # Apply staged file rename
         if asset.pending_file_rename_new:
             new_file = str(Path(mod_file).parent / (asset.pending_file_rename_new + '.mmb'))
             try:
                 os.replace(mod_file, new_file)
+                _mc_out = os.path.splitext(mod_file)[0] + '.mcloth'
+                if os.path.isfile(_mc_out):
+                    os.replace(_mc_out, os.path.splitext(new_file)[0] + '.mcloth')
             except Exception as e:
                 self.report({'ERROR'}, f"Failed to rename mod file: {e}")
                 return {'FINISHED'}
@@ -5218,26 +5884,13 @@ class SWOMTPanel(bpy.types.Panel):
                     if forced:
                         prop_row.label(text="", icon='LOCKED')
                 box.prop(SWOMT, "export_vertex_colors")
+                if asset and any(m.name.endswith('_CLOTH_RENDER')
+                                 for m in asset.meshes):
+                    box.prop(SWOMT, "cloth_donor_radius")
 
-            # Warn if any LOD1-3 across all meshes has a changed vert count
             if forced:
                 tip_row = layout.row()
                 tip_row.label(text="Tip: Transfer Weights from original mesh", icon='INFO')
-            lod_vc_changed = []
-            for m in asset.meshes:
-                for li, l in enumerate(m.lods):
-                    if li == 0:
-                        continue
-                    obj_name = l.blender_obj_name if l.blender_obj_name else f"{m.name}_LOD{li}"
-                    obj = bpy.data.objects.get(obj_name)
-                    if obj is not None and len(obj.data.vertices) != l.vertex_count:
-                        lod_vc_changed.append(li)
-            if lod_vc_changed:
-                skipped_str = ', '.join(f"LOD{li}" for li in sorted(set(lod_vc_changed)))
-                warn_row = layout.row()
-                warn_row.label(
-                    text=f"Only LOD0 supports vertex count changes - {skipped_str} will be skipped.",
-                    icon='ERROR')
             for mi, m in enumerate(asset.meshes):
                 expanded = SWOMT.mesh_expanded[mi] if mi < 32 else True
                 mesh_row = layout.row()
@@ -5246,6 +5899,8 @@ class SWOMTPanel(bpy.types.Panel):
                 name_row.prop(SWOMT, "mesh_expanded", index=mi, text="",
                               icon='TRIA_DOWN' if expanded else 'TRIA_RIGHT', emboss=False)
                 name_row.label(text=m.name, icon="MESH_ICOSPHERE")
+                gen_lods_op = name_row.operator("object.generate_lods", text="", icon="MOD_DECIM")
+                gen_lods_op.mesh_index = mi
                 scale_uv_op = name_row.operator("object.scale_uvs", text="", icon="UV")
                 scale_uv_op.mesh_index = mi
                 rename_op = name_row.operator("object.rename_mesh", text="", icon="GREASEPENCIL")
@@ -5386,6 +6041,7 @@ class ApplyUpdate(bpy.types.Operator):
         for url, filename in [
             (_LOD_CFG_URL, _LOD_CFG_FILENAME),
             (_MMB_JSON_URL, _MMB_JSON_FILENAME),
+            (_MCLOTH_PY_URL, _MCLOTH_PY_FILENAME),
         ]:
             ok, err = _download_data_file(url, filename)
             if not ok:
@@ -5619,6 +6275,7 @@ classes=[SWOMTSettings,
          LoadMMB,
          ImportLOD,
          ExportLOD,
+         GenerateLODs,
          ScaleUVs,
          RenameMesh,
          SelectMGraphObject,
