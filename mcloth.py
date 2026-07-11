@@ -690,6 +690,107 @@ def cook_appended_constraints(pos, mov, tris, orig_vc, new_set=None):
     return [sorted(stretch), sorted(shear), sorted(bend)]
 
 
+def _grow_tether_trailer(trailing, orig_vc, new_vc, new_pos, donors, a1_pay,
+                         trips, free_set=None):
+    """Rebuild the 0x110d per-vert tether TRAILER for GROWN counts. Returns
+    (new_trailing_bytes, {0x110e trip index: (sc, mn, mx)}).
+
+    Windows resize from ceil16(orig_vc) to ceil16(new_vc) with REAL rows for
+    the appended verts: donor anchor in the u16 anchor-dup table (consistent
+    with the 0x112a donor copy), recomputed 1.25*euclid radii in the window
+    that encodes them, donor+slack transfer in the other length windows;
+    appended verts NOT in free_set are pinned (self anchor, zero lengths).
+    The u16 table spans TWO windows and must be re-laid out as one buffer -
+    naive per-window padding inserts bytes into the table's MIDDLE and
+    corrupts its second half. u8 windows get a fresh quant range over
+    kept+new values (existing rows requantized)."""
+    cvo = (orig_vc + 15) // 16 * 16
+    cvn = (new_vc + 15) // 16 * 16
+    if (not trailing or cvo == 0 or len(trailing) % cvo
+            or new_vc <= orig_vc):
+        return trailing, {}
+    k = len(trailing) // cvo
+    a1 = ([unpack('<H', a1_pay[i*2:i*2+2])[0] for i in range(orig_vc)]
+          if a1_pay is not None and len(a1_pay) >= orig_vc * 2 else None)
+    free_set = free_set or set()
+
+    def _d(p, q):
+        return ((p[0]-q[0])**2 + (p[1]-q[1])**2 + (p[2]-q[2])**2) ** 0.5
+
+    out = []
+    newtrips = {}
+    wi = 0
+    u8i = 0
+    while wi < k:
+        w = trailing[wi*cvo:(wi+1)*cvo]
+        if wi + 1 < k:
+            pair = trailing[wi*cvo:(wi+2)*cvo]
+            vals = [unpack('<H', pair[i*2:i*2+2])[0] for i in range(orig_vc)]
+            pad_ok = (orig_vc >= cvo or unpack(
+                '<H', pair[orig_vc*2:orig_vc*2+2])[0] == orig_vc)
+            if pad_ok and all(x < orig_vc for x in vals):
+                ents = []
+                for v in range(cvn):
+                    if v < orig_vc:
+                        ents.append(vals[v])
+                    elif v < new_vc:
+                        s = donors[v - orig_vc] \
+                            if v - orig_vc < len(donors) else 0
+                        ents.append(a1[s] if (a1 and v in free_set) else v)
+                    else:
+                        ents.append(v)  # self-index padding
+                out.append(b''.join(pack('<H', e) for e in ents))
+                wi += 2
+                continue
+        ti = 3 + u8i
+        sc, mn = (trips[ti][0], trips[ti][1]) if ti < len(trips) \
+            else (0.0, 0.0)
+        rows = bytearray(b'\xff' * cvn)
+        rows[:min(orig_vc, len(w))] = w[:orig_vc]
+        if sc > 0 and a1:
+            deq = [w[v] * sc + mn for v in range(orig_vc) if w[v] != 255]
+            errs = sorted(abs(w[v]*sc+mn - 1.25*_d(new_pos[v],
+                                                   new_pos[a1[v]]))
+                          for v in range(orig_vc))
+            e125 = bool(errs) and errs[len(errs)//2] < 3.0 * sc
+            newvals = {}
+            for v in range(orig_vc, new_vc):
+                if v not in free_set:
+                    newvals[v] = 0.0  # pinned: zero-length self tether
+                    continue
+                s = donors[v - orig_vc] if v - orig_vc < len(donors) else 0
+                if e125:
+                    newvals[v] = 1.25 * _d(new_pos[v], new_pos[a1[s]])
+                elif s < len(w) and w[s] == 255:
+                    newvals[v] = None  # donor row is filler: inherit it
+                elif mn < -sc:
+                    newvals[v] = w[s]*sc + mn - _d(new_pos[v], new_pos[s])
+                else:
+                    newvals[v] = w[s]*sc + mn + _d(new_pos[v], new_pos[s])
+            allv = deq + [x for x in newvals.values() if x is not None]
+            if allv:
+                nmn, nmx = min(allv), max(allv)
+                if nmx - nmn <= 0.0:
+                    nmx = nmn + max(abs(nmn), 1e-6)
+                nsc = (nmx - nmn) / 254.5
+                for v in range(orig_vc):
+                    if w[v] != 255:
+                        rows[v] = max(0, min(254, int(round(
+                            (w[v]*sc + mn - nmn) / nsc))))
+                for v, val in newvals.items():
+                    rows[v] = 255 if val is None else max(0, min(254, int(
+                        round((val - nmn) / nsc))))
+                newtrips[ti] = (nsc, nmn, nmx)
+        else:
+            for v in range(orig_vc, new_vc):
+                s = donors[v - orig_vc] if v - orig_vc < len(donors) else 0
+                rows[v] = w[s] if s < len(w) else 255
+        out.append(bytes(rows))
+        u8i += 1
+        wi += 1
+    return b''.join(out), newtrips
+
+
 def _sim_overrides(data, stream_end, new_pos, new_tri_bytes, free_append=False):
     """Map {chunk_file_offset: full replacement chunk bytes} for the sim-section
     chunks whose contents depend on the sim vertex/triangle counts. Chunks not
@@ -711,7 +812,7 @@ def _sim_overrides(data, stream_end, new_pos, new_tri_bytes, free_append=False):
         elif t in SIM_TC_FIELDS and orig_tc is None:
             orig_tc = unpack('<I', data[scan + 8:scan + 12])[0]
         if t in (T_SIM_SECTS, T_SIM_PAIRS, T_SIM_RESTL, T_SIM_QUANT, T_SIM_REST,
-                 0x11d2):
+                 0x11d2, 0x112a):
             orig.setdefault(t, data[scan + 8:scan + size])
         scan += size
     if orig_vc is None:
@@ -765,16 +866,6 @@ def _sim_overrides(data, stream_end, new_pos, new_tri_bytes, free_append=False):
             prs = list(old_pairs[si]) + [p for p, _l in sections[si]]
             vals += [l for _p, l in sections[si]]
             new_sects.append((prs, vals))
-        trailing = dpay[boff:]
-        # The trailing region is k per-vert tables of ceil16(V) bytes (tether
-        # lengths + second anchors; filler rows are inert 0xFF/self encodings
-        # the appended verts inherit). When ceil16 grows, each window must be
-        # widened; 0xFF fill keeps the new rows inert.
-        cvo, cvn = (orig_vc + 15) // 16 * 16, (new_vc + 15) // 16 * 16
-        if cvn > cvo and cvo and len(trailing) % cvo == 0:
-            trailing = b''.join(
-                trailing[w * cvo:(w + 1) * cvo] + b'\xff' * (cvn - cvo)
-                for w in range(len(trailing) // cvo))
         # requantize each section under a fresh range (render-table convention)
         newtrip = {}
         restl_out = bytearray()
@@ -789,10 +880,27 @@ def _sim_overrides(data, stream_end, new_pos, new_tri_bytes, free_append=False):
             newtrip[si] = (s, mn, mx)
             restl_out += _pad16(bytes(max(0, min(254, int(round((v - mn) / s))))
                                       for v in vals))
-        restl_out += trailing
         fab = dict(sections=new_sects, free_set=free_set,
                    s3new=[len(p) for p, _v in new_sects],
-                   restl=bytes(restl_out), newtrip=newtrip)
+                   restl_sections=bytes(restl_out), newtrip=newtrip)
+
+    # --- 0x110d tether TRAILER rebuild for grown counts (both modes):
+    #     appended free verts get real donor-anchor/radius rows, pinned ones
+    #     get self/zero rows; the u16 anchor-dup table is re-laid out as one
+    #     buffer (per-window padding would corrupt its second half). ---
+    trail_new = None
+    trail_trips = {}
+    trail_b0 = 0
+    if (new_vc > orig_vc and T_SIM_RESTL in orig and T_SIM_SECTS in orig
+            and T_SIM_QUANT in orig):
+        s3p = unpack('<3I', orig[T_SIM_SECTS][:12])
+        trail_b0 = sum((s + 15) // 16 * 16 for s in s3p)
+        trips_all = [unpack('<fff', orig[T_SIM_QUANT][i*12:i*12+12])
+                     for i in range(len(orig[T_SIM_QUANT]) // 12)]
+        trail_new, trail_trips = _grow_tether_trailer(
+            orig[T_SIM_RESTL][trail_b0:], orig_vc, new_vc, new_pos, donors,
+            orig.get(0x112a), trips_all,
+            free_set=fab['free_set'] if fab else set())
 
     perm_seen = 0
     off = 20
@@ -856,26 +964,20 @@ def _sim_overrides(data, stream_end, new_pos, new_tri_bytes, free_append=False):
         elif fab and t == T_SIM_PAIRS:
             new_pay = b''.join(pack('<HH', *p)
                                for prs, _v in fab['sections'] for p in prs)
-        elif fab and t == T_SIM_RESTL:
-            new_pay = fab['restl']
-        elif (t == T_SIM_RESTL and not fab and new_vc > orig_vc
-              and T_SIM_SECTS in orig):
-            # pinned mode, ceil16 boundary crossed: widen the trailing per-vert
-            # windows so rows for the appended verts exist (inert 0xFF).
-            cvo = (orig_vc + 15) // 16 * 16
-            cvn = (new_vc + 15) // 16 * 16
-            if cvn > cvo:
-                s3p = unpack('<3I', orig[T_SIM_SECTS][:12])
-                b0 = sum((s + 15) // 16 * 16 for s in s3p)
-                tr = pay[b0:]
-                if cvo and len(tr) % cvo == 0:
-                    new_pay = pay[:b0] + b''.join(
-                        tr[w * cvo:(w + 1) * cvo] + b'\xff' * (cvn - cvo)
-                        for w in range(len(tr) // cvo))
-        elif fab and t == T_SIM_QUANT:
+        elif t == T_SIM_RESTL and fab:
+            new_pay = fab['restl_sections'] + (
+                trail_new if trail_new is not None else pay[trail_b0:])
+        elif t == T_SIM_RESTL and trail_new is not None:
+            # pinned mode: sections verbatim, trailer rebuilt (self/zero rows
+            # for the appended kinematic verts, windows resized correctly)
+            new_pay = pay[:trail_b0] + trail_new
+        elif t == T_SIM_QUANT and (fab or trail_trips):
             out = bytearray(pay)
-            for si in range(3):
-                out[si * 12:si * 12 + 12] = pack('<fff', *fab['newtrip'][si])
+            merged = dict(fab['newtrip']) if fab else {}
+            merged.update(trail_trips)
+            for si, tr in merged.items():
+                if si * 12 + 12 <= len(out):
+                    out[si * 12:si * 12 + 12] = pack('<fff', *tr)
             new_pay = bytes(out)
         elif fab and t == T_SIM_GROUPS:
             g = list(unpack(f'<{len(pay) // 4}I', pay))

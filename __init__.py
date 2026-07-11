@@ -3,7 +3,7 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt, SaintBaron",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 68),
+    "version": (0, 1, 69),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 11-17.",
     "category": "Import-Export"
@@ -1939,7 +1939,7 @@ class BlenderMeshExporter:
                                   f"phantom tri(s) retargeted off reused "
                                   f"slots (kept local + inert)")
                     fd = bytes(_orig_face_bytes)
-                    new_index_count = _orig_ic
+                    new_index_count = len(fd) // _isz
                     # Tris that exist in the CURRENT sim mesh (kept originals +
                     # rewritten slots). Leftover phantoms are excluded: render
                     # rows referencing them must be re-attached or released.
@@ -3974,11 +3974,19 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                        if _mem else set())
             _valid = (getattr(_mem.lods[0], 'exported_sim_valid_tris', None)
                       if _mem else None)
+            # Grown counts (mismatched .mmb/.mcloth pair fallback): appended
+            # vert slots join the exclusion set so unzoned vanilla rows never
+            # silently re-attach onto appended sim (same policy as reuse
+            # mode; riding new sim is a zone opt-in).
+            _ovc0, _otc0 = mcloth.sim_counts(data)
+            _appended_v = (set(range(_ovc0, len(_sp)))
+                           if _sp is not None and _ovc0 is not None
+                           and len(_sp) > _ovc0 else set())
             # Render rows riding deleted/rebuilt sim triangles stretch: when the
             # sim was exported this session, re-attach or release them below.
             if _st is not None and _valid is not None and (
-                    _reused or len(_valid) < len(_st)):
-                sim_fix = (set(_valid), set(_reused))
+                    _reused or _appended_v or len(_valid) < len(_st)):
+                sim_fix = (set(_valid), set(_reused) | _appended_v)
             if _sp is not None and _st is not None and _reused:
                 _tb = b''.join(pack('<HHH', *t) for t in _st)
                 sim_reuse_arg = (_sp, _tb, set(_reused))
@@ -3989,12 +3997,11 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                         f"New _CLOTH_SIM vertices reuse {len(_reused)} deleted "
                         f"slot(s); constraints rewritten in place.")
             elif _sp is not None and _st is not None:
-                _ovc, _otc = mcloth.sim_counts(data)
-                if _ovc is None or len(_sp) != _ovc or len(_st) != _otc:
+                if _ovc0 is None or len(_sp) != _ovc0 or len(_st) != _otc0:
                     _tb = b''.join(pack('<HHH', *t) for t in _st)
                     sim_arg = (_sp, _tb)
-                    print(f"[AFoPMT] sim section: {_ovc}->{len(_sp)} verts, "
-                          f"{_otc}->{len(_st)} tris (rewriting count fields + tables)")
+                    print(f"[AFoPMT] sim section: {_ovc0}->{len(_sp)} verts, "
+                          f"{_otc0}->{len(_st)} tris (rewriting count fields + tables)")
                     if operator:
                         operator.report({'WARNING'},
                             "Sim vertex/triangle count changed - this is known "
