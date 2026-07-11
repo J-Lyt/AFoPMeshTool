@@ -3,7 +3,7 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt, SaintBaron",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 67),
+    "version": (0, 1, 68),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 11-17.",
     "category": "Import-Export"
@@ -532,6 +532,10 @@ class SkeletalMeshAsset(Asset):
                 # appended slot -> mmb_vertex_order source, from the export-time
                 # vertex set (includes seam-split duplicates the Blender mesh lacks)
                 self.exported_append_sources = {}
+                # sim budget reuse: orphaned slots rewritten with new geometry
+                self.exported_sim_reused = set()
+                # sim tri slots present in the CURRENT mesh (excl. phantoms)
+                self.exported_sim_valid_tris = None
                 # first appended slot index (== original vc) of the last slot export
                 self.exported_append_base = 0
 
@@ -1316,6 +1320,10 @@ class BlenderMeshImporter:
         # Import triangles
         triangles = lod.get_triangles(raw_mesh_file)
         for tris in triangles:
+            # degenerate tris (repeated vertex) exist in exported cloth sim
+            # meshes: retargeted phantom slots can collapse; skip them.
+            if len(set(tris)) < 3:
+                continue
             face_vertices = []
             for v_index in tris:
                 tv = bm.verts[v_index]
@@ -1701,16 +1709,24 @@ class BlenderMeshExporter:
             new_vert_count  = len(obj.data.vertices)
             new_index_count = len(obj.data.polygons) * 3
 
-            # --- Slot-preserving layout for cloth render meshes ---
+            # --- Slot-preserving layout for cloth render AND sim meshes ---
             # The cloth runtime keys to the original vertex numbering: renumbering
             # shreds the cloth in-game even with a fully consistent .mcloth.
             # So every vertex keeps its ORIGINAL index slot - deleted vertices remain
-            # as face-less orphans copied verbatim, new vertices are appended.
+            # as face-less orphans copied verbatim.
+            # RENDER: new vertices are appended after the original slots.
+            # SIM: growing the sim counts crashes the engine (count-tied state we
+            # cannot see), so new sim verts REUSE orphaned slots and new tris
+            # reuse phantom tri slots - the sim BUDGET is the vanilla counts.
+            _is_cloth_render = mesh.name.endswith('_CLOTH_RENDER')
+            _is_cloth_sim = mesh.name.endswith('_CLOTH_SIM')
             slot_map = None # blender vertex index -> final slot index
             slot_final_vc = new_vert_count
             lod.exported_append_sources = {}
             lod.exported_append_base = 0
-            if mesh.name.endswith('_CLOTH_RENDER'):
+            lod.exported_sim_reused = set()
+            lod.exported_sim_valid_tris = None
+            if _is_cloth_render or _is_cloth_sim:
                 _orig_vc_file = unpack('<I', file_data[lod.start_offset:lod.start_offset + 4])[0]
                 if _orig_vc_file > 0:
                     _attr = obj.data.attributes.get('mmb_vertex_order')
@@ -1731,16 +1747,35 @@ class BlenderMeshExporter:
                             _claimed.add(_ov)
                         else:
                             _extras.append(_vi)
-                    for _k, _vi in enumerate(_extras):
-                        _slot = _orig_vc_file + _k
-                        slot_map[_vi] = _slot
-                        # Record each appended slot's source vertex for the
-                        # .mcloth row synthesis. Built here, from the EXPORT-time
-                        # vertex set: seam splitting may have appended duplicate
-                        # vertices that the restored Blender mesh doesn't have.
-                        if _attr is not None:
-                            lod.exported_append_sources[_slot] = _attr.data[_vi].value
-                    slot_final_vc = _orig_vc_file + len(_extras)
+                    if _is_cloth_sim and _extras:
+                        # Budget reuse: assign new verts to orphaned slots,
+                        # FREE (simulating) slots first so new geometry
+                        # simulates where possible.
+                        _orphans = [s for s in range(_orig_vc_file) if s not in _claimed]
+                        if len(_extras) > len(_orphans):
+                            raise ValueError(
+                                f"'{mesh.name}' sim budget exceeded: {len(_extras)} new "
+                                f"vertices but only {len(_orphans)} deleted slot(s) to "
+                                f"reuse (vanilla budget {_orig_vc_file}). Delete "
+                                f"{len(_extras) - len(_orphans)} more sim vertices first.")
+                        _free_flags = _sim_free_slot_flags(_orig_vc_file)
+                        _orphans.sort(key=lambda s: (not _free_flags[s]) if _free_flags else 0)
+                        for _k, _vi in enumerate(_extras):
+                            _slot = _orphans[_k]
+                            slot_map[_vi] = _slot
+                            lod.exported_sim_reused.add(_slot)
+                        slot_final_vc = _orig_vc_file
+                    else:
+                        for _k, _vi in enumerate(_extras):
+                            _slot = _orig_vc_file + _k
+                            slot_map[_vi] = _slot
+                            # Record each appended slot's source vertex for the
+                            # .mcloth row synthesis. Built here, from the EXPORT-time
+                            # vertex set: seam splitting may have appended duplicate
+                            # vertices that the restored Blender mesh doesn't have.
+                            if _attr is not None:
+                                lod.exported_append_sources[_slot] = _attr.data[_vi].value
+                        slot_final_vc = _orig_vc_file + len(_extras)
                     lod.exported_append_base = _orig_vc_file
 
             # The preserve-bytes path below copies a normals block sized for the
@@ -1805,14 +1840,117 @@ class BlenderMeshExporter:
                 vd = bytes(_vd_out)
                 nd = bytes(_nd_out)
 
-                # Remap face indices from Blender numbering to slot numbering.
                 _isz = 4 if use_uint32_faces else 2
                 _ifmt = '<I' if use_uint32_faces else '<H'
-                _fd_out = bytearray(len(fd))
-                for _o in range(0, len(fd), _isz):
-                    _bvi = unpack(_ifmt, fd[_o:_o + _isz])[0]
-                    _fd_out[_o:_o + _isz] = pack(_ifmt, slot_map[_bvi])
-                fd = bytes(_fd_out)
+                if _is_cloth_sim:
+                    # Keep the original sim triangle buffer layout (kept tris
+                    # stay at their slots so 0x1129 refs and per-tri tables
+                    # stay valid). New triangles REUSE phantom tri slots -
+                    # the tri budget is the vanilla count (growing it crashes
+                    # the engine).
+                    _orig_ic = unpack('<I', file_data[lod.start_offset + lod.lod_field_offset + 4:lod.start_offset + lod.lod_field_offset + 8])[0]
+                    _abs_fb0 = lod.data_offset + (lod.face_block_offset - _higher)
+                    _orig_face_bytes = bytearray(file_data[_abs_fb0:_abs_fb0 + _orig_ic * _isz])
+                    _orig_tri_slots = {}
+                    for _t in range(_orig_ic // 3):
+                        _tv = tuple(sorted(unpack(_ifmt, _orig_face_bytes[(_t * 3 + _j) * _isz:(_t * 3 + _j + 1) * _isz])[0]
+                                           for _j in range(3)))
+                        _orig_tri_slots.setdefault(_tv, []).append(_t)
+                    _matched_tris = set()
+                    _new_tris = []
+                    for _p in obj.data.polygons:
+                        _pv = list(_p.vertices)
+                        for _fi in range(1, len(_pv) - 1):
+                            _sv = (slot_map[_pv[0]], slot_map[_pv[_fi]], slot_map[_pv[_fi + 1]])
+                            _key = tuple(sorted(_sv))
+                            _cand = _orig_tri_slots.get(_key)
+                            if _cand:
+                                _t = _cand.pop()
+                                _matched_tris.add(_t) # kept original tri
+                                # A tri whose slot key coincides with a
+                                # DELETED tri keeps that tri's ORIGINAL
+                                # winding bytes - arbitrary for the new
+                                # geometry. Refresh the winding from the
+                                # Blender face when it touches a reused slot.
+                                if any(v in lod.exported_sim_reused
+                                       for v in _sv):
+                                    _orig_face_bytes[
+                                        _t * 3 * _isz:(_t + 1) * 3 * _isz] = (
+                                        pack(_ifmt, _sv[0])
+                                        + pack(_ifmt, _sv[2])
+                                        + pack(_ifmt, _sv[1]))
+                            else:
+                                _new_tris.append(_sv)
+                    _written_tris = set()
+                    if _new_tris:
+                        _phantoms = [t for tl in _orig_tri_slots.values() for t in tl]
+                        _phantoms.sort()
+                        if len(_new_tris) > len(_phantoms):
+                            raise ValueError(
+                                f"'{mesh.name}' sim triangle budget exceeded: "
+                                f"{len(_new_tris)} new triangles but only "
+                                f"{len(_phantoms)} deleted slot(s) to reuse "
+                                f"(vanilla budget {_orig_ic // 3}). Delete "
+                                f"{len(_new_tris) - len(_phantoms)} more sim faces first.")
+                        for _sv, _t in zip(_new_tris, _phantoms):
+                            # engine winding (v0, v2, v1)
+                            _orig_face_bytes[_t * 3 * _isz:(_t + 1) * 3 * _isz] = (
+                                pack(_ifmt, _sv[0]) + pack(_ifmt, _sv[2])
+                                + pack(_ifmt, _sv[1]))
+                            _written_tris.add(_t)
+                    # Leftover phantom tris still referencing a REUSED slot
+                    # would stretch from their old neighborhood to the new
+                    # geometry - visible sliver faces AND long sliver edges
+                    # fed to the constraint cooker (which then ties the new
+                    # region to the old one). Retarget each reused reference
+                    # to the surviving vert nearest the DELETED vert's
+                    # original position: the tri stays a local, inert sliver.
+                    if lod.exported_sim_reused and mesh.position_type == 1:
+                        _leftover = {t for tl in _orig_tri_slots.values()
+                                     for t in tl} - _written_tris
+                        _surv = sorted(_claimed)
+                        def _fpos(s):
+                            return unpack('<fff', file_data[
+                                _abs_voa + s * vs:_abs_voa + s * vs + 12])
+                        _spos = {s: _fpos(s) for s in _surv}
+                        _near = {}
+                        for s in lod.exported_sim_reused:
+                            p = _fpos(s)
+                            _near[s] = min(
+                                _surv, key=lambda u: (
+                                    (p[0]-_spos[u][0])**2
+                                    + (p[1]-_spos[u][1])**2
+                                    + (p[2]-_spos[u][2])**2)) \
+                                if _surv else s
+                        _retg = 0
+                        for _t in _leftover:
+                            _tv = [unpack(_ifmt, _orig_face_bytes[
+                                (_t*3+_j)*_isz:(_t*3+_j+1)*_isz])[0]
+                                for _j in range(3)]
+                            if any(v in lod.exported_sim_reused for v in _tv):
+                                for _j in range(3):
+                                    _orig_face_bytes[
+                                        (_t*3+_j)*_isz:(_t*3+_j+1)*_isz] = \
+                                        pack(_ifmt, _near.get(_tv[_j],
+                                                              _tv[_j]))
+                                _retg += 1
+                        if _retg:
+                            print(f"[AFoPMT] {mesh.name}: {_retg} leftover "
+                                  f"phantom tri(s) retargeted off reused "
+                                  f"slots (kept local + inert)")
+                    fd = bytes(_orig_face_bytes)
+                    new_index_count = _orig_ic
+                    # Tris that exist in the CURRENT sim mesh (kept originals +
+                    # rewritten slots). Leftover phantoms are excluded: render
+                    # rows referencing them must be re-attached or released.
+                    lod.exported_sim_valid_tris = _matched_tris | _written_tris
+                else:
+                    # Render: remap face indices from Blender to slot numbering.
+                    _fd_out = bytearray(len(fd))
+                    for _o in range(0, len(fd), _isz):
+                        _bvi = unpack(_ifmt, fd[_o:_o + _isz])[0]
+                        _fd_out[_o:_o + _isz] = pack(_ifmt, slot_map[_bvi])
+                    fd = bytes(_fd_out)
 
                 new_vert_count = slot_final_vc
 
@@ -3709,6 +3847,32 @@ def _limit_vertex_weights(obj, limit):
 # Below is only the Blender-side layer that collects vertex mappings from the
 # scene and drives mcloth.rewrite() after an mmb export.
 
+def _sim_free_slot_flags(orig_vc):
+    """[bool]*orig_vc: True where the source .mcloth marks the sim vert FREE
+    (simulating). Used to hand reused slots to new verts free-first. None when
+    the mcloth is unavailable."""
+    try:
+        src = mcloth.source_path(bpy.context.scene.SWOMT.AssetPath) if mcloth else None
+        if not src:
+            return None
+        with open(src, 'rb') as f:
+            d = f.read()
+        stream_end = unpack('<I', d[16:20])[0]
+        off = 20
+        while off + 8 <= stream_end:
+            tag, size = unpack('<II', d[off:off + 8])
+            if (tag & 0xFFFF) == mcloth.T_SIM_REST:
+                pay = d[off + 8:off + size]
+                if len(pay) >= orig_vc * 16:
+                    return [unpack('<f', pay[i*16+12:i*16+16])[0] == 0.0
+                            for i in range(orig_vc)]
+                return None
+            off += size
+    except Exception:
+        pass
+    return None
+
+
 def _export_mcloth_for_asset(out_mmb_path, operator=None):
     """
     After the mmb has been exported, remap the paired .mcloth for every cloth
@@ -3785,7 +3949,88 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                 old_to_new = {i: i for i in range(new_vc)}
             remaps[block_name] = (new_vc, src_block, old_to_new)
 
-    if not remaps:
+    # Sim-section sync: BUDGET REUSE. New sim verts occupy reused
+    # (deleted) slots, so counts never change; the mcloth gets a value-only
+    # rewrite (positions, donor rows, tri mirror, rewritten constraint
+    # rows). Move and inert-delete stay on the verbatim passthrough.
+    # Count growth is engine-unstable and no longer produced by the
+    # exporter; the legacy grown-count path remains as a fallback.
+    sim_arg = None
+    sim_reuse_arg = None
+    sim_fix = None # (valid_tri_set_or_None, reused_vert_set) for render-row fix
+    try:
+        with open(out_mmb_path, 'rb') as f:
+            _nb = f.read()
+        _na = SkeletalMeshAsset()
+        _na.parse(io.BytesIO(_nb))
+        _sims = [m for m in _na.meshes if m.name.endswith('_CLOTH_SIM')]
+        if len(_sims) == 1:
+            _sm = _sims[0]
+            _sp = mcloth.mmb_lod_float_positions(_nb, _sm, 0)
+            _st = mcloth.mmb_lod_u16_tris(_nb, _sm, 0)
+            _mem = next((m for m in asset.meshes
+                         if m.name.endswith('_CLOTH_SIM') and m.lods), None)
+            _reused = (getattr(_mem.lods[0], 'exported_sim_reused', set())
+                       if _mem else set())
+            _valid = (getattr(_mem.lods[0], 'exported_sim_valid_tris', None)
+                      if _mem else None)
+            # Render rows riding deleted/rebuilt sim triangles stretch: when the
+            # sim was exported this session, re-attach or release them below.
+            if _st is not None and _valid is not None and (
+                    _reused or len(_valid) < len(_st)):
+                sim_fix = (set(_valid), set(_reused))
+            if _sp is not None and _st is not None and _reused:
+                _tb = b''.join(pack('<HHH', *t) for t in _st)
+                sim_reuse_arg = (_sp, _tb, set(_reused))
+                print(f"[AFoPMT] sim budget reuse: {len(_reused)} slot(s) "
+                      f"rewritten in place (counts unchanged)")
+                if operator:
+                    operator.report({'INFO'},
+                        f"New _CLOTH_SIM vertices reuse {len(_reused)} deleted "
+                        f"slot(s); constraints rewritten in place.")
+            elif _sp is not None and _st is not None:
+                _ovc, _otc = mcloth.sim_counts(data)
+                if _ovc is None or len(_sp) != _ovc or len(_st) != _otc:
+                    _tb = b''.join(pack('<HHH', *t) for t in _st)
+                    sim_arg = (_sp, _tb)
+                    print(f"[AFoPMT] sim section: {_ovc}->{len(_sp)} verts, "
+                          f"{_otc}->{len(_st)} tris (rewriting count fields + tables)")
+                    if operator:
+                        operator.report({'WARNING'},
+                            "Sim vertex/triangle count changed - this is known "
+                            "to be unstable in-game. Use delete+add so new "
+                            "geometry reuses the freed slots instead.")
+        elif len(_sims) > 1:
+            print("[AFoPMT] sim section: multiple _CLOTH_SIM meshes - skipping "
+                  "sim rewrite (unsupported)")
+    except Exception as e:
+        print(f"[AFoPMT] sim section pass skipped: {e}")
+        sim_arg = None
+        sim_reuse_arg = None
+
+    # ZONE_* vertex groups on any imported cloth object mean rows may need
+    # re-assignment even without a sim/render edit.
+    _zones_present = False
+    for _zm in asset.meshes:
+        if not (_zm.name.endswith('_CLOTH_RENDER')
+                or _zm.name.endswith('_CLOTH_SIM')):
+            continue
+        for _zl in _zm.lods:
+            _zo = bpy.data.objects.get(_zl.blender_obj_name or "")
+            if _zo is not None and any(g.name.startswith('ZONE_')
+                                       for g in _zo.vertex_groups):
+                _zones_present = True
+                break
+        if _zones_present:
+            break
+
+    if not remaps and sim_arg is None and sim_reuse_arg is None \
+            and sim_fix is None and not _zones_present:
+        # Nothing to remap (render unedited), no sim topology change (e.g. a
+        # sim move) and no zone assignments. Emit a verbatim copy so the
+        # exported mmb still ships with a matched .mcloth pair.
+        with open(os.path.splitext(out_mmb_path)[0] + '.mcloth', 'wb') as f:
+            f.write(data)
         return
 
     # Read sim geometry + new render geometry from the exported mmb: used to
@@ -3809,14 +4054,251 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
             sim_tris = mcloth.mmb_lod_u16_tris(new_bytes, new_sim, 0)
             if sim_verts is None or sim_tris is None:
                 continue
+
+            # ZONE ASSIGNMENTS: vertex groups named 'ZONE_*' painted on
+            # BOTH the sim object and render objects pair regions - a
+            # zoned render vert only binds to sim tris whose 3 verts all
+            # carry a matching zone; a zoned vert with no candidate tris
+            # releases to skinning. Unzoned verts keep default behavior.
+            def _grid_of(points, cell):
+                g = {}
+                for i, p in enumerate(points):
+                    g.setdefault((int(p[0] / cell), int(p[1] / cell),
+                                  int(p[2] / cell)), []).append(i)
+                def nearest(p, maxd):
+                    c = (int(p[0] / cell), int(p[1] / cell),
+                         int(p[2] / cell))
+                    rng = int(maxd / cell) + 1
+                    best, bd = None, maxd * maxd
+                    for dx in range(-rng, rng + 1):
+                        for dy in range(-rng, rng + 1):
+                            for dz in range(-rng, rng + 1):
+                                for i in g.get((c[0]+dx, c[1]+dy, c[2]+dz),
+                                               ()):
+                                    q = points[i]
+                                    d = ((p[0]-q[0])**2 + (p[1]-q[1])**2
+                                         + (p[2]-q[2])**2)
+                                    if d < bd:
+                                        bd, best = d, i
+                    return best
+                return nearest
+
+            def _obj_zone_verts(o):
+                zg = {g.index: g.name for g in o.vertex_groups
+                      if g.name.startswith('ZONE_')}
+                if not zg:
+                    return None
+                out = []
+                for v in o.data.vertices:
+                    zs = frozenset(zg[ge.group] for ge in v.groups
+                                   if ge.group in zg and ge.weight > 0)
+                    # FILE space: Blender x is negated on import/export
+                    out.append(((-v.co[0], v.co[1], v.co[2]), zs))
+                return out
+
+            zone_tris = {}
+            _zone_lookups = {} # li -> callable(pos)->frozenset
+            _lod0_zone_fn = None
+            _smesh_mem = next((m for m in asset.meshes
+                               if m.name == sim_name and m.lods), None)
+            sim_obj = None
+            if _smesh_mem:
+                _sn = (_smesh_mem.lods[0].blender_obj_name
+                       or f"{sim_name}_LOD0")
+                sim_obj = bpy.data.objects.get(_sn)
+            if sim_obj is not None:
+                _szv = _obj_zone_verts(sim_obj)
+                if _szv:
+                    _sfind = _grid_of(sim_verts, 0.002)
+                    _slot_zones = {}
+                    for p, zs in _szv:
+                        if not zs:
+                            continue
+                        s = _sfind(p, 0.002)
+                        if s is not None:
+                            _slot_zones[s] = _slot_zones.get(
+                                s, frozenset()) | zs
+                    for t, tri in enumerate(sim_tris):
+                        zs = None
+                        for v in tri:
+                            vz = _slot_zones.get(v, frozenset())
+                            zs = vz if zs is None else (zs & vz)
+                        for z in (zs or ()):
+                            zone_tris.setdefault(z, set()).add(t)
+                    if zone_tris:
+                        _zmsg = ", ".join(f"{z} ({len(ts)} sim tris)"
+                                          for z, ts in zone_tris.items())
+                        print(f"[AFoPMT] {sim_name}: cloth zones {_zmsg}")
+                        if operator:
+                            operator.report({'INFO'},
+                                            f"Cloth zones active: {_zmsg}")
+                    elif operator:
+                        operator.report({'WARNING'},
+                            "ZONE_ groups found on the sim mesh but no sim "
+                            "triangle has ALL 3 vertices zoned - zones are "
+                            "inactive. Paint whole triangles (including "
+                            "anchor verts).")
+
+            def _make_zone_fn(zone_pts):
+                pts = [p for p, _zs in zone_pts]
+                zss = [zs for _p, zs in zone_pts]
+                rad = max(SWOMT.cloth_donor_radius, 1e-4)
+                find = _grid_of(pts, rad)
+                def fn(p):
+                    i = find(p, rad)
+                    return zss[i] if i is not None else frozenset()
+                return fn
+
+            if not zone_tris and operator:
+                for _lz in range(len(mesh.lods)):
+                    _ozn = (mesh.lods[_lz].blender_obj_name
+                            or f"{mesh.name}_LOD{_lz}")
+                    _oz = bpy.data.objects.get(_ozn)
+                    if _oz is not None and any(
+                            g.name.startswith('ZONE_')
+                            for g in _oz.vertex_groups):
+                        operator.report({'WARNING'},
+                            "ZONE_ groups found on the render mesh but the "
+                            "sim mesh has no matching zones (not imported, "
+                            "or no ZONE_ groups) - zones are inactive.")
+                        break
+
+            if zone_tris:
+                for li in range(len(new_render.lods)):
+                    _on = (mesh.lods[li].blender_obj_name
+                           or f"{mesh.name}_LOD{li}") \
+                        if li < len(mesh.lods) else None
+                    _ro = bpy.data.objects.get(_on) if _on else None
+                    _zv = _obj_zone_verts(_ro) if _ro is not None else None
+                    if _zv is not None:
+                        _zone_lookups[li] = _make_zone_fn(_zv)
+                        if li == 0:
+                            _lod0_zone_fn = _zone_lookups[0]
+                for li in range(len(new_render.lods)):
+                    if li not in _zone_lookups and _lod0_zone_fn is not None:
+                        _zone_lookups[li] = _lod0_zone_fn
+
+            _zone_moved_total = 0
             for li in range(len(new_render.lods)):
                 block_name = mesh.name if li == 0 else f"{mesh.name}_LOD{li}"
                 if block_name not in remaps:
-                    continue
+                    if (sim_fix is None and _zone_lookups.get(li) is None) \
+                            or block_name not in blocks:
+                        continue
+                    # Sim was edited (or zones re-assign rows) but this render
+                    # LOD wasn't exported: give it an identity remap so its
+                    # stale rows can be fixed too.
+                    _bb0 = blocks[block_name]
+                    _h0 = _bb0['chunks'][mcloth.T_HEADER][0]
+                    _vc0 = unpack('<I', data[_h0 + 8:_h0 + 12])[0]
+                    _i0, _s0 = _bb0['chunks'][mcloth.T_INDICES]
+                    _n0 = (_s0 - 8) // 4
+                    _six0 = unpack(f'<{_n0}I', data[_i0 + 8:_i0 + _s0])
+                    remaps[block_name] = (_vc0, block_name,
+                                          {ov: ov for ov in _six0})
                 pos = mcloth.mmb_lod_float_positions(new_bytes, new_render, li)
                 if pos is None:
                     continue
                 rebind[block_name] = (sim_verts, sim_tris, pos)
+
+                # Sim-edit row fix: rows whose sim triangle was deleted
+                # (phantom) or rebuilt (touches a reused slot) would
+                # STRETCH. Re-attach them to the nearest surviving tri
+                # when close enough, otherwise release them to skinning
+                # (the mapping shader treats absent rows as skinned).
+                _fix_rows = {}
+                _zone_of = _zone_lookups.get(li)
+
+                def _zone_cand(p, default):
+                    """Candidate sim tris for a render vert at p: the union
+                    of its zones' tris when zoned, else `default` (None =
+                    unrestricted). Caller intersects with its valid set."""
+                    if _zone_of is None or not zone_tris:
+                        return default
+                    zs = _zone_of(p)
+                    if not zs:
+                        return default
+                    c = set()
+                    for z in zs:
+                        c |= zone_tris.get(z, set())
+                    return c
+
+                _zone_gate = bool(zone_tris) and _zone_of is not None
+                if sim_fix is not None or _zone_gate:
+                    if sim_fix is not None:
+                        _valid_t, _reused_v = sim_fix
+                    else:
+                        _valid_t = set(range(len(sim_tris)))
+                        _reused_v = set()
+                    # Unzoned vanilla rows only re-attach to SURVIVING
+                    # original tris - never silently onto new/rebuilt sim
+                    # (riding a new sim region is a zone opt-in).
+                    _surv_t = ({t for t in _valid_t
+                                if t < len(sim_tris) and all(
+                                    v not in _reused_v for v in sim_tris[t])}
+                               if _reused_v else _valid_t)
+                    _bb = blocks[block_name]
+                    _i3, _s3 = _bb['chunks'][mcloth.T_INDICES]
+                    _nB = (_s3 - 8) // 4
+                    _six = unpack(f'<{_nB}I', data[_i3 + 8:_i3 + _s3])
+                    _t3 = _bb['chunks'][mcloth.T_TRI][0] + 8
+                    _o2n = remaps[block_name][2]
+                    _ntb = mcloth.mmb_lod_normals_tangents(new_bytes, new_render, li)
+                    _rad = SWOMT.cloth_donor_radius
+                    _re = _rel = _zmoved = 0
+                    for _r, _ov in enumerate(_six):
+                        _ti = unpack('<H', data[_t3 + _r*2:_t3 + _r*2 + 2])[0]
+                        _nv = _o2n.get(_ov)
+                        _zs = (_zone_of(pos[_nv]) if _zone_gate
+                               and _nv is not None and _nv < len(pos)
+                               else frozenset())
+                        _struct_bad = (
+                            _ti >= len(sim_tris) or _ti not in _valid_t
+                            or any(v in _reused_v for v in sim_tris[_ti]))
+                        # zones are AUTHORITATIVE assignments: a zoned vert
+                        # riding an out-of-zone tri is re-attached into its
+                        # zone (no radius cap - painting it means binding it)
+                        _zone_bad = bool(_zs) and not any(
+                            _ti in zone_tris.get(z, ()) for z in _zs)
+                        if not (_struct_bad or _zone_bad):
+                            continue
+                        if _nv is None:
+                            continue
+                        del _o2n[_ov]
+                        if _ntb is None or _nv >= len(pos):
+                            _rel += 1
+                            continue
+                        if _zs:
+                            _cand = set()
+                            for z in _zs:
+                                _cand |= zone_tris.get(z, set())
+                            _cand &= _valid_t
+                        else:
+                            _cand = _surv_t
+                        if not _cand:
+                            _rel += 1
+                            continue
+                        _ti2, _dist = mcloth.nearest_tri_dist(
+                            sim_verts, sim_tris, pos[_nv], valid=_cand)
+                        if _ti2 is None or (not _zs and _dist > _rad):
+                            _rel += 1
+                            continue
+                        _vals = mcloth.compute_row_values(
+                            sim_verts, sim_tris, _ti2,
+                            pos[_nv], _ntb[_nv][0], _ntb[_nv][1])
+                        if _vals is None:
+                            _rel += 1
+                            continue
+                        _fix_rows[_nv] = _vals
+                        _re += 1
+                        _zmoved += int(_zone_bad and not _struct_bad)
+                    _zone_moved_total += _zmoved
+                    if _re or _rel:
+                        print(f"[AFoPMT] {block_name}: sim-edit row fix: "
+                              f"{_re} re-attached ({_zmoved} by zone), "
+                              f"{_rel} released to skinning")
+                    if _fix_rows:
+                        computed[block_name] = sorted(_fix_rows.items())
 
                 # Computed rows for appended slots. Three sources of binding:
                 #   1. a driven mmb_vertex_order source vertex (edited/generated
@@ -3892,7 +4374,35 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                                         bd, best = d, v
                     return best
 
+                _valid_tris = sim_fix[0] if sim_fix else None
+                _reused_vv = sim_fix[1] if sim_fix else ()
+
+                def _syn_cand(slot):
+                    """Candidate tris for a synthesized row: zone tris when
+                    the vert is zoned (new geometry may ride new sim), else
+                    the full valid set (None = all)."""
+                    c = _zone_cand(pos[slot], None)
+                    if c is None:
+                        return _valid_tris
+                    return (c & _valid_tris) if _valid_tris is not None else c
+
                 def _computed_row(slot, ti):
+                    cand = _syn_cand(slot)
+                    # A source tri that was deleted, rebuilt, or outside the
+                    # vert's zone can't be inherited: swap to the nearest
+                    # candidate tri up front.
+                    _bad_ti = (ti >= len(sim_tris)
+                               or (cand is not None and ti not in cand)
+                               or (sim_fix and (ti not in _valid_tris
+                                   or any(v in _reused_vv
+                                          for v in sim_tris[ti]))))
+                    if _bad_ti:
+                        if cand is not None and not cand:
+                            return None, False
+                        ti = mcloth.nearest_tri(sim_verts, sim_tris, pos[slot],
+                                                valid=cand)
+                        if ti is None:
+                            return None, False
                     vals = mcloth.compute_row_values(
                         sim_verts, sim_tris, ti,
                         pos[slot], nt[slot][0], nt[slot][1])
@@ -3900,7 +4410,8 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                     # lands far outside the given one - keeps the quantization
                     # ranges tight and the binding local.
                     if vals is not None and not mcloth.bary_within(vals):
-                        ti2 = mcloth.nearest_tri(sim_verts, sim_tris, pos[slot])
+                        ti2 = mcloth.nearest_tri(sim_verts, sim_tris, pos[slot],
+                                                 valid=cand)
                         if ti2 is not None and ti2 != ti:
                             v2 = mcloth.compute_row_values(
                                 sim_verts, sim_tris, ti2,
@@ -3964,7 +4475,8 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                     if (colors is not None
                             and ((user_mask and colors[slot][0] > 0)
                                  or (attr_present and colors[slot][0] >= 128))):
-                        ti = mcloth.nearest_tri(sim_verts, sim_tris, pos[slot])
+                        ti = mcloth.nearest_tri(sim_verts, sim_tris, pos[slot],
+                                                valid=_syn_cand(slot))
                         if ti is not None:
                             vals, _ = _computed_row(slot, ti)
                             if vals is not None:
@@ -3972,7 +4484,9 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                                 flagged += 1
 
                 if rows:
-                    computed[block_name] = sorted(rows.items())
+                    _merged = dict(computed.get(block_name, []))
+                    _merged.update(rows)
+                    computed[block_name] = sorted(_merged.items())
                     print(f"[AFoPMT] {block_name}: computed rows for {len(rows)}"
                           f"/{slot_total - append_base} appended vert(s) "
                           f"({retargeted} re-attached, {transferred} nearest-"
@@ -3986,6 +4500,10 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                     for slot, donor in color_patches:
                         mmb_color_patches.append(
                             (vob_abs + slot * ns_, bytes(colors[donor])))
+            if _zone_moved_total and operator:
+                operator.report({'INFO'},
+                    f"Cloth zones re-assigned {_zone_moved_total} render "
+                    f"row(s) across LODs.")
     except Exception as e:
         print(f"[AFoPMT] mcloth geometry pass skipped: {e}")
         rebind = {}
@@ -4005,15 +4523,19 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
         except OSError as e:
             print(f"[AFoPMT] cloth color patch failed: {e}")
 
-    out_bytes, stats = mcloth.rewrite(data, remaps, rebind=rebind, computed=computed)
+    out_bytes, stats = mcloth.rewrite(data, remaps, rebind=rebind,
+                                      computed=computed, sim=sim_arg,
+                                      sim_free=True,
+                                      sim_reuse=sim_reuse_arg)
     out_path = os.path.splitext(out_mmb_path)[0] + '.mcloth'
     with open(out_path, 'wb') as f:
         f.write(out_bytes)
     if operator:
         parts = ', '.join(f"{name.rsplit('_CLOTH_RENDER', 1)[-1] or 'LOD0'} {ob}->{nb}"
                           for name, (ob, nb) in stats.items())
+        detail = f"driven verts: {parts}" if parts else "sim section updated"
         operator.report({'INFO'},
-            f"Cloth mapping updated -> {os.path.basename(out_path)} (driven verts: {parts})")
+            f"Cloth mapping updated -> {os.path.basename(out_path)} ({detail})")
 
 
 class GenerateLODs(bpy.types.Operator):
