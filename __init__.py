@@ -3,7 +3,7 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt, SaintBaron",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 69),
+    "version": (0, 1, 70),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 11-17.",
     "category": "Import-Export"
@@ -534,6 +534,8 @@ class SkeletalMeshAsset(Asset):
                 self.exported_append_sources = {}
                 # sim budget reuse: orphaned slots rewritten with new geometry
                 self.exported_sim_reused = set()
+                # sim slots whose position changed vs source (a sim MOVE)
+                self.exported_sim_moved = set()
                 # sim tri slots present in the CURRENT mesh (excl. phantoms)
                 self.exported_sim_valid_tris = None
                 # first appended slot index (== original vc) of the last slot export
@@ -1725,6 +1727,7 @@ class BlenderMeshExporter:
             lod.exported_append_sources = {}
             lod.exported_append_base = 0
             lod.exported_sim_reused = set()
+            lod.exported_sim_moved = set()
             lod.exported_sim_valid_tris = None
             if _is_cloth_render or _is_cloth_sim:
                 _orig_vc_file = unpack('<I', file_data[lod.start_offset:lod.start_offset + 4])[0]
@@ -1837,6 +1840,20 @@ class BlenderMeshExporter:
                 for _vi, _slot in slot_map.items():
                     _vd_out[_slot * vs:(_slot + 1) * vs] = vd[_vi * vs:(_vi + 1) * vs]
                     _nd_out[_slot * ns:(_slot + 1) * ns] = nd[_vi * ns:(_vi + 1) * ns]
+                # Record sim slots whose POSITION changed vs the source, here
+                # where the source bytes (file_data) are still intact - the
+                # exported mmb may overwrite the source file (chained _MOD
+                # exports), so the mcloth layer can't recompute this afterward.
+                if _is_cloth_sim and mesh.position_type == 1:
+                    for _slot in slot_map.values():
+                        if _slot >= _orig_vc_file or _slot in lod.exported_sim_reused:
+                            continue
+                        _o = _abs_voa + _slot * vs
+                        _op = unpack('<fff', file_data[_o:_o + 12])
+                        _np = unpack('<fff', _vd_out[_slot * vs:_slot * vs + 12])
+                        if ((_np[0]-_op[0])**2 + (_np[1]-_op[1])**2
+                                + (_np[2]-_op[2])**2) > 2.5e-9:  # 0.05mm
+                            lod.exported_sim_moved.add(_slot)
                 vd = bytes(_vd_out)
                 nd = bytes(_nd_out)
 
@@ -3955,8 +3972,25 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
     # rows). Move and inert-delete stay on the verbatim passthrough.
     # Count growth is engine-unstable and no longer produced by the
     # exporter; the legacy grown-count path remains as a fallback.
+    # Source-asset baseline: a driven RENDER vert's in-game position is
+    # reconstructed from its ROW (relative to the sim triangle), NOT the mmb
+    # rest position - so moving a render vert without re-encoding its row
+    # snaps it back in-game. Used below to find moved render verts (their rows
+    # are recomputed). Moved SIM verts are handled separately - the render
+    # follows the cage there, so their rows stay vanilla.
+    _src_bytes = _src_asset = None
+    try:
+        with open(SWOMT.AssetPath, 'rb') as _sf:
+            _src_bytes = _sf.read()
+        _src_asset = SkeletalMeshAsset()
+        _src_asset.parse(io.BytesIO(_src_bytes))
+    except Exception as _se:
+        print(f"[AFoPMT] moved-vert baseline unavailable: {_se}")
+        _src_asset = None
+
     sim_arg = None
     sim_reuse_arg = None
+    sim_move_arg = None  # (new_sim_positions, moved_slot_set) for a sim move
     sim_fix = None # (valid_tri_set_or_None, reused_vert_set) for render-row fix
     try:
         with open(out_mmb_path, 'rb') as f:
@@ -3982,6 +4016,20 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
             _appended_v = (set(range(_ovc0, len(_sp)))
                            if _sp is not None and _ovc0 is not None
                            and len(_sp) > _ovc0 else set())
+            # A sim MOVE (positions changed, topology same) refreshes the
+            # sim-section values (0x110b positions + rest lengths/tethers of
+            # the moved verts). This keeps the mcloth sim rest state matching
+            # the moved mmb geometry AND - because it changes the sim-section
+            # bytes - forces the engine to re-cook the render->sim mapping, so
+            # render-vertex edits in the same export take effect (otherwise
+            # they are cached against the old fabric and ignored in-game).
+            # The render rows themselves stay VANILLA: the render follows the
+            # reshaped cage via its stored coefficients. The moved-slot set is
+            # recorded during _write_mod_file (the source bytes are intact
+            # there - the exported mmb may overwrite the source in a chained
+            # _MOD export, so a post-hoc position compare would see nothing).
+            _moved = (getattr(_mem.lods[0], 'exported_sim_moved', set())
+                      if _mem else set())
             # Render rows riding deleted/rebuilt sim triangles stretch: when the
             # sim was exported this session, re-attach or release them below.
             if _st is not None and _valid is not None and (
@@ -4007,6 +4055,11 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                             "Sim vertex/triangle count changed - this is known "
                             "to be unstable in-game. Use delete+add so new "
                             "geometry reuses the freed slots instead.")
+                elif _moved:
+                    sim_move_arg = (_sp, _moved)
+                    print(f"[AFoPMT] sim move: {len(_moved)} vert(s) moved; "
+                          f"refreshing sim rest state (positions + rest "
+                          f"lengths) to re-cook the cloth mapping")
         elif len(_sims) > 1:
             print("[AFoPMT] sim section: multiple _CLOTH_SIM meshes - skipping "
                   "sim rewrite (unsupported)")
@@ -4014,6 +4067,7 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
         print(f"[AFoPMT] sim section pass skipped: {e}")
         sim_arg = None
         sim_reuse_arg = None
+        sim_move_arg = None
 
     # ZONE_* vertex groups on any imported cloth object mean rows may need
     # re-assignment even without a sim/render edit.
@@ -4032,10 +4086,11 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
             break
 
     if not remaps and sim_arg is None and sim_reuse_arg is None \
-            and sim_fix is None and not _zones_present:
-        # Nothing to remap (render unedited), no sim topology change (e.g. a
-        # sim move) and no zone assignments. Emit a verbatim copy so the
-        # exported mmb still ships with a matched .mcloth pair.
+            and sim_move_arg is None and sim_fix is None \
+            and not _zones_present:
+        # Nothing to remap (render unedited), no sim edit and no zone
+        # assignments. Emit a verbatim copy so the exported mmb still ships
+        # with a matched .mcloth pair.
         with open(os.path.splitext(out_mmb_path)[0] + '.mcloth', 'wb') as f:
             f.write(data)
         return
@@ -4051,16 +4106,6 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
             new_bytes = f.read()
         new_asset = SkeletalMeshAsset()
         new_asset.parse(io.BytesIO(new_bytes))
-        # Source-asset baseline for detecting MOVED driven render verts.
-        _src_bytes = _src_asset = None
-        try:
-            with open(SWOMT.AssetPath, 'rb') as _sf:
-                _src_bytes = _sf.read()
-            _src_asset = SkeletalMeshAsset()
-            _src_asset.parse(io.BytesIO(_src_bytes))
-        except Exception as _se:
-            print(f"[AFoPMT] moved-vert baseline unavailable: {_se}")
-            _src_asset = None
         for mesh in cloth_meshes:
             sim_name = mesh.name[:-len('_RENDER')] + '_SIM'
             new_render = next((m for m in new_asset.meshes if m.name == mesh.name), None)
@@ -4333,13 +4378,15 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                     if _fix_rows:
                         computed[block_name] = sorted(_fix_rows.items())
 
-                # --- MOVED DRIVEN VERTS: a driven vert's in-game position is
-                #     reconstructed from its ROW (sim tri + bary foot +
-                #     height + normal/tangent), NOT from the mmb rest
-                #     position. The height is rebound on every export, but an
-                #     IN-PLANE move kept the vanilla bary foot and snapped
-                #     back in-game. Recompute the full row of every claimed
-                #     vert whose exported position moved. ---
+                # MOVED RENDER VERTS: a driven vert's in-game position is
+                # reconstructed from its ROW (sim tri + bary foot +
+                # height + normal/tangent), NOT from the mmb rest
+                # position. The height is rebound on every export, but an
+                # IN-PLANE move kept the vanilla bary foot and snapped
+                # back in-game. Recompute the full row of every claimed
+                # RENDER vert whose exported position moved. (Moved SIM
+                # verts are deliberately NOT handled here - the render is
+                # meant to follow the reshaped sim cage.)
                 _opos = _orig_rpos.get(li)
                 _ntb2 = mcloth.mmb_lod_normals_tangents(new_bytes,
                                                         new_render, li)
@@ -4391,7 +4438,7 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                         _done.update(_mvd)
                         computed[block_name] = sorted(_done.items())
                         print(f"[AFoPMT] {block_name}: recomputed rows for "
-                              f"{len(_mvd)} moved driven vert(s)")
+                              f"{len(_mvd)} moved render vert(s)")
 
                 # Computed rows for appended slots. Three sources of binding:
                 #   1. a driven mmb_vertex_order source vertex (edited/generated
@@ -4619,7 +4666,8 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
     out_bytes, stats = mcloth.rewrite(data, remaps, rebind=rebind,
                                       computed=computed, sim=sim_arg,
                                       sim_free=True,
-                                      sim_reuse=sim_reuse_arg)
+                                      sim_reuse=sim_reuse_arg,
+                                      sim_move=sim_move_arg)
     out_path = os.path.splitext(out_mmb_path)[0] + '.mcloth'
     with open(out_path, 'wb') as f:
         f.write(out_bytes)

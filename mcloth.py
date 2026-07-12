@@ -1249,6 +1249,164 @@ def _sim_reuse_overrides(data, stream_end, new_pos, new_tri_bytes, reused):
     return ov
 
 
+def _sim_move_overrides(data, stream_end, new_pos, moved):
+    """Value-refresh for a sim MOVE (topology UNCHANGED): refresh 0x110b
+    positions to the moved geometry, recompute rest lengths (0x110d) for
+    constraint pairs touching a moved vert (widening 0x110e ranges as needed),
+    and recompute the decoded per-vert tether radii for moved verts. Constraint
+    PAIRS, the tri buffer, tether anchors and all counts stay vanilla.
+
+    Two purposes: (1) the sim rest state in the mcloth matches the moved mmb
+    geometry, and (2) changing the sim-section bytes makes the engine re-cook
+    the render->sim mapping, so render-vertex edits bundled into the same
+    export take effect (they are otherwise cached against the old fabric)."""
+    V = len(new_pos)
+    ov = {}
+    orig = {}
+    scan = 20
+    while scan + 8 <= stream_end:
+        tag, size = unpack('<II', data[scan:scan + 8])
+        t = tag & 0xFFFF
+        if t in (T_SIM_SECTS, T_SIM_PAIRS, T_SIM_RESTL, T_SIM_QUANT,
+                 T_SIM_REST, 0x1102, 0x112a):
+            orig.setdefault(t, data[scan + 8:scan + size])
+        scan += size
+    if (0x1102 not in orig or unpack('<I', orig[0x1102][:4])[0] != V
+            or not moved or T_SIM_REST not in orig):
+        return {}
+
+    def _dist(a, b):
+        p, q = new_pos[a], new_pos[b]
+        return ((p[0]-q[0])**2 + (p[1]-q[1])**2 + (p[2]-q[2])**2) ** 0.5
+
+    trips_pay = orig.get(T_SIM_QUANT)
+    trips = ([list(unpack('<fff', trips_pay[i*12:i*12+12]))
+              for i in range(len(trips_pay) // 12)] if trips_pay else [])
+    quant_changed = False
+    restl_pay = (bytearray(orig[T_SIM_RESTL])
+                 if T_SIM_RESTL in orig else None)
+    s3 = (list(unpack('<3I', orig[T_SIM_SECTS][:12]))
+          if T_SIM_SECTS in orig else None)
+    pairs_pay = orig.get(T_SIM_PAIRS)
+
+    def _q(val, sc, mn):
+        if sc <= 0:
+            return 0
+        return max(0, min(254, int(round((val - mn) / sc))))
+
+    def _widen_requant(ti, needed, offsets):
+        """Grow triplet `ti` to cover `needed`, requantizing existing bytes at
+        `offsets` under the new range. Returns the (scale, min) to use."""
+        nonlocal quant_changed
+        sc, mn, mx = trips[ti]
+        if sc <= 0 or not needed:
+            return sc, mn
+        lo, hi = min(needed), max(needed)
+        if lo >= mn - 1e-9 and hi <= mx + 1e-9:
+            return sc, mn
+        nmn, nmx = min(mn, lo), max(mx, hi)
+        nsc = (nmx - nmn) / 254.5
+        for o in offsets:
+            b = restl_pay[o]
+            if b == 255:
+                continue
+            restl_pay[o] = _q(mn + b * sc, nsc, nmn)
+        trips[ti] = [nsc, nmn, nmx]
+        quant_changed = True
+        return nsc, nmn
+
+    if restl_pay is not None and s3 is not None and len(trips) >= 3 \
+            and pairs_pay:
+        # rest lengths for pairs touching a moved vert
+        base_pair = 0
+        base_rest = 0
+        for si in range(3):
+            cnt = s3[si]
+            rows, lens = [], []
+            for r in range(cnt):
+                o = (base_pair + r) * 4
+                a, b = unpack('<HH', pairs_pay[o:o + 4])
+                if a in moved or b in moved:
+                    rows.append(r)
+                    lens.append(_dist(a, b))
+            if rows:
+                sc, mn = _widen_requant(si, lens,
+                                        [base_rest + r for r in range(cnt)])
+                for r, L in zip(rows, lens):
+                    restl_pay[base_rest + r] = _q(L, sc, mn)
+            base_pair += cnt
+            base_rest += (cnt + 15) // 16 * 16
+
+        # tether trailer: recompute the decoded 1.25*euclid radius window for
+        # verts that moved (or whose anchor moved); anchors themselves stay.
+        if 0x112a in orig:
+            c16 = (V + 15) // 16 * 16
+            base = sum((c + 15) // 16 * 16 for c in s3)
+            if base < len(restl_pay) and (len(restl_pay) - base) % c16 == 0:
+                k = (len(restl_pay) - base) // c16
+                a1 = [unpack('<H', orig[0x112a][i*2:i*2+2])[0]
+                      for i in range(V)]
+                tmoved = {v for v in range(V) if v in moved
+                          or (a1[v] < V and a1[v] in moved)}
+                wi = 0
+                u8i = 0
+                while wi < k:
+                    w0 = base + wi * c16
+                    if wi + 1 < k:
+                        vals = [unpack('<H', restl_pay[w0+i*2:w0+i*2+2])[0]
+                                for i in range(V)]
+                        pad_ok = (V >= c16 or unpack(
+                            '<H', restl_pay[w0+V*2:w0+V*2+2])[0] == V)
+                        if pad_ok and all(x < V for x in vals):
+                            wi += 2   # u16 anchor dup: unchanged on a move
+                            continue
+                    ti = 3 + u8i
+                    sc, mn = (trips[ti][0], trips[ti][1]) if ti < len(trips) \
+                        else (0.0, 0.0)
+                    if sc > 0:
+                        errs = []
+                        for v in range(V):
+                            if v in tmoved or a1[v] >= V:
+                                continue
+                            got = restl_pay[w0 + v] * sc + mn
+                            errs.append(abs(got - 1.25 * _dist(v, a1[v])))
+                            if len(errs) >= 48:
+                                break
+                        errs.sort()
+                        if errs and errs[len(errs)//2] < 3.0 * sc:
+                            nv = {v: 1.25 * _dist(v, a1[v]) for v in tmoved
+                                  if a1[v] < V and restl_pay[w0 + v] != 255}
+                            sc, mn = _widen_requant(
+                                ti, list(nv.values()),
+                                [w0 + u for u in range(V) if u not in tmoved])
+                            for v, val in nv.items():
+                                restl_pay[w0 + v] = _q(val, sc, mn)
+                    u8i += 1
+                    wi += 1
+
+    off = 20
+    while off + 8 <= stream_end:
+        tag, size = unpack('<II', data[off:off + 8])
+        t = tag & 0xFFFF
+        pay = data[off + 8:off + size]
+        new_pay = None
+        if t == T_SIM_REST:
+            rows = bytearray(pay)
+            for i in range(V):
+                x, y, z = new_pos[i]
+                rows[i * 16:i * 16 + 12] = pack('<fff', x, y, z)
+            new_pay = bytes(rows)
+        elif restl_pay is not None and t == T_SIM_RESTL:
+            new_pay = bytes(restl_pay)
+        elif quant_changed and t == T_SIM_QUANT:
+            body = b''.join(pack('<fff', *tr) for tr in trips)
+            new_pay = body + pay[len(body):]
+        if new_pay is not None and len(new_pay) == len(pay):
+            ov[off] = pack('<II', tag, 8 + len(new_pay)) + new_pay
+        off += size
+    return ov
+
+
 def sim_counts(data):
     """(sim vertex count, sim triangle count) read from the mcloth sim count
     fields, or (None, None) when absent. Lets callers detect a sim topology
@@ -1281,7 +1439,7 @@ def _emit_region(data, lo, hi, overrides):
 
 
 def rewrite(data, remaps, rebind=None, computed=None, sim=None, sim_free=False,
-            sim_reuse=None):
+            sim_reuse=None, sim_move=None):
     """
     Rewrite the mcloth chunk stream, remapping the per-LOD driven-vertex blocks.
 
@@ -1304,6 +1462,9 @@ def rewrite(data, remaps, rebind=None, computed=None, sim=None, sim_free=False,
            BUDGET-REUSE mode: counts unchanged, new verts occupy the reused
            (orphaned) slots; values rewritten in place. Takes precedence over
            `sim` and is the engine-stable path for adding sim geometry.
+    :param sim_move: (new_sim_positions, moved_slot_set) for a MOVE (topology
+           unchanged): refresh 0x110b positions + rest lengths/tethers for the
+           moved verts. Also forces the engine to re-cook the render mapping.
     :return: (new file bytes, {block_name: (old_B, new_B)})
     """
     stream_end, blocks = parse_blocks(data)
@@ -1311,6 +1472,8 @@ def rewrite(data, remaps, rebind=None, computed=None, sim=None, sim_free=False,
         sim_ov = _sim_reuse_overrides(data, stream_end, *sim_reuse)
     elif sim:
         sim_ov = _sim_overrides(data, stream_end, *sim, free_append=sim_free)
+    elif sim_move:
+        sim_ov = _sim_move_overrides(data, stream_end, *sim_move)
     else:
         sim_ov = {}
     stats = {}
