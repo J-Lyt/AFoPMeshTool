@@ -4051,6 +4051,16 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
             new_bytes = f.read()
         new_asset = SkeletalMeshAsset()
         new_asset.parse(io.BytesIO(new_bytes))
+        # Source-asset baseline for detecting MOVED driven render verts.
+        _src_bytes = _src_asset = None
+        try:
+            with open(SWOMT.AssetPath, 'rb') as _sf:
+                _src_bytes = _sf.read()
+            _src_asset = SkeletalMeshAsset()
+            _src_asset.parse(io.BytesIO(_src_bytes))
+        except Exception as _se:
+            print(f"[AFoPMT] moved-vert baseline unavailable: {_se}")
+            _src_asset = None
         for mesh in cloth_meshes:
             sim_name = mesh.name[:-len('_RENDER')] + '_SIM'
             new_render = next((m for m in new_asset.meshes if m.name == mesh.name), None)
@@ -4185,6 +4195,22 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                     if li not in _zone_lookups and _lod0_zone_fn is not None:
                         _zone_lookups[li] = _lod0_zone_fn
 
+            # Original render positions per LOD (moved-driven-vert baseline).
+            _orig_rpos = {}
+            if _src_asset is not None:
+                try:
+                    _orm = next((m for m in _src_asset.meshes
+                                 if m.name == mesh.name), None)
+                    if _orm is not None:
+                        for _li3 in range(len(_orm.lods)):
+                            _op3 = mcloth.mmb_lod_float_positions(
+                                _src_bytes, _orm, _li3)
+                            if _op3:
+                                _orig_rpos[_li3] = _op3
+                except Exception as _oe:
+                    print(f"[AFoPMT] moved-vert baseline skipped: {_oe}")
+                    _orig_rpos = {}
+
             _zone_moved_total = 0
             for li in range(len(new_render.lods)):
                 block_name = mesh.name if li == 0 else f"{mesh.name}_LOD{li}"
@@ -4306,6 +4332,66 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                               f"{_rel} released to skinning")
                     if _fix_rows:
                         computed[block_name] = sorted(_fix_rows.items())
+
+                # --- MOVED DRIVEN VERTS: a driven vert's in-game position is
+                #     reconstructed from its ROW (sim tri + bary foot +
+                #     height + normal/tangent), NOT from the mmb rest
+                #     position. The height is rebound on every export, but an
+                #     IN-PLANE move kept the vanilla bary foot and snapped
+                #     back in-game. Recompute the full row of every claimed
+                #     vert whose exported position moved. ---
+                _opos = _orig_rpos.get(li)
+                _ntb2 = mcloth.mmb_lod_normals_tangents(new_bytes,
+                                                        new_render, li)
+                if _opos is not None and _ntb2 is not None:
+                    _bb2 = blocks[block_name]
+                    _i4, _s4 = _bb2['chunks'][mcloth.T_INDICES]
+                    _n4 = (_s4 - 8) // 4
+                    _six2 = unpack(f'<{_n4}I', data[_i4 + 8:_i4 + _s4])
+                    _t4 = _bb2['chunks'][mcloth.T_TRI][0] + 8
+                    _o2n2 = remaps[block_name][2]
+                    _done = dict(computed.get(block_name, []))
+                    _valid2 = sim_fix[0] if sim_fix else None
+                    _mvd = {}
+                    for _r2, _ov2 in enumerate(_six2):
+                        _nv2 = _o2n2.get(_ov2)
+                        if (_nv2 is None or _nv2 in _done
+                                or _ov2 >= len(_opos) or _nv2 >= len(pos)
+                                or _nv2 >= len(_ntb2)):
+                            continue
+                        _q0 = _opos[_ov2]
+                        _p0 = pos[_nv2]
+                        if ((_p0[0]-_q0[0])**2 + (_p0[1]-_q0[1])**2
+                                + (_p0[2]-_q0[2])**2) <= 2.5e-9:  # 0.05mm
+                            continue
+                        _ti4 = unpack('<H', data[_t4+_r2*2:_t4+_r2*2+2])[0]
+                        if _ti4 >= len(sim_tris):
+                            continue
+                        _vals2 = mcloth.compute_row_values(
+                            sim_verts, sim_tris, _ti4,
+                            _p0, _ntb2[_nv2][0], _ntb2[_nv2][1])
+                        # moved far off its tri: re-attach (zone-aware)
+                        if _vals2 is not None \
+                                and not mcloth.bary_within(_vals2):
+                            _cand2 = _zone_cand(_p0, _valid2)
+                            _ti5 = mcloth.nearest_tri(
+                                sim_verts, sim_tris, _p0, valid=_cand2)
+                            if _ti5 is not None and _ti5 != _ti4:
+                                _v5 = mcloth.compute_row_values(
+                                    sim_verts, sim_tris, _ti5,
+                                    _p0, _ntb2[_nv2][0], _ntb2[_nv2][1])
+                                if _v5 is not None:
+                                    _vals2 = _v5
+                        if _vals2 is not None:
+                            # replace the vanilla row: drop it from the remap
+                            # so the computed row wins (same as the fix pass)
+                            del _o2n2[_ov2]
+                            _mvd[_nv2] = _vals2
+                    if _mvd:
+                        _done.update(_mvd)
+                        computed[block_name] = sorted(_done.items())
+                        print(f"[AFoPMT] {block_name}: recomputed rows for "
+                              f"{len(_mvd)} moved driven vert(s)")
 
                 # Computed rows for appended slots. Three sources of binding:
                 #   1. a driven mmb_vertex_order source vertex (edited/generated
