@@ -257,20 +257,5 @@ class SWOMTSettings(bpy.types.PropertyGroup):
         name="Export Options",
         default=True,
     )
-    force_lod0_mmb_override: bpy.props.StringProperty(
-        name="MMB Filename",
-        description="Original .mmb filename to look up in mmb_lod_presets.json",
-        default="",
-    )
-    force_lod0_output_path: bpy.props.StringProperty(
-        name="Force LOD0 Output Path",
-        default="",
-    )
-    force_lod0_cfg_path: bpy.props.StringProperty(
-        name="LOD Presets CFG",
-        description="Path to an existing lod_presets.cfg to update. Leave empty to generate a new one alongside the asset.",
-        default="",
-        subtype="FILE_PATH",
-    )
 
 CLASSES = (AFOPPreferences, SWOMTSettings)

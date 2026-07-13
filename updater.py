@@ -1,15 +1,11 @@
 """Self-update support for the complete add-on package."""
 
-import json
 import os
 import re
 import threading
 import urllib.request
 
 import bpy
-
-from .log import logger
-
 
 RAW_BASE = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/master"
 RAW_INIT_URL = f"{RAW_BASE}/__init__.py"
@@ -34,8 +30,7 @@ CODE_FILES = (
     "ui.py",
     "updater.py",
 )
-DATA_FILES = ("lod_presets.cfg", "mmb_lod_presets.json")
-UPDATE_FILES = CODE_FILES + DATA_FILES
+UPDATE_FILES = CODE_FILES
 
 _update_status = None
 _update_error = None
@@ -48,36 +43,6 @@ def _plugin_dir():
 def _download_bytes(url):
     request = urllib.request.urlopen(url, timeout=30)
     return request.read()
-
-
-def _download_data_file(url, filename):
-    """Download one support file to the add-on directory."""
-    try:
-        data = _download_bytes(url)
-        destination = os.path.join(_plugin_dir(), filename)
-        with open(destination, "wb") as stream:
-            stream.write(data)
-        return True, None
-    except Exception as error:
-        return False, str(error)
-
-
-def _check_data_files():
-    """Download missing non-code data files in the background."""
-    missing = [name for name in DATA_FILES
-               if not os.path.isfile(os.path.join(_plugin_dir(), name))]
-    if not missing:
-        return
-
-    def download_missing():
-        for filename in missing:
-            ok, error = _download_data_file(f"{RAW_BASE}/{filename}", filename)
-            if ok:
-                logger.info("Downloaded missing data file %s", filename)
-            else:
-                logger.warning("Failed to download %s: %s", filename, error)
-
-    threading.Thread(target=download_missing, daemon=True).start()
 
 
 def _version_from_source(source):
@@ -127,12 +92,6 @@ def _validate_payloads(payloads):
             compile(source, filename, "exec")
         except Exception as error:
             raise ValueError(f"Invalid Python file {filename}: {error}") from error
-    try:
-        json.loads(payloads["mmb_lod_presets.json"].decode("utf-8"))
-    except Exception as error:
-        raise ValueError(f"Invalid mmb_lod_presets.json: {error}") from error
-
-
 def _install_payloads(payloads):
     """Stage every file, then replace the package with rollback on failure."""
     plugin_dir = _plugin_dir()

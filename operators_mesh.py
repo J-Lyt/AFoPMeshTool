@@ -1,147 +1,9 @@
 """LOD, mesh, UV, and normals operators."""
 
-import json
-import os
-
 import bpy
 
 from . import addon_state
 from .exporter import BME
-
-def _force_lod0_generate_cfg(mmb_name: str, asset_dir: str, cfg_override: str = "", operator=None) -> str:
-    """
-    Look up mmb_name in mmb_lod_presets.json, find its preset names,
-    then write a modified lod_presets.cfg into asset_dir (or update cfg_override)
-    with those presets having manualLodPixelSteps = {1, 1, 1}.
-    Returns a status message string.
-    """
-    import re as _re
-    plugin_dir = os.path.dirname(os.path.abspath(__file__))
-    json_path = os.path.join(plugin_dir, "mmb_lod_presets.json")
-    cfg_path = cfg_override if cfg_override else os.path.join(plugin_dir, "lod_presets.cfg")
-    out_path = cfg_override if cfg_override else os.path.join(asset_dir, "lod_presets.cfg")
-
-    if not os.path.isfile(json_path):
-        return f"mmb_lod_presets.json not found in plugin folder."
-    if not os.path.isfile(cfg_path):
-        return f"lod_presets.cfg not found in plugin folder."
-
-    with open(json_path, 'r', encoding='utf-8') as f:
-        db = json.load(f)
-
-    # Match any JSON entry whose mmb name is contained within the asset filename.
-    mmb_stem = os.path.splitext(mmb_name.strip())[0].lower()
-    matches = [e for e in db if os.path.splitext(e['mmb'])[0].lower() in mmb_stem]
-    if not matches:
-        return f"'{mmb_name}' not found in mmb_lod_presets.json."
-    if len(matches) > 1:
-        return f"Multiple entries matched '{mmb_name}' - please specify the exact filename."
-
-    target_presets = set(p.strip().lower() for p in matches[0].get('lod_presets', []))
-    if not target_presets:
-        return f"No LOD presets listed for '{mmb_name}'."
-
-    with open(cfg_path, 'r', encoding='utf-8') as f:
-        cfg_text = f.read()
-
-    def replace_steps(block: str) -> str:
-        """Replace manualLodPixelSteps values with 1, 1, 1 in a preset block."""
-        return _re.sub(
-            r'(manualLodPixelSteps\s*=\s*\{)[^}]*(\})',
-            r'\g<1>\n\t\t\t1,\n\t\t\t1,\n\t\t\t1,\n\t\t\2',
-            block,
-        )
-
-    # Match each preset block - one level of nesting for manualLodPixelSteps {}
-    block_pattern = _re.compile(r'(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})', _re.DOTALL)
-
-    patched = 0
-    def patch_block(m):
-        nonlocal patched
-        block = m.group(0)
-        name_match = _re.search(r'name\s*=\s*"([^"]*)"', block)
-        if name_match and name_match.group(1).strip().lower() in target_presets:
-            patched += 1
-            return replace_steps(block)
-        return block
-
-    new_cfg = block_pattern.sub(patch_block, cfg_text)
-
-    with open(out_path, 'w', encoding='utf-8') as f:
-        f.write(new_cfg)
-
-    return f"Patched {patched} preset(s) for '{mmb_name}' -> lod_presets.cfg updated."
-
-class ForceLOD0(bpy.types.Operator):
-    """Generate a lod_presets.cfg that forces LOD0 for this mesh's presets"""
-    bl_idname  = 'object.force_lod0'
-    bl_label   = 'Force LOD0'
-    bl_options = {'REGISTER'}
-
-    needs_override: bpy.props.BoolProperty(default=False, options={'HIDDEN'})
-
-    @classmethod
-    def poll(cls, context):
-        return addon_state.asset is not None
-
-    def invoke(self, context, event):
-        SWOMT = context.scene.SWOMT
-        mmb_name = os.path.basename(SWOMT.AssetPath) if SWOMT.AssetPath else ''
-        plugin_dir = os.path.dirname(os.path.abspath(__file__))
-        json_path  = os.path.join(plugin_dir, "mmb_lod_presets.json")
-        found = False
-        if mmb_name and os.path.isfile(json_path):
-            with open(json_path, 'r', encoding='utf-8') as f:
-                db = json.load(f)
-            mmb_stem = os.path.splitext(mmb_name)[0].lower()
-            matches = [e for e in db if os.path.splitext(e['mmb'])[0].lower() in mmb_stem]
-            found = len(matches) == 1
-
-        if found:
-            self.needs_override = False
-            return self.execute(context)
-        else:
-            self.needs_override = True
-            SWOMT.force_lod0_mmb_override = mmb_name # fill with current mmb filename
-            return context.window_manager.invoke_props_dialog(self, width=420)
-
-    def draw(self, context):
-        layout = self.layout
-        SWOMT = context.scene.SWOMT
-        mmb_name = os.path.basename(SWOMT.AssetPath) if SWOMT.AssetPath else ''
-        if mmb_name:
-            layout.label(text=f"'{mmb_name}' was not found in mmb_lod_presets.json.")
-        else:
-            layout.label(text="No .mmb file loaded.")
-        layout.label(text="Enter the original .mmb filename to look up:")
-        layout.prop(SWOMT, "force_lod0_mmb_override", text="")
-
-    def execute(self, context):
-        SWOMT = context.scene.SWOMT
-        if self.needs_override:
-            mmb_name = SWOMT.force_lod0_mmb_override.strip()
-        else:
-            mmb_name = os.path.basename(SWOMT.AssetPath) if SWOMT.AssetPath else ''
-
-        if not mmb_name:
-            self.report({'ERROR'}, "No .mmb filename provided.")
-            return {'CANCELLED'}
-
-        asset_dir = os.path.dirname(SWOMT.AssetPath) if SWOMT.AssetPath else ''
-        if not asset_dir:
-            self.report({'ERROR'}, "No asset path loaded.")
-            return {'CANCELLED'}
-
-        cfg_override = SWOMT.force_lod0_cfg_path.strip()
-        msg = _force_lod0_generate_cfg(mmb_name, asset_dir, cfg_override=cfg_override, operator=self)
-        if msg.startswith("Patched"):
-            SWOMT.force_lod0_output_path = cfg_override if cfg_override else os.path.join(asset_dir, "lod_presets.cfg")
-            self.report({'INFO'}, msg)
-        else:
-            SWOMT.force_lod0_output_path = ""
-            self.report({'ERROR'}, msg)
-            return {'CANCELLED'}
-        return {'FINISHED'}
 
 def _max_weights_for_mesh(mesh):
     """Max bone influences per vertex that the mesh's vertex stride can store.
@@ -580,6 +442,6 @@ class ClearNormals(bpy.types.Operator):
         return {'FINISHED'}
 
 CLASSES = (
-    ForceLOD0, GenerateLODs, RemoveMesh, RevertMesh, ScaleUVs,
-    RenameMesh, ComputeNormals, ClearNormals,
+    GenerateLODs, RemoveMesh, RevertMesh, ScaleUVs, RenameMesh,
+    ComputeNormals, ClearNormals,
 )

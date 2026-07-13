@@ -31,35 +31,6 @@ class BrowseMMBFile(bpy.types.Operator):
         context.scene.SWOMT.AssetPath = self.filepath
         return {'FINISHED'}
 
-class BrowseLodPresetsCfg(bpy.types.Operator):
-    """Select an existing lod_presets.cfg to update"""
-    bl_idname = "object.browse_lod_presets_cfg"
-    bl_label  = "Select lod_presets.cfg"
-
-    filepath:    bpy.props.StringProperty(subtype="FILE_PATH")
-    filter_glob: bpy.props.StringProperty(default="*.cfg", options={'HIDDEN'})
-
-    def invoke(self, context, event):
-        current = context.scene.SWOMT.force_lod0_cfg_path
-        if current:
-            self.filepath = current
-        context.window_manager.fileselect_add(self)
-        return {'RUNNING_MODAL'}
-
-    def execute(self, context):
-        context.scene.SWOMT.force_lod0_cfg_path = self.filepath
-        return {'FINISHED'}
-
-class ClearLodPresetsCfg(bpy.types.Operator):
-    """Clear the selected lod_presets.cfg"""
-    bl_idname = "object.clear_lod_presets_cfg"
-    bl_label  = "Clear lod_presets.cfg selection"
-
-    def execute(self, context):
-        context.scene.SWOMT.force_lod0_cfg_path = ""
-        return {'FINISHED'}
-
-
 class LoadMMB(bpy.types.Operator):
     """Reads data from base .mmb file"""
     bl_idname = "object.load_mmb"
@@ -353,7 +324,6 @@ class ExportAllLODs(bpy.types.Operator):
         return {'FINISHED'}
 
 CLASSES = (
-    BrowseMMBFile, BrowseLodPresetsCfg, ClearLodPresetsCfg,
-    LoadMMB, ImportLOD, ExportLOD, ImportAllLOD0s, ImportAllLOD1s,
-    ImportAllLOD2s, ImportAllLOD3s, ExportAllLODs,
+    BrowseMMBFile, LoadMMB, ImportLOD, ExportLOD, ImportAllLOD0s,
+    ImportAllLOD1s, ImportAllLOD2s, ImportAllLOD3s, ExportAllLODs,
 )

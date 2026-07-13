@@ -124,8 +124,6 @@ classes = (
     settings.AFOPPreferences,
     settings.SWOMTSettings,
     operators_io.BrowseMMBFile,
-    operators_io.BrowseLodPresetsCfg,
-    operators_io.ClearLodPresetsCfg,
     operators_mesh.ComputeNormals,
     operators_mesh.ClearNormals,
     operators_io.ImportAllLOD0s,
@@ -133,7 +131,6 @@ classes = (
     operators_io.ImportAllLOD2s,
     operators_io.ImportAllLOD3s,
     operators_io.ExportAllLODs,
-    operators_mesh.ForceLOD0,
     operators_bones.RemapMeshBone,
     operators_bones.AddMeshBone,
     operators_bones.MergeSkeletons,
@@ -165,7 +162,6 @@ def register():
         bpy.app.handlers.load_post.append(settings._on_load_post)
     settings.apply_debug_logging_preference()
     updater.start_update_check()
-    updater._check_data_files()
 
 
 def unregister():

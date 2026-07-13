@@ -81,21 +81,6 @@ class SWOMTPanel(bpy.types.Panel):
             pose_row.enabled = arm_obj is not None and arm_obj.type == 'ARMATURE'
             pose_row.operator("object.export_posed_bone_matrices",
                               text="Export Pose as New Rest Pose", icon="ARMATURE_DATA")
-            force_row = layout.row(align=True)
-            cfg_selected = bool(SWOMT.force_lod0_cfg_path.strip())
-            btn_text = "Update 'lod_presets.cfg' file (Force LOD0)" if cfg_selected else "Generate 'lod_presets.cfg' file (Force LOD0)"
-            force_row.operator("object.force_lod0", text=btn_text, icon='FILE_NEW')
-            force_row.operator("object.browse_lod_presets_cfg", text="", icon='FILEBROWSER')
-            if cfg_selected:
-                force_row.operator("object.clear_lod_presets_cfg", text="", icon='REMOVE')
-            if SWOMT.force_lod0_output_path:
-                info_box = layout.box()
-                if cfg_selected:
-                    info_box.label(text="Updated file:", icon='INFO')
-                    info_box.label(text=SWOMT.force_lod0_output_path)
-                else:
-                    info_box.label(text="Place generated file at:", icon='INFO')
-                    info_box.label(text=r"...\AFOP\rogue\modules\core\graphobject\lod_presets.cfg")
 
             # Export Options collapsible box
             forced = _vert_count_changed()
