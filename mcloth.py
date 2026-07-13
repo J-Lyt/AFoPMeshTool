@@ -65,6 +65,74 @@ DUP_SCALES = {0x1137: 0x1133, 0x1139: 0x1135}
 # kept for compatibility with older callers/tests
 SCALE_TABLE_PAIRS = VALUE_TABLES + ((0x1137, 0x1138, 2), (0x1139, 0x113a, 1))
 
+# ---------------- Sim section ----------------
+# Outside the render LOD blocks the stream carries one _CLOTH_SIM description
+# (header chunks before the first 0x1116, and a tail after the last block).
+# Decoded so far (corpus-verified) and rewritten to keep the sim mesh count
+# fields consistent after a sim-mesh edit:
+#   0x1102 u32 = sim vertex count           0x1112 u32 = sim triangle count
+#   0x11d1 u32[2], [0] = sim triangle count 0x111d u32 = ceil(V,16)
+#   0x110b = 16B float4 per sim vert, ceil(V,16) rows: rest (x,y,z) matching the
+#            mmb sim positions + a w flag (0.0 free / -2.0 pinned/kinematic)
+#   0x1113 = byte-identical copy of the sim triangle index buffer (6B per tri)
+#   per sim VERT (padded to ceil(V,16)): 0x11b3 (1B), 0x112a (2B)
+#   per sim TRI: 0x11d2 (1B), 0x11d3 (2B), 0x111e[1] (2B triangle permutation)
+# Constraint fabric (serialized NvCloth cooked fabric, decoded 2026-07-09):
+#   0x1123 u32[3] = constraint counts of the 3 sections/phases:
+#            [stretch (mesh edges), shearing (quad diagonals + shear-dominant
+#            edges), bending (2-apart pairs)]. Every constraint has >=1
+#            movable endpoint (0x110b flag == 0.0).
+#   0x1124 = u16 vertex-index PAIRS, section by section (mIndices)
+#   0x110d = u8 rest length per constraint, per section quantized to that
+#            section's own range, EACH SECTION padded to 16B, then a trailing
+#            32-byte record (kept verbatim; meaning unknown)
+#   0x110e = 6 x (scale float, min float, max float) quantization triplets,
+#            scale = (max-min)/254.5; [0:3] = the 3 rest-length sections,
+#            [3:6] = other quantized data (kept verbatim)
+#   0x110c u32[6]: [0:3] = ceil(section/16) SIMD-16 group counts; [3:6] =
+#            solver optimization hints (exact semantics unknown; smaller is
+#            always safe, vanilla has zeros)
+#   0x1111 u32[3] = per-section count (multiple of 8) of leading constraints
+#            the solver may run 8-wide; optimization hint, 0 = scalar = safe
+#   0x111e[0] = free (movable) vertex list, u16 each
+# ADD strategy - BUDGET REUSE (in-game finding 2026-07-10: GROWING the sim
+# vert/tri counts crashes or rejects in every tested configuration - the
+# engine holds count-tied state we cannot see. Count-PRESERVING value edits
+# are proven stable). So new sim verts REUSE orphaned (deleted) vert slots
+# and new tris reuse phantom tri slots; every chunk keeps its vanilla size
+# and count, only VALUES change:
+#   0x110b positions refreshed; reused slots keep their slot's free/pinned
+#   flag (free list must not change); 0x112a/0x11b3 rows -> donor values;
+#   0x1113 mirrors the new tri buffer (same size); constraint rows in
+#   0x1124/0x110d whose pairs reference a reused slot are REWRITTEN in place
+#   (cooked pairs + rest lengths quantized under the section's EXISTING
+#   0x110e range, clamped) - spare rows are repointed to a duplicate of a
+#   cooked pair (a doubled distance constraint is valid), excess cooked
+#   constraints are dropped. 0x11dX/0x12eX etc. stay verbatim (per-tri
+#   records go stale in VALUE for reused tris but stay structurally valid).
+# The older append modes (grow counts, pinned or cooked-free) remain below
+# for reference but are known engine-unstable.
+SIM_VC_FIELDS = (0x1102,)              # u32 at payload +0 = sim vertex count
+SIM_TC_FIELDS = (0x1112, 0x11d1)       # u32 at payload +0 = sim triangle count
+SIM_PADV_FIELDS = (0x111d,)            # u32 = ceil(sim vertex count, 16)
+# Per-vert tables. 0x112a = TETHER ANCHOR: u16 index of a PINNED sim vert per
+# vertex (corpus: every value is a pinned vert). 0x11b3 = 1B/vert, undecoded.
+# Appended verts get their nearest-original DONOR's row (a zero here would
+# anchor new verts to vertex 0 - usually a FREE vert = invalid solver input).
+SIM_VERT_TABLES = {0x11b3: 1, 0x112a: 2}  # bytes per sim vert, padded to 16
+SIM_TRI_TABLES = {0x11d2: 1, 0x11d3: 2}  # bytes per sim tri (unpadded)
+T_SIM_REST = 0x110b                    # float4 rest position + flag per vert
+T_SIM_TRIS = 0x1113                    # sim triangle index buffer copy
+T_SIM_PERM = 0x111e                    # appears twice: [0]=free-vert list
+                                       # (2*free), [1]=triangle permutation (2*T)
+SIM_PIN_FLAG = -2.0                    # 0x110b w flag: pinned/kinematic vertex
+T_SIM_SECTS = 0x1123                   # u32[3] constraint section counts
+T_SIM_PAIRS = 0x1124                   # u16 constraint vertex pairs
+T_SIM_RESTL = 0x110d                   # u8 quantized rest lengths per section
+T_SIM_QUANT = 0x110e                   # 6 x (scale,min,max) float triplets
+T_SIM_GROUPS = 0x110c                  # u32[6] group counts + solver hints
+T_SIM_HINT8 = 0x1111                   # u32[3] 8-wide prefix hints
+
 
 def _pad16(b):
     return b + b'\x00' * ((-len(b)) % 16)
@@ -134,16 +202,27 @@ def _closest_point_tri_dist2(a, b, c, p):
     return dx*dx + dy*dy + dz*dz
 
 
-def nearest_tri(sim_verts, sim_tris, p):
+def nearest_tri(sim_verts, sim_tris, p, valid=None):
     """Index of the sim triangle closest to point p (true point-to-triangle
-    distance), or None for an empty list."""
+    distance), or None for an empty list. `valid` optionally restricts the
+    candidate triangle indices (e.g. excluding phantom tri slots)."""
+    return nearest_tri_dist(sim_verts, sim_tris, p, valid)[0]
+
+
+def nearest_tri_dist(sim_verts, sim_tris, p, valid=None):
+    """(nearest valid triangle index, distance) - or (None, None)."""
     best, bd = None, None
     for ti, tri in enumerate(sim_tris):
-        d2 = _closest_point_tri_dist2(sim_verts[tri[0]], sim_verts[tri[1]],
-                                      sim_verts[tri[2]], p)
+        if valid is not None and ti not in valid:
+            continue
+        try:
+            d2 = _closest_point_tri_dist2(sim_verts[tri[0]], sim_verts[tri[1]],
+                                          sim_verts[tri[2]], p)
+        except ZeroDivisionError:
+            continue
         if bd is None or d2 < bd:
             bd, best = d2, ti
-    return best
+    return best, (math.sqrt(bd) if bd is not None else None)
 
 
 def bary_within(vals, tol=0.5):
@@ -486,7 +565,881 @@ def _build_values(data, blocks, tgt, block_name, new_vc, source, computed, rebin
     return b''.join(pieces), new_B
 
 
-def rewrite(data, remaps, rebind=None, computed=None):
+def _sim_rest_table(old_pay, orig_vc, new_pos, free_set=None):
+    """Rebuild 0x110b: float4 (x,y,z, flag) per sim vert, padded to ceil(V,16)
+    rows. Kept verts keep their flag byte-for-byte (their position refreshes
+    from new_pos - relevant when verts were moved). Appended verts are marked
+    FREE (0.0) when in free_set (they received cooked constraints), otherwise
+    PINNED (kinematic - needs no constraint entries, always safe)."""
+    new_vc = len(new_pos)
+    pin = pack('<f', SIM_PIN_FLAG)
+    free = pack('<f', 0.0)
+    rows = bytearray()
+    for i in range(new_vc):
+        x, y, z = new_pos[i]
+        if i < orig_vc and (i + 1) * 16 <= len(old_pay):
+            flag = old_pay[i * 16 + 12:i * 16 + 16]
+        else:
+            flag = free if (free_set and i in free_set) else pin
+        rows += pack('<fff', x, y, z) + flag
+    rows += b'\x00' * (((new_vc + 15) // 16 * 16 - new_vc) * 16)
+    return bytes(rows)
+
+
+def _resize_padded(old_pay, orig_n, new_n, per, blk):
+    """Resize a fixed per-element array (per bytes each, padded to blk elements).
+    Unchanged or shrunk counts preserve the original bytes verbatim (incl. the
+    original padding, so a null edit is byte-identical); a grown count keeps the
+    real elements and zero-fills the appended ones and the new padding."""
+    total = per * ((new_n + blk - 1) // blk * blk)
+    out = bytearray(total)
+    if new_n <= orig_n:
+        out[:] = old_pay[:total]
+    else:
+        out[:orig_n * per] = old_pay[:orig_n * per]
+    return bytes(out)
+
+
+def cook_appended_constraints(pos, mov, tris, orig_vc, new_set=None):
+    """
+    NvCloth-cooker reimplementation, restricted to constraints that involve a
+    NEW vertex (index >= orig_vc, or membership in new_set when given - used
+    by the budget-reuse path where new verts occupy reused slots). Returns
+    three [(pair, rest_length)] lists - [stretch, shearing, bending] -
+    matching the .mcloth sections.
+      stretch  : mesh edges (unless shear accumulation dominates)
+      shearing : shear-dominant edges + quadifier quad diagonals
+      bending  : non-edge 2-ring pairs with dominant nonzero bend accumulation
+    Every constraint needs >=1 movable endpoint. `mov` covers all verts
+    (new verts should be passed as movable).
+    """
+    def sub(a, b): return (a[0]-b[0], a[1]-b[1], a[2]-b[2])
+    def dt(a, b): return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+    def mg(a): return math.sqrt(dt(a, a))
+    def crs(a, b): return (a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2],
+                           a[0]*b[1]-a[1]*b[0])
+    SV = len(pos)
+    adj = {}
+    for a, b, c in tris:
+        for x, y in ((a, b), (b, c), (c, a)):
+            adj.setdefault(x, set()).add(y)
+            adj.setdefault(y, set()).add(x)
+    # classification accumulators over 1-ring and 2-ring paths (NvCloth Edge)
+    acc = {}
+    for i in range(SV):
+        wi = 1.0 if mov[i] else 0.0
+        for m in adj.get(i, ()):
+            if wi + (1.0 if mov[m] else 0.0) > 0:
+                e = acc.setdefault((min(i, m), max(i, m)), [0.0, 0.0, 0.0])
+                e[0] += 0.1
+            for n2 in adj.get(m, ()):
+                if n2 != i and wi + (1.0 if mov[n2] else 0.0) > 0:
+                    p0, p1, p2 = pos[i], pos[m], pos[n2]
+                    ar = mg(crs(sub(p1, p0), sub(p2, p1)))
+                    d2 = dt(sub(p2, p0), sub(p2, p0)) or 1e-12
+                    r = ar / d2
+                    e = acc.setdefault((min(i, n2), max(i, n2)), [0.0, 0.0, 0.0])
+                    e[2] += max(0.0, 0.15 - abs(0.45 - r))
+                    e[1] += max(0.0, 0.1 - r) * 3
+    edge_tris = {}
+    for ti, (a, b, c) in enumerate(tris):
+        for x, y in ((a, b), (b, c), (c, a)):
+            edge_tris.setdefault((min(x, y), max(x, y)), []).append(ti)
+    # quadifier: greedy squarest-first triangle matching -> shear diagonals
+    def cosc(o, p, q):
+        u = sub(pos[p], pos[o]); v = sub(pos[q], pos[o])
+        dn = mg(u) * mg(v) or 1e-12
+        return abs(dt(u, v)) / dn
+    sin60 = math.sin(math.radians(60))
+    cands = []
+    for e, tl in edge_tris.items():
+        if len(tl) != 2:
+            continue
+        a, b = e; t1, t2 = tl
+        c = [v for v in tris[t1] if v not in e][0]
+        d_ = [v for v in tris[t2] if v not in e][0]
+        cs = [cosc(c, b, a), cosc(a, c, d_), cosc(d_, a, b), cosc(b, d_, c)]
+        cands.append((max(cs), (min(c, d_), max(c, d_)), (t1, t2)))
+    cands.sort()
+    used = set(); diagonals = set()
+    for mx, dg, (t1, t2) in cands:
+        if mx > sin60 or t1 in used or t2 in used:
+            continue
+        if not (mov[dg[0]] or mov[dg[1]]):
+            continue
+        used.add(t1); used.add(t2); diagonals.add(dg)
+
+    if new_set is None:
+        def is_new(p): return p[0] >= orig_vc or p[1] >= orig_vc
+    else:
+        def is_new(p): return p[0] in new_set or p[1] in new_set
+    def length(p): return mg(sub(pos[p[0]], pos[p[1]]))
+    stretch = []; shear = []; bend = []
+    for e in edge_tris:
+        if not is_new(e) or not (mov[e[0]] or mov[e[1]]):
+            continue
+        st, bd, sh = acc.get(e, (0.0, 0.0, 0.0))
+        (shear if sh > max(st, bd) else stretch).append((e, length(e)))
+    for dg in diagonals:
+        if is_new(dg) and dg not in edge_tris:
+            shear.append((dg, length(dg)))
+    for pr, (st, bd, sh) in acc.items():
+        if (is_new(pr) and pr not in edge_tris and pr not in diagonals
+                and bd > 0 and bd > max(st, sh)):
+            bend.append((pr, length(pr)))
+    return [sorted(stretch), sorted(shear), sorted(bend)]
+
+
+def _grow_tether_trailer(trailing, orig_vc, new_vc, new_pos, donors, a1_pay,
+                         trips, free_set=None):
+    """Rebuild the 0x110d per-vert tether TRAILER for GROWN counts. Returns
+    (new_trailing_bytes, {0x110e trip index: (sc, mn, mx)}).
+
+    Windows resize from ceil16(orig_vc) to ceil16(new_vc) with REAL rows for
+    the appended verts: donor anchor in the u16 anchor-dup table (consistent
+    with the 0x112a donor copy), recomputed 1.25*euclid radii in the window
+    that encodes them, donor+slack transfer in the other length windows;
+    appended verts NOT in free_set are pinned (self anchor, zero lengths).
+    The u16 table spans TWO windows and must be re-laid out as one buffer -
+    naive per-window padding inserts bytes into the table's MIDDLE and
+    corrupts its second half. u8 windows get a fresh quant range over
+    kept+new values (existing rows requantized)."""
+    cvo = (orig_vc + 15) // 16 * 16
+    cvn = (new_vc + 15) // 16 * 16
+    if (not trailing or cvo == 0 or len(trailing) % cvo
+            or new_vc <= orig_vc):
+        return trailing, {}
+    k = len(trailing) // cvo
+    a1 = ([unpack('<H', a1_pay[i*2:i*2+2])[0] for i in range(orig_vc)]
+          if a1_pay is not None and len(a1_pay) >= orig_vc * 2 else None)
+    free_set = free_set or set()
+
+    def _d(p, q):
+        return ((p[0]-q[0])**2 + (p[1]-q[1])**2 + (p[2]-q[2])**2) ** 0.5
+
+    out = []
+    newtrips = {}
+    wi = 0
+    u8i = 0
+    while wi < k:
+        w = trailing[wi*cvo:(wi+1)*cvo]
+        if wi + 1 < k:
+            pair = trailing[wi*cvo:(wi+2)*cvo]
+            vals = [unpack('<H', pair[i*2:i*2+2])[0] for i in range(orig_vc)]
+            pad_ok = (orig_vc >= cvo or unpack(
+                '<H', pair[orig_vc*2:orig_vc*2+2])[0] == orig_vc)
+            if pad_ok and all(x < orig_vc for x in vals):
+                ents = []
+                for v in range(cvn):
+                    if v < orig_vc:
+                        ents.append(vals[v])
+                    elif v < new_vc:
+                        s = donors[v - orig_vc] \
+                            if v - orig_vc < len(donors) else 0
+                        ents.append(a1[s] if (a1 and v in free_set) else v)
+                    else:
+                        ents.append(v)  # self-index padding
+                out.append(b''.join(pack('<H', e) for e in ents))
+                wi += 2
+                continue
+        ti = 3 + u8i
+        sc, mn = (trips[ti][0], trips[ti][1]) if ti < len(trips) \
+            else (0.0, 0.0)
+        rows = bytearray(b'\xff' * cvn)
+        rows[:min(orig_vc, len(w))] = w[:orig_vc]
+        if sc > 0 and a1:
+            deq = [w[v] * sc + mn for v in range(orig_vc) if w[v] != 255]
+            errs = sorted(abs(w[v]*sc+mn - 1.25*_d(new_pos[v],
+                                                   new_pos[a1[v]]))
+                          for v in range(orig_vc))
+            e125 = bool(errs) and errs[len(errs)//2] < 3.0 * sc
+            newvals = {}
+            for v in range(orig_vc, new_vc):
+                if v not in free_set:
+                    newvals[v] = 0.0  # pinned: zero-length self tether
+                    continue
+                s = donors[v - orig_vc] if v - orig_vc < len(donors) else 0
+                if e125:
+                    newvals[v] = 1.25 * _d(new_pos[v], new_pos[a1[s]])
+                elif s < len(w) and w[s] == 255:
+                    newvals[v] = None  # donor row is filler: inherit it
+                elif mn < -sc:
+                    newvals[v] = w[s]*sc + mn - _d(new_pos[v], new_pos[s])
+                else:
+                    newvals[v] = w[s]*sc + mn + _d(new_pos[v], new_pos[s])
+            allv = deq + [x for x in newvals.values() if x is not None]
+            if allv:
+                nmn, nmx = min(allv), max(allv)
+                if nmx - nmn <= 0.0:
+                    nmx = nmn + max(abs(nmn), 1e-6)
+                nsc = (nmx - nmn) / 254.5
+                for v in range(orig_vc):
+                    if w[v] != 255:
+                        rows[v] = max(0, min(254, int(round(
+                            (w[v]*sc + mn - nmn) / nsc))))
+                for v, val in newvals.items():
+                    rows[v] = 255 if val is None else max(0, min(254, int(
+                        round((val - nmn) / nsc))))
+                newtrips[ti] = (nsc, nmn, nmx)
+        else:
+            for v in range(orig_vc, new_vc):
+                s = donors[v - orig_vc] if v - orig_vc < len(donors) else 0
+                rows[v] = w[s] if s < len(w) else 255
+        out.append(bytes(rows))
+        u8i += 1
+        wi += 1
+    return b''.join(out), newtrips
+
+
+def _sim_overrides(data, stream_end, new_pos, new_tri_bytes, free_append=False):
+    """Map {chunk_file_offset: full replacement chunk bytes} for the sim-section
+    chunks whose contents depend on the sim vertex/triangle counts. Chunks not
+    in the map are copied verbatim (including every undecoded chunk). With
+    free_append, appended verts get cooked constraints and are marked free
+    (they simulate); otherwise they are pinned (kinematic)."""
+    new_vc = len(new_pos)
+    new_tc = len(new_tri_bytes) // 6
+    ov = {}
+    # pre-scan: original counts + fabric chunk payloads
+    orig_vc = orig_tc = None
+    orig = {}
+    scan = 20
+    while scan + 8 <= stream_end:
+        tag, size = unpack('<II', data[scan:scan + 8])
+        t = tag & 0xFFFF
+        if t in SIM_VC_FIELDS and orig_vc is None:
+            orig_vc = unpack('<I', data[scan + 8:scan + 12])[0]
+        elif t in SIM_TC_FIELDS and orig_tc is None:
+            orig_tc = unpack('<I', data[scan + 8:scan + 12])[0]
+        if t in (T_SIM_SECTS, T_SIM_PAIRS, T_SIM_RESTL, T_SIM_QUANT, T_SIM_REST,
+                 0x11d2, 0x112a):
+            orig.setdefault(t, data[scan + 8:scan + size])
+        scan += size
+    if orig_vc is None:
+        orig_vc = new_vc
+    if orig_tc is None:
+        orig_tc = new_tc
+
+    # Donor map for appended verts: nearest ORIGINAL sim vert by rest position.
+    # Unknown per-vert tables get the donor's row - in-domain values everywhere
+    # (e.g. 0x112a tether anchors stay valid pinned verts).
+    donors = []
+    if new_vc > orig_vc and orig_vc > 0:
+        for v in range(orig_vc, new_vc):
+            p = new_pos[v]
+            best, bd = 0, float('inf')
+            for u in range(orig_vc):
+                q = new_pos[u]
+                d2 = ((p[0]-q[0])**2 + (p[1]-q[1])**2 + (p[2]-q[2])**2)
+                if d2 < bd:
+                    bd, best = d2, u
+            donors.append(best)
+
+    # --- free-append mode: cook constraints for the appended verts ---
+    fab = None
+    if (free_append and new_vc > orig_vc
+            and all(t in orig for t in (T_SIM_SECTS, T_SIM_PAIRS,
+                                        T_SIM_RESTL, T_SIM_QUANT))):
+        tris = [unpack('<HHH', new_tri_bytes[i * 6:i * 6 + 6])
+                for i in range(new_tc)]
+        rest = orig[T_SIM_REST]
+        mov = [unpack('<f', rest[i * 16 + 12:i * 16 + 16])[0] == 0.0
+               for i in range(orig_vc)] + [True] * (new_vc - orig_vc)
+        sections = cook_appended_constraints(new_pos, mov, tris, orig_vc)
+        free_set = {v for sec in sections for (p, _l) in sec
+                    for v in p if v >= orig_vc}
+        s3 = list(unpack('<3I', orig[T_SIM_SECTS][:12]))
+        pairs_pay = orig[T_SIM_PAIRS]
+        old_pairs = [[unpack('<HH', pairs_pay[(o + k) * 4:(o + k) * 4 + 4])
+                      for k in range(c)]
+                     for o, c in zip((0, s3[0], s3[0] + s3[1]), s3)]
+        # rest lengths: dequant kept, merge appended, requant fresh per section
+        trip = [unpack('<fff', orig[T_SIM_QUANT][i * 12:i * 12 + 12])
+                for i in range(len(orig[T_SIM_QUANT]) // 12)]
+        dpay = orig[T_SIM_RESTL]
+        new_sects = []   # per section: (pairs list, value list)
+        boff = 0
+        for si in range(3):
+            sc, mn, _mx = trip[si]
+            vals = [mn + dpay[boff + k] * sc for k in range(s3[si])]
+            boff += (s3[si] + 15) // 16 * 16
+            prs = list(old_pairs[si]) + [p for p, _l in sections[si]]
+            vals += [l for _p, l in sections[si]]
+            new_sects.append((prs, vals))
+        # requantize each section under a fresh range (render-table convention)
+        newtrip = {}
+        restl_out = bytearray()
+        for si, (_prs, vals) in enumerate(new_sects):
+            mn = min(vals) if vals else 0.0
+            mx = max(vals) if vals else 0.0
+            rng = mx - mn
+            if rng <= 0.0:
+                rng = max(abs(mn), 1e-6)
+                mx = mn + rng
+            s = rng / 254.5
+            newtrip[si] = (s, mn, mx)
+            restl_out += _pad16(bytes(max(0, min(254, int(round((v - mn) / s))))
+                                      for v in vals))
+        fab = dict(sections=new_sects, free_set=free_set,
+                   s3new=[len(p) for p, _v in new_sects],
+                   restl_sections=bytes(restl_out), newtrip=newtrip)
+
+    # --- 0x110d tether TRAILER rebuild for grown counts (both modes):
+    #     appended free verts get real donor-anchor/radius rows, pinned ones
+    #     get self/zero rows; the u16 anchor-dup table is re-laid out as one
+    #     buffer (per-window padding would corrupt its second half). ---
+    trail_new = None
+    trail_trips = {}
+    trail_b0 = 0
+    if (new_vc > orig_vc and T_SIM_RESTL in orig and T_SIM_SECTS in orig
+            and T_SIM_QUANT in orig):
+        s3p = unpack('<3I', orig[T_SIM_SECTS][:12])
+        trail_b0 = sum((s + 15) // 16 * 16 for s in s3p)
+        trips_all = [unpack('<fff', orig[T_SIM_QUANT][i*12:i*12+12])
+                     for i in range(len(orig[T_SIM_QUANT]) // 12)]
+        trail_new, trail_trips = _grow_tether_trailer(
+            orig[T_SIM_RESTL][trail_b0:], orig_vc, new_vc, new_pos, donors,
+            orig.get(0x112a), trips_all,
+            free_set=fab['free_set'] if fab else set())
+
+    perm_seen = 0
+    off = 20
+    while off + 8 <= stream_end:
+        tag, size = unpack('<II', data[off:off + 8])
+        t = tag & 0xFFFF
+        pay = data[off + 8:off + size]
+        new_pay = None
+        if t in SIM_VC_FIELDS:
+            new_pay = pack('<I', new_vc) + pay[4:]
+        elif t in SIM_TC_FIELDS:
+            new_pay = pack('<I', new_tc) + pay[4:]
+        elif t in SIM_PADV_FIELDS:
+            new_pay = pack('<I', (new_vc + 15) // 16 * 16) + pay[4:]
+        elif t == T_SIM_REST:
+            new_pay = _sim_rest_table(pay, orig_vc, new_pos,
+                                      fab['free_set'] if fab else None)
+        elif t == T_SIM_TRIS:
+            new_pay = new_tri_bytes
+        elif t in SIM_VERT_TABLES:
+            # SIMD-16 tables: the engine processes the PADDING lanes too, and
+            # vanilla keeps them inert (0x112a: self-index anchor = no-op;
+            # 0x11b3: 0xFF). Zeroing them turns phantom lanes into live work
+            # against vertex 0 -> intermittent corruption. Appended REAL verts
+            # get their donor's row; padding rows get the table's inert filler.
+            per = SIM_VERT_TABLES[t]
+            if new_vc <= orig_vc:
+                new_pay = _resize_padded(pay, orig_vc, new_vc, per, 16)
+            else:
+                cvn = (new_vc + 15) // 16 * 16
+                buf = bytearray(per * cvn)
+                keep = min(len(pay), per * cvn)
+                buf[:keep] = pay[:keep]
+                for k, v in enumerate(range(orig_vc, new_vc)):
+                    s = donors[k] if k < len(donors) else 0
+                    if (s + 1) * per <= len(pay):
+                        buf[v * per:(v + 1) * per] = pay[s * per:(s + 1) * per]
+                for v in range(new_vc, cvn):
+                    if t == 0x112a:
+                        buf[v * 2:(v + 1) * 2] = pack('<H', v)  # self-index
+                    else:
+                        buf[v * per:(v + 1) * per] = b'\xff' * per
+                new_pay = bytes(buf)
+        elif t in SIM_TRI_TABLES:
+            if (t == 0x11d3 and new_tc > orig_tc and orig_tc > 0
+                    and 0x11d2 in orig and len(pay) >= orig_tc * 2):
+                # 0x11d2/0x11d3 = CSR (count, offset) per tri into the 0x11d5
+                # records (d3[t]+d2[t] == d3[t+1], corpus 99/99). Appended tris
+                # must carry the CLOSING offset - not 0 - so both d2-based and
+                # offset-difference reads see an empty record range. A zero here
+                # makes the last original tri's range negative: heap overread,
+                # intermittent crash on equip.
+                last_off = unpack('<H', pay[(orig_tc - 1) * 2:orig_tc * 2])[0]
+                closing = last_off + orig[0x11d2][orig_tc - 1]
+                new_pay = (pay[:orig_tc * 2]
+                           + pack('<H', closing) * (new_tc - orig_tc))
+            else:
+                new_pay = _resize_padded(pay, orig_tc, new_tc, SIM_TRI_TABLES[t], 1)
+        elif fab and t == T_SIM_SECTS:
+            new_pay = pack('<3I', *fab['s3new'])
+        elif fab and t == T_SIM_PAIRS:
+            new_pay = b''.join(pack('<HH', *p)
+                               for prs, _v in fab['sections'] for p in prs)
+        elif t == T_SIM_RESTL and fab:
+            new_pay = fab['restl_sections'] + (
+                trail_new if trail_new is not None else pay[trail_b0:])
+        elif t == T_SIM_RESTL and trail_new is not None:
+            # pinned mode: sections verbatim, trailer rebuilt (self/zero rows
+            # for the appended kinematic verts, windows resized correctly)
+            new_pay = pay[:trail_b0] + trail_new
+        elif t == T_SIM_QUANT and (fab or trail_trips):
+            out = bytearray(pay)
+            merged = dict(fab['newtrip']) if fab else {}
+            merged.update(trail_trips)
+            for si, tr in merged.items():
+                if si * 12 + 12 <= len(out):
+                    out[si * 12:si * 12 + 12] = pack('<fff', *tr)
+            new_pay = bytes(out)
+        elif fab and t == T_SIM_GROUPS:
+            g = list(unpack(f'<{len(pay) // 4}I', pay))
+            for si in range(3):
+                g[si] = (fab['s3new'][si] + 15) // 16
+            new_pay = pack(f'<{len(g)}I', *g)
+        elif t == T_SIM_PERM:
+            # 0x111e appears twice: [0] = free-vertex list (extended with the
+            # appended free verts), [1] = triangle permutation (extended with
+            # identity indices, staying a valid permutation of 0..T-1).
+            if perm_seen == 0 and fab and fab['free_set']:
+                new_pay = pay + b''.join(pack('<H', v)
+                                         for v in sorted(fab['free_set']))
+            elif perm_seen == 1:
+                new_pay = pay + b''.join(pack('<H', i)
+                                         for i in range(orig_tc, new_tc))
+            perm_seen += 1
+        if new_pay is not None:
+            ov[off] = pack('<II', tag, 8 + len(new_pay)) + new_pay
+        off += size
+    return ov
+
+
+def _sim_reuse_overrides(data, stream_end, new_pos, new_tri_bytes, reused):
+    """
+    Budget-reuse rewrite: counts and chunk sizes stay EXACTLY vanilla; only
+    values change. `reused` = set of vert slots now occupied by new geometry.
+    Rewrites: 0x110b positions (flags preserved per slot), 0x112a/0x11b3 donor
+    rows for reused slots, 0x1113 tri buffer mirror, the constraint rows
+    referencing reused slots in 0x1124/0x110d (cooked pairs + rest lengths),
+    the per-vert TETHER trailer of 0x110d (stale rows there clamp reused
+    slots back to the DELETED vert's position), and 0x110e quant triplets,
+    which WIDEN when new lengths/radii fall outside the vanilla range (the
+    old clamping actively contracted long new edges); existing rows are
+    requantized under any widened range.
+    """
+    V = len(new_pos)
+    ov = {}
+    orig = {}
+    scan = 20
+    while scan + 8 <= stream_end:
+        tag, size = unpack('<II', data[scan:scan + 8])
+        t = tag & 0xFFFF
+        if t in (T_SIM_SECTS, T_SIM_PAIRS, T_SIM_RESTL, T_SIM_QUANT,
+                 T_SIM_REST, 0x1102, 0x112a):
+            orig.setdefault(t, data[scan + 8:scan + size])
+        scan += size
+    if (0x1102 not in orig or unpack('<I', orig[0x1102][:4])[0] != V
+            or not reused):
+        return {}
+    rest = orig[T_SIM_REST]
+    flags = [unpack('<f', rest[i * 16 + 12:i * 16 + 16])[0] for i in range(V)]
+    mov = [f == 0.0 for f in flags]
+
+    # donors for reused slots: nearest NON-reused vert
+    donor = {}
+    keep = [u for u in range(V) if u not in reused]
+    for v in reused:
+        p = new_pos[v]
+        best, bd = None, float('inf')
+        for u in keep:
+            q = new_pos[u]
+            d2 = (p[0]-q[0])**2 + (p[1]-q[1])**2 + (p[2]-q[2])**2
+            if d2 < bd:
+                bd, best = d2, u
+        donor[v] = best if best is not None else 0
+
+    def _dist(p, q):
+        return ((p[0]-q[0])**2 + (p[1]-q[1])**2 + (p[2]-q[2])**2) ** 0.5
+
+    # Quantization triplets (0x110e) are WIDENED when new values fall outside
+    # a section's/window's vanilla range - the old clamp-to-range behavior
+    # actively CONTRACTED long new edges to vanilla lengths (the 'clumped
+    # together' bug). Widening requantizes the existing rows under the new
+    # range: value-only, sizes identical, precision degrades gracefully.
+    trips_pay = orig.get(T_SIM_QUANT)
+    trips = ([list(unpack('<fff', trips_pay[i*12:i*12+12]))
+              for i in range(len(trips_pay) // 12)] if trips_pay else [])
+    quant_changed = False
+    restl_pay = (bytearray(orig[T_SIM_RESTL])
+                 if T_SIM_RESTL in orig else None)
+    s3 = (list(unpack('<3I', orig[T_SIM_SECTS][:12]))
+          if T_SIM_SECTS in orig else None)
+
+    def _q(val, sc, mn):
+        if sc <= 0:
+            return 0
+        return max(0, min(254, int(round((val - mn) / sc))))
+
+    def _widen_requant(ti, needed, offsets):
+        """Grow quant triplet `ti` to cover every value in `needed`,
+        requantizing the existing restl_pay bytes at `offsets` under the new
+        range. Returns the (scale, min) to quantize new values with."""
+        nonlocal quant_changed
+        sc, mn, mx = trips[ti]
+        if sc <= 0 or not needed:
+            return sc, mn
+        lo, hi = min(needed), max(needed)
+        if lo >= mn - 1e-9 and hi <= mx + 1e-9:
+            return sc, mn
+        nmn, nmx = min(mn, lo), max(mx, hi)
+        nsc = (nmx - nmn) / 254.5
+        for o in offsets:
+            b = restl_pay[o]
+            if b == 255:  # window filler, not a quantized value
+                continue
+            restl_pay[o] = _q(mn + b * sc, nsc, nmn)
+        trips[ti] = [nsc, nmn, nmx]
+        quant_changed = True
+        return nsc, nmn
+
+    # cook replacement constraints for the reused slots
+    new_pairs = None
+    if restl_pay is not None and s3 is not None and len(trips) >= 3 \
+            and T_SIM_PAIRS in orig:
+        tris = [unpack('<HHH', new_tri_bytes[i*6:i*6+6])
+                for i in range(len(new_tri_bytes) // 6)]
+        cooked = cook_appended_constraints(new_pos, mov, tris, V,
+                                           new_set=reused)
+        pairs_pay = bytearray(orig[T_SIM_PAIRS])
+        base_pair = 0
+        base_rest = 0
+        for si in range(3):
+            cnt = s3[si]
+            rows = []      # row indices (within section) referencing reused
+            keep_rows = [] # rows with no reused endpoint (dup donors)
+            for r in range(cnt):
+                o = (base_pair + r) * 4
+                a, b = unpack('<HH', pairs_pay[o:o + 4])
+                (rows if (a in reused or b in reused) else keep_rows).append(r)
+            ck = cooked[si]
+            if rows and ck:
+                sc, mn = _widen_requant(
+                    si, [L for _pr, L in ck],
+                    [base_rest + r for r in range(cnt)])
+            else:
+                sc, mn = trips[si][0], trips[si][1]
+            nwr = min(len(rows), len(ck))
+            for k in range(nwr):
+                r = rows[k]
+                (a, b), L = ck[k]
+                pairs_pay[(base_pair + r)*4:(base_pair + r)*4 + 4] = pack('<HH', a, b)
+                restl_pay[base_rest + r] = _q(L, sc, mn)
+            # spare old rows (deleted verts had more constraints than the new
+            # geometry needs): repoint to a duplicate of a valid row - a
+            # doubled distance constraint is a valid, slightly stiffer no-op
+            for k in range(nwr, len(rows)):
+                r = rows[k]
+                if ck:
+                    (a, b), L = ck[k % len(ck)]
+                    pairs_pay[(base_pair + r)*4:(base_pair + r)*4 + 4] = pack('<HH', a, b)
+                    restl_pay[base_rest + r] = _q(L, sc, mn)
+                elif keep_rows:
+                    src = keep_rows[k % len(keep_rows)]
+                    pairs_pay[(base_pair + r)*4:(base_pair + r)*4 + 4] = \
+                        pairs_pay[(base_pair + src)*4:(base_pair + src)*4 + 4]
+                    restl_pay[base_rest + r] = restl_pay[base_rest + src]
+            base_pair += cnt
+            base_rest += (cnt + 15) // 16 * 16
+        new_pairs = bytes(pairs_pay)
+
+    # --- 0x110d TETHER TRAILER: per-vert tables in ceil16(V)-byte windows
+    #     after the padded constraint sections - u8 quantized tether lengths
+    #     (quant params = 0x110e triplets [3:6], in window order; the window
+    #     matching 1.25*|pos[v]-pos[anchor]| is recomputed exactly, others
+    #     are donor-transferred with slack) and a u16 anchor table (a
+    #     DUPLICATE of 0x112a spanning two windows, self-index padding).
+    #     Left stale, these tether a reused slot to its DELETED position. ---
+    if restl_pay is not None and s3 is not None and 0x112a in orig:
+        c16 = (V + 15) // 16 * 16
+        base = sum((c + 15) // 16 * 16 for c in s3)
+        if base < len(restl_pay) and (len(restl_pay) - base) % c16 == 0:
+            k = (len(restl_pay) - base) // c16
+            a1p = orig[0x112a]
+            a1 = [unpack('<H', a1p[i*2:i*2+2])[0] for i in range(V)]
+            wi = 0
+            u8i = 0
+            while wi < k:
+                w0 = base + wi * c16
+                if wi + 1 < k:
+                    # u16 anchor-dup detection: all real entries in vert
+                    # range, first padding row self-indexes (== V)
+                    vals = [unpack('<H', restl_pay[w0+i*2:w0+i*2+2])[0]
+                            for i in range(V)]
+                    pad_ok = (V >= c16 or unpack(
+                        '<H', restl_pay[w0+V*2:w0+V*2+2])[0] == V)
+                    if pad_ok and all(x < V for x in vals):
+                        for v in reused:
+                            restl_pay[w0+v*2:w0+v*2+2] = \
+                                pack('<H', a1[donor[v]])
+                        wi += 2
+                        continue
+                ti = 3 + u8i
+                sc, mn = (trips[ti][0], trips[ti][1]) if ti < len(trips) \
+                    else (0.0, 0.0)
+                if sc > 0:
+                    # is this window the 1.25*euclid(v, anchor) table?
+                    errs = []
+                    for v in range(V):
+                        if v in reused or a1[v] >= V:
+                            continue
+                        got = restl_pay[w0 + v] * sc + mn
+                        errs.append(abs(got - 1.25 * _dist(new_pos[v],
+                                                           new_pos[a1[v]])))
+                        if len(errs) >= 48:
+                            break
+                    errs.sort()
+                    euclid125 = bool(errs) and errs[len(errs)//2] < 3.0 * sc
+                    newvals = {}
+                    for v in reused:
+                        s = donor[v]
+                        if euclid125:
+                            newvals[v] = 1.25 * _dist(new_pos[v],
+                                                      new_pos[a1[s]])
+                        elif restl_pay[w0 + s] == 255:
+                            newvals[v] = None  # donor has filler: copy it
+                        elif mn < -sc:  # negative range: widen downward
+                            newvals[v] = restl_pay[w0 + s] * sc + mn \
+                                - _dist(new_pos[v], new_pos[s])
+                        else:           # positive range: widen upward
+                            newvals[v] = restl_pay[w0 + s] * sc + mn \
+                                + _dist(new_pos[v], new_pos[s])
+                    if ti < len(trips):
+                        sc, mn = _widen_requant(
+                            ti, [x for x in newvals.values()
+                                 if x is not None],
+                            [w0 + u for u in range(V) if u not in reused])
+                    for v, val in newvals.items():
+                        restl_pay[w0 + v] = 255 if val is None \
+                            else _q(val, sc, mn)
+                else:
+                    for v in reused:
+                        restl_pay[w0 + v] = restl_pay[w0 + donor[v]]
+                u8i += 1
+                wi += 1
+
+    off = 20
+    while off + 8 <= stream_end:
+        tag, size = unpack('<II', data[off:off + 8])
+        t = tag & 0xFFFF
+        pay = data[off + 8:off + size]
+        new_pay = None
+        if t == T_SIM_REST:
+            rows = bytearray(pay)
+            for i in range(V):
+                x, y, z = new_pos[i]
+                rows[i * 16:i * 16 + 12] = pack('<fff', x, y, z)
+            new_pay = bytes(rows)
+        elif t == T_SIM_TRIS and len(pay) == len(new_tri_bytes):
+            new_pay = new_tri_bytes
+        elif t in SIM_VERT_TABLES:
+            per = SIM_VERT_TABLES[t]
+            buf = bytearray(pay)
+            for v in reused:
+                s = donor[v]
+                if (max(v, s) + 1) * per <= len(buf):
+                    buf[v * per:(v + 1) * per] = pay[s * per:(s + 1) * per]
+            new_pay = bytes(buf)
+        elif new_pairs is not None and t == T_SIM_PAIRS:
+            new_pay = new_pairs
+        elif restl_pay is not None and t == T_SIM_RESTL:
+            new_pay = bytes(restl_pay)
+        elif quant_changed and t == T_SIM_QUANT:
+            body = b''.join(pack('<fff', *tr) for tr in trips)
+            new_pay = body + pay[len(body):]
+        if new_pay is not None and len(new_pay) == len(pay):
+            ov[off] = pack('<II', tag, 8 + len(new_pay)) + new_pay
+        off += size
+    return ov
+
+
+def _sim_move_overrides(data, stream_end, new_pos, moved):
+    """Value-refresh for a sim MOVE (topology UNCHANGED): refresh 0x110b
+    positions to the moved geometry, recompute rest lengths (0x110d) for
+    constraint pairs touching a moved vert (widening 0x110e ranges as needed),
+    and recompute the decoded per-vert tether radii for moved verts. Constraint
+    PAIRS, the tri buffer, tether anchors and all counts stay vanilla.
+
+    Two purposes: (1) the sim rest state in the mcloth matches the moved mmb
+    geometry, and (2) changing the sim-section bytes makes the engine re-cook
+    the render->sim mapping, so render-vertex edits bundled into the same
+    export take effect (they are otherwise cached against the old fabric)."""
+    V = len(new_pos)
+    ov = {}
+    orig = {}
+    scan = 20
+    while scan + 8 <= stream_end:
+        tag, size = unpack('<II', data[scan:scan + 8])
+        t = tag & 0xFFFF
+        if t in (T_SIM_SECTS, T_SIM_PAIRS, T_SIM_RESTL, T_SIM_QUANT,
+                 T_SIM_REST, 0x1102, 0x112a):
+            orig.setdefault(t, data[scan + 8:scan + size])
+        scan += size
+    if (0x1102 not in orig or unpack('<I', orig[0x1102][:4])[0] != V
+            or not moved or T_SIM_REST not in orig):
+        return {}
+
+    def _dist(a, b):
+        p, q = new_pos[a], new_pos[b]
+        return ((p[0]-q[0])**2 + (p[1]-q[1])**2 + (p[2]-q[2])**2) ** 0.5
+
+    trips_pay = orig.get(T_SIM_QUANT)
+    trips = ([list(unpack('<fff', trips_pay[i*12:i*12+12]))
+              for i in range(len(trips_pay) // 12)] if trips_pay else [])
+    quant_changed = False
+    restl_pay = (bytearray(orig[T_SIM_RESTL])
+                 if T_SIM_RESTL in orig else None)
+    s3 = (list(unpack('<3I', orig[T_SIM_SECTS][:12]))
+          if T_SIM_SECTS in orig else None)
+    pairs_pay = orig.get(T_SIM_PAIRS)
+
+    def _q(val, sc, mn):
+        if sc <= 0:
+            return 0
+        return max(0, min(254, int(round((val - mn) / sc))))
+
+    def _widen_requant(ti, needed, offsets):
+        """Grow triplet `ti` to cover `needed`, requantizing existing bytes at
+        `offsets` under the new range. Returns the (scale, min) to use."""
+        nonlocal quant_changed
+        sc, mn, mx = trips[ti]
+        if sc <= 0 or not needed:
+            return sc, mn
+        lo, hi = min(needed), max(needed)
+        if lo >= mn - 1e-9 and hi <= mx + 1e-9:
+            return sc, mn
+        nmn, nmx = min(mn, lo), max(mx, hi)
+        nsc = (nmx - nmn) / 254.5
+        for o in offsets:
+            b = restl_pay[o]
+            if b == 255:
+                continue
+            restl_pay[o] = _q(mn + b * sc, nsc, nmn)
+        trips[ti] = [nsc, nmn, nmx]
+        quant_changed = True
+        return nsc, nmn
+
+    if restl_pay is not None and s3 is not None and len(trips) >= 3 \
+            and pairs_pay:
+        # rest lengths for pairs touching a moved vert
+        base_pair = 0
+        base_rest = 0
+        for si in range(3):
+            cnt = s3[si]
+            rows, lens = [], []
+            for r in range(cnt):
+                o = (base_pair + r) * 4
+                a, b = unpack('<HH', pairs_pay[o:o + 4])
+                if a in moved or b in moved:
+                    rows.append(r)
+                    lens.append(_dist(a, b))
+            if rows:
+                sc, mn = _widen_requant(si, lens,
+                                        [base_rest + r for r in range(cnt)])
+                for r, L in zip(rows, lens):
+                    restl_pay[base_rest + r] = _q(L, sc, mn)
+            base_pair += cnt
+            base_rest += (cnt + 15) // 16 * 16
+
+        # tether trailer: recompute the decoded 1.25*euclid radius window for
+        # verts that moved (or whose anchor moved); anchors themselves stay.
+        if 0x112a in orig:
+            c16 = (V + 15) // 16 * 16
+            base = sum((c + 15) // 16 * 16 for c in s3)
+            if base < len(restl_pay) and (len(restl_pay) - base) % c16 == 0:
+                k = (len(restl_pay) - base) // c16
+                a1 = [unpack('<H', orig[0x112a][i*2:i*2+2])[0]
+                      for i in range(V)]
+                tmoved = {v for v in range(V) if v in moved
+                          or (a1[v] < V and a1[v] in moved)}
+                wi = 0
+                u8i = 0
+                while wi < k:
+                    w0 = base + wi * c16
+                    if wi + 1 < k:
+                        vals = [unpack('<H', restl_pay[w0+i*2:w0+i*2+2])[0]
+                                for i in range(V)]
+                        pad_ok = (V >= c16 or unpack(
+                            '<H', restl_pay[w0+V*2:w0+V*2+2])[0] == V)
+                        if pad_ok and all(x < V for x in vals):
+                            wi += 2   # u16 anchor dup: unchanged on a move
+                            continue
+                    ti = 3 + u8i
+                    sc, mn = (trips[ti][0], trips[ti][1]) if ti < len(trips) \
+                        else (0.0, 0.0)
+                    if sc > 0:
+                        errs = []
+                        for v in range(V):
+                            if v in tmoved or a1[v] >= V:
+                                continue
+                            got = restl_pay[w0 + v] * sc + mn
+                            errs.append(abs(got - 1.25 * _dist(v, a1[v])))
+                            if len(errs) >= 48:
+                                break
+                        errs.sort()
+                        if errs and errs[len(errs)//2] < 3.0 * sc:
+                            nv = {v: 1.25 * _dist(v, a1[v]) for v in tmoved
+                                  if a1[v] < V and restl_pay[w0 + v] != 255}
+                            sc, mn = _widen_requant(
+                                ti, list(nv.values()),
+                                [w0 + u for u in range(V) if u not in tmoved])
+                            for v, val in nv.items():
+                                restl_pay[w0 + v] = _q(val, sc, mn)
+                    u8i += 1
+                    wi += 1
+
+    off = 20
+    while off + 8 <= stream_end:
+        tag, size = unpack('<II', data[off:off + 8])
+        t = tag & 0xFFFF
+        pay = data[off + 8:off + size]
+        new_pay = None
+        if t == T_SIM_REST:
+            rows = bytearray(pay)
+            for i in range(V):
+                x, y, z = new_pos[i]
+                rows[i * 16:i * 16 + 12] = pack('<fff', x, y, z)
+            new_pay = bytes(rows)
+        elif restl_pay is not None and t == T_SIM_RESTL:
+            new_pay = bytes(restl_pay)
+        elif quant_changed and t == T_SIM_QUANT:
+            body = b''.join(pack('<fff', *tr) for tr in trips)
+            new_pay = body + pay[len(body):]
+        if new_pay is not None and len(new_pay) == len(pay):
+            ov[off] = pack('<II', tag, 8 + len(new_pay)) + new_pay
+        off += size
+    return ov
+
+
+def sim_counts(data):
+    """(sim vertex count, sim triangle count) read from the mcloth sim count
+    fields, or (None, None) when absent. Lets callers detect a sim topology
+    change (vs the exported mmb) before deciding to rewrite the sim section."""
+    stream_end = unpack('<I', data[16:20])[0]
+    vc = tc = None
+    off = 20
+    while off + 8 <= stream_end:
+        tag, size = unpack('<II', data[off:off + 8])
+        t = tag & 0xFFFF
+        if t in SIM_VC_FIELDS and vc is None:
+            vc = unpack('<I', data[off + 8:off + 12])[0]
+        elif t in SIM_TC_FIELDS and tc is None:
+            tc = unpack('<I', data[off + 8:off + 12])[0]
+        off += size
+    return vc, tc
+
+
+def _emit_region(data, lo, hi, overrides):
+    """Copy [lo, hi) chunk by chunk, substituting any overridden chunk."""
+    if not overrides:
+        return data[lo:hi]
+    out = bytearray()
+    off = lo
+    while off < hi:
+        _tag, size = unpack('<II', data[off:off + 8])
+        out += overrides.get(off, data[off:off + size])
+        off += size
+    return bytes(out)
+
+
+def rewrite(data, remaps, rebind=None, computed=None, sim=None, sim_free=False,
+            sim_reuse=None, sim_move=None):
     """
     Rewrite the mcloth chunk stream, remapping the per-LOD driven-vertex blocks.
 
@@ -500,9 +1453,29 @@ def rewrite(data, remaps, rebind=None, computed=None):
            appended vertices of a generated LOD). Blocks with computed rows go
            through the dequantize/requantize value pipeline; others keep their
            rows at byte level.
+    :param sim: optional (new_sim_positions, new_sim_tri_bytes) to refresh the
+           sim-section count fields and decoded tables after a _CLOTH_SIM edit.
+           new_sim_tri_bytes is the sim triangle index buffer (u16[3] per tri).
+    :param sim_free: with sim, cook constraints for appended sim verts and mark
+           them free so they SIMULATE (vs pinned/kinematic when False).
+    :param sim_reuse: (new_sim_positions, new_sim_tri_bytes, reused_slot_set)
+           BUDGET-REUSE mode: counts unchanged, new verts occupy the reused
+           (orphaned) slots; values rewritten in place. Takes precedence over
+           `sim` and is the engine-stable path for adding sim geometry.
+    :param sim_move: (new_sim_positions, moved_slot_set) for a MOVE (topology
+           unchanged): refresh 0x110b positions + rest lengths/tethers for the
+           moved verts. Also forces the engine to re-cook the render mapping.
     :return: (new file bytes, {block_name: (old_B, new_B)})
     """
     stream_end, blocks = parse_blocks(data)
+    if sim_reuse:
+        sim_ov = _sim_reuse_overrides(data, stream_end, *sim_reuse)
+    elif sim:
+        sim_ov = _sim_overrides(data, stream_end, *sim, free_append=sim_free)
+    elif sim_move:
+        sim_ov = _sim_move_overrides(data, stream_end, *sim_move)
+    else:
+        sim_ov = {}
     stats = {}
     spans = []
     for block_name, (new_vc, src_name, old_to_new) in remaps.items():
@@ -526,10 +1499,10 @@ def rewrite(data, remaps, rebind=None, computed=None):
     out = bytearray(data[0:20])
     pos = 20
     for start, end, rep in spans:
-        out += data[pos:start]
+        out += _emit_region(data, pos, start, sim_ov)
         out += rep
         pos = end
-    out += data[pos:stream_end]
+    out += _emit_region(data, pos, stream_end, sim_ov)
     new_stream_size = len(out) - 20
     out[16:20] = pack('<I', new_stream_size)
     out[8:12] = pack('<I', new_stream_size + 8)
