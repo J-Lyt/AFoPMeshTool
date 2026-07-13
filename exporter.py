@@ -20,6 +20,7 @@ from .cloth_export import _sim_free_slot_flags
 from .log import logger
 from .mmb import SkeletalMeshAsset, _resolve_uv_encoding
 
+
 class BlenderMeshExporter:
     _compute_normals_for_object = staticmethod(compute_normals_for_object)
     find_object_by_name = staticmethod(find_object_by_name)
@@ -80,12 +81,13 @@ class BlenderMeshExporter:
             # --- Slot-preserving layout for cloth render AND sim meshes ---
             # The cloth runtime keys to the original vertex numbering: renumbering
             # shreds the cloth in-game even with a fully consistent .mcloth.
-            # So every vertex keeps its ORIGINAL index slot - deleted vertices remain
-            # as face-less orphans copied verbatim.
-            # RENDER: new vertices are appended after the original slots.
-            # SIM: growing the sim counts crashes the engine (count-tied state we
-            # cannot see), so new sim verts REUSE orphaned slots and new tris
-            # reuse phantom tri slots - the sim BUDGET is the vanilla counts.
+            # So original slots remain serialized - deleted vertices stay as
+            # face-less orphans copied verbatim. Claimed RENDER verts keep
+            # those slots and only extras append.
+            # SIM: reuse orphaned vertex/triangle slots while the vanilla
+            # budget is sufficient; otherwise append a complete grown topology.
+            # The grown fabric must be re-scheduled into conflict-free SIMD-16
+            # constraint blocks by mcloth.py after rows are added or removed.
             _is_cloth_render = mesh.name.endswith('_CLOTH_RENDER')
             _is_cloth_sim = mesh.name.endswith('_CLOTH_SIM')
             slot_map = None # blender vertex index -> final slot index
@@ -95,6 +97,7 @@ class BlenderMeshExporter:
             lod.exported_sim_reused = set()
             lod.exported_sim_moved = set()
             lod.exported_sim_valid_tris = None
+            lod.exported_sim_grown = False
             if _is_cloth_render or _is_cloth_sim:
                 _orig_vc_file = unpack('<I', file_data[lod.start_offset:lod.start_offset + 4])[0]
                 if _orig_vc_file > 0:
@@ -119,21 +122,30 @@ class BlenderMeshExporter:
                     if _is_cloth_sim and _extras:
                         # Budget reuse: assign new verts to orphaned slots,
                         # FREE (simulating) slots first so new geometry
-                        # simulates where possible.
+                        # simulates where possible. When there are not enough
+                        # orphans, append ALL extras; mixing reused slots with
+                        # appended slots would require both rewrite modes at
+                        # once and leave the reused-slot constraints stale.
                         _orphans = [s for s in range(_orig_vc_file) if s not in _claimed]
-                        if len(_extras) > len(_orphans):
-                            raise ValueError(
-                                f"'{mesh.name}' sim budget exceeded: {len(_extras)} new "
-                                f"vertices but only {len(_orphans)} deleted slot(s) to "
-                                f"reuse (vanilla budget {_orig_vc_file}). Delete "
-                                f"{len(_extras) - len(_orphans)} more sim vertices first.")
-                        _free_flags = _sim_free_slot_flags(_orig_vc_file)
-                        _orphans.sort(key=lambda s: (not _free_flags[s]) if _free_flags else 0)
-                        for _k, _vi in enumerate(_extras):
-                            _slot = _orphans[_k]
-                            slot_map[_vi] = _slot
-                            lod.exported_sim_reused.add(_slot)
-                        slot_final_vc = _orig_vc_file
+                        if len(_extras) <= len(_orphans):
+                            _free_flags = _sim_free_slot_flags(_orig_vc_file)
+                            _orphans.sort(
+                                key=lambda s: (not _free_flags[s])
+                                if _free_flags else 0)
+                            for _k, _vi in enumerate(_extras):
+                                _slot = _orphans[_k]
+                                slot_map[_vi] = _slot
+                                lod.exported_sim_reused.add(_slot)
+                            slot_final_vc = _orig_vc_file
+                        else:
+                            for _k, _vi in enumerate(_extras):
+                                slot_map[_vi] = _orig_vc_file + _k
+                            slot_final_vc = _orig_vc_file + len(_extras)
+                            lod.exported_sim_grown = True
+                            logger.warning(
+                                "%s: SIM vertex budget exceeded; using corrected "
+                                "count-growth path (%d -> %d vertices)",
+                                mesh.name, _orig_vc_file, slot_final_vc)
                     else:
                         for _k, _vi in enumerate(_extras):
                             _slot = _orig_vc_file + _k
@@ -181,7 +193,8 @@ class BlenderMeshExporter:
             orig_sa_pre = unpack('<I', file_data[lod.start_offset + lod.lod_field_offset + 8: lod.start_offset + lod.lod_field_offset + 12])[0]
             orig_fb_pre = unpack('<I', file_data[lod.start_offset + lod.lod_field_offset + 20: lod.start_offset + lod.lod_field_offset + 24])[0]
             orig_uses_uint32_pre = (orig_fb_pre > 0 and orig_sa_pre == orig_fb_pre // 4)
-            use_uint32_faces = orig_uses_uint32_pre or slot_final_vc > 65535
+            use_uint32_faces = (
+                orig_uses_uint32_pre or slot_final_vc > 65535)
             BME.write_triangles(faces_buf, mesh, lod_index, force_uint32=use_uint32_faces)
 
             vd = verts_buf.getvalue()
@@ -226,11 +239,11 @@ class BlenderMeshExporter:
                 _isz = 4 if use_uint32_faces else 2
                 _ifmt = '<I' if use_uint32_faces else '<H'
                 if _is_cloth_sim:
-                    # Keep the original sim triangle buffer layout (kept tris
-                    # stay at their slots so 0x1129 refs and per-tri tables
-                    # stay valid). New triangles REUSE phantom tri slots -
-                    # the tri budget is the vanilla count (growing it crashes
-                    # the engine).
+                    # Kept triangles retain their original slots. In budget
+                    # reuse mode, new faces consume phantom slots. When the
+                    # vertex domain grows, new faces append after the original
+                    # triangle domain and the mcloth per-triangle tables grow
+                    # with them.
                     _orig_ic = unpack('<I', file_data[lod.start_offset + lod.lod_field_offset + 4:lod.start_offset + lod.lod_field_offset + 8])[0]
                     _abs_fb0 = lod.data_offset + (lod.face_block_offset - _higher)
                     _orig_face_bytes = bytearray(file_data[_abs_fb0:_abs_fb0 + _orig_ic * _isz])
@@ -265,39 +278,56 @@ class BlenderMeshExporter:
                             else:
                                 _new_tris.append(_sv)
                     _written_tris = set()
+                    _appended_face_bytes = bytearray()
                     if _new_tris:
-                        _phantoms = [t for tl in _orig_tri_slots.values() for t in tl]
-                        _phantoms.sort()
-                        if len(_new_tris) > len(_phantoms):
-                            raise ValueError(
-                                f"'{mesh.name}' sim triangle budget exceeded: "
-                                f"{len(_new_tris)} new triangles but only "
-                                f"{len(_phantoms)} deleted slot(s) to reuse "
-                                f"(vanilla budget {_orig_ic // 3}). Delete "
-                                f"{len(_new_tris) - len(_phantoms)} more sim faces first.")
-                        for _sv, _t in zip(_new_tris, _phantoms):
-                            # engine winding (v0, v2, v1)
-                            _orig_face_bytes[_t * 3 * _isz:(_t + 1) * 3 * _isz] = (
-                                pack(_ifmt, _sv[0]) + pack(_ifmt, _sv[2])
-                                + pack(_ifmt, _sv[1]))
-                            _written_tris.add(_t)
-                    # Leftover phantom tris still referencing a REUSED slot
-                    # would stretch from their old neighborhood to the new
-                    # geometry - visible sliver faces AND long sliver edges
-                    # fed to the constraint cooker (which then ties the new
-                    # region to the old one). Retarget each reused reference
-                    # to the surviving vert nearest the DELETED vert's
-                    # original position: the tri stays a local, inert sliver.
-                    if lod.exported_sim_reused and mesh.position_type == 1:
+                        if lod.exported_sim_grown:
+                            _base_t = _orig_ic // 3
+                            for _k, _sv in enumerate(_new_tris):
+                                # engine winding (v0, v2, v1)
+                                _appended_face_bytes += (
+                                    pack(_ifmt, _sv[0])
+                                    + pack(_ifmt, _sv[2])
+                                    + pack(_ifmt, _sv[1]))
+                                _written_tris.add(_base_t + _k)
+                        else:
+                            _phantoms = [t for tl in _orig_tri_slots.values()
+                                         for t in tl]
+                            _phantoms.sort()
+                            if len(_new_tris) > len(_phantoms):
+                                raise ValueError(
+                                    f"'{mesh.name}' sim triangle budget exceeded: "
+                                    f"{len(_new_tris)} new triangles but only "
+                                    f"{len(_phantoms)} deleted slot(s) to reuse "
+                                    f"(vanilla budget {_orig_ic // 3}). Delete "
+                                    f"{len(_new_tris) - len(_phantoms)} more "
+                                    "sim faces first, or exceed the vertex "
+                                    "budget to use full topology growth.")
+                            for _sv, _t in zip(_new_tris, _phantoms):
+                                _orig_face_bytes[
+                                    _t * 3 * _isz:(_t + 1) * 3 * _isz] = (
+                                    pack(_ifmt, _sv[0])
+                                    + pack(_ifmt, _sv[2])
+                                    + pack(_ifmt, _sv[1]))
+                                _written_tris.add(_t)
+                    # Leftover phantom tris referencing a REUSED or MOVED slot
+                    # can stretch from their old neighborhood to the slot's
+                    # new position.  Besides producing visible/collision
+                    # slivers, growth-mode cooking can turn those edges into
+                    # real constraints.  Retarget each problematic reference
+                    # to a stable surviving original slot nearest its SOURCE
+                    # position, keeping the phantom local and inert.
+                    _problem_slots = (set(lod.exported_sim_reused)
+                                      | set(lod.exported_sim_moved))
+                    if _problem_slots and mesh.position_type == 1:
                         _leftover = {t for tl in _orig_tri_slots.values()
                                      for t in tl} - _written_tris
-                        _surv = sorted(_claimed)
+                        _surv = sorted(set(_claimed) - _problem_slots)
                         def _fpos(s):
                             return unpack('<fff', file_data[
                                 _abs_voa + s * vs:_abs_voa + s * vs + 12])
                         _spos = {s: _fpos(s) for s in _surv}
                         _near = {}
-                        for s in lod.exported_sim_reused:
+                        for s in _problem_slots:
                             p = _fpos(s)
                             _near[s] = min(
                                 _surv, key=lambda u: (
@@ -310,7 +340,7 @@ class BlenderMeshExporter:
                             _tv = [unpack(_ifmt, _orig_face_bytes[
                                 (_t*3+_j)*_isz:(_t*3+_j+1)*_isz])[0]
                                 for _j in range(3)]
-                            if any(v in lod.exported_sim_reused for v in _tv):
+                            if any(v in _problem_slots for v in _tv):
                                 for _j in range(3):
                                     _orig_face_bytes[
                                         (_t*3+_j)*_isz:(_t*3+_j+1)*_isz] = \
@@ -320,13 +350,14 @@ class BlenderMeshExporter:
                         if _retg:
                             logger.debug(
                                 "%s: %d leftover phantom triangle(s) retargeted "
-                                "off reused slots",
+                                "off reused/moved slots",
                                 mesh.name, _retg)
-                    fd = bytes(_orig_face_bytes)
+                    fd = bytes(_orig_face_bytes) + bytes(_appended_face_bytes)
                     new_index_count = len(fd) // _isz
                     # Tris that exist in the CURRENT sim mesh (kept originals +
-                    # rewritten slots). Leftover phantoms are excluded: render
-                    # rows referencing them must be re-attached or released.
+                    # rewritten slots / appended IDs). Leftover phantoms are
+                    # excluded: rows referencing them must be re-attached or
+                    # released.
                     lod.exported_sim_valid_tris = _matched_tris | _written_tris
                 else:
                     # Render: remap face indices from Blender to slot numbering.
@@ -390,6 +421,38 @@ class BlenderMeshExporter:
             else:
                 trailing_bytes = b''
                 orig_trailing_size = 0
+
+            # Snowdrop allocates grown cloth-SIM primary blocks from a 64-byte
+            # size class derived from the typed vertex/normal/face payload plus
+            # a 20-byte guard. The vanilla 44-byte face trailer can cross that
+            # size-class boundary after count growth: a captured crash copied
+            # the excess bytes over the next free-list node. Control I proved
+            # that retaining the trailer's final 20 bytes (four duplicated u16
+            # indices plus all six FA7F sentinels) removes the overwrite while
+            # preserving the geometry; the control loaded and survived repeated
+            # equip/unequip cycles in-game.
+            _sim_counts_grew = (_is_cloth_sim
+                                and (new_vert_count > orig_vc
+                                     or new_index_count > orig_ic))
+            if _sim_counts_grew and len(trailing_bytes) > 20:
+                _runtime_request = (intra_voa + len(vd) + len(nd)
+                                    + len(fd) + 20)
+                _allocator_size = (_runtime_request + 63) & ~63
+                _projected_size = (intra_voa + len(vd) + len(nd)
+                                   + len(fd) + len(trailing_bytes))
+                if _projected_size > _allocator_size:
+                    _sentinel = b'\xfa\x7f' * 6
+                    if not trailing_bytes.endswith(_sentinel):
+                        raise ValueError(
+                            f"'{mesh.name}' has an unknown oversized SIM "
+                            "primary-block trailer; refusing unsafe count "
+                            "growth.")
+                    _removed = len(trailing_bytes) - 20
+                    trailing_bytes = trailing_bytes[-20:]
+                    logger.warning(
+                        "%s: trimmed %d unsafe grown-SIM trailer byte(s) "
+                        "to fit allocator class 0x%X",
+                        mesh.name, _removed, _allocator_size)
 
             new_data_size    = len(vd) + len(nd) + len(fd) + len(trailing_bytes)
             delta = new_data_size - orig_data_size  # bytes added (negative = shrink)
@@ -474,7 +537,8 @@ class BlenderMeshExporter:
             new_file_data_size = intra_voa + new_data_size
             # size_a: fb//2 for uint16, fb//4 for uint32.
             # Use uint32 if original mesh used it OR if vert count exceeds uint16 range.
-            use_uint32_faces = orig_uses_uint32_pre or new_vert_count > 65535
+            use_uint32_faces = (
+                orig_uses_uint32_pre or new_vert_count > 65535)
             new_size_a = new_fb_for_header // 4 if use_uint32_faces else new_fb_for_header // 2
             file_data[so + 0: so + 4] = pack('<I', new_vert_count)
             file_data[so + fo + 4: so + fo + 8] = pack('<I', new_index_count)

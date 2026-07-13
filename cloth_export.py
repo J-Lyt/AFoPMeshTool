@@ -95,10 +95,8 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                 continue
             slot_vc = getattr(lod, 'exported_slot_identity', 0)
             if slot_vc:
-                # Slot-preserving export: original indices kept, keep every row.
-                # Appended vertices with a driven source vertex (generated LODs)
-                # additionally get COMPUTED rows below - the row values are a
-                # pure function of (rest position/normal/tangent, sim triangle).
+                # Slot-preserving export: original indices stay at their
+                # original slots and every source row remains eligible.
                 remaps[block_name] = (slot_vc, block_name,
                                       {i: i for i in range(slot_vc)})
                 # Register for row synthesis whenever appended slots exist:
@@ -126,12 +124,12 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                 old_to_new = {i: i for i in range(new_vc)}
             remaps[block_name] = (new_vc, src_block, old_to_new)
 
-    # Sim-section sync: BUDGET REUSE. New sim verts occupy reused
-    # (deleted) slots, so counts never change; the mcloth gets a value-only
-    # rewrite (positions, donor rows, tri mirror, rewritten constraint
-    # rows). Move and inert-delete stay on the verbatim passthrough.
-    # Count growth is engine-unstable and no longer produced by the
-    # exporter; the legacy grown-count path remains as a fallback.
+    # Sim-section sync: BUDGET REUSE remains the confirmed path. New sim verts
+    # occupy reused (deleted) slots while the vanilla budget is sufficient,
+    # producing a value-only rewrite. If the vertex budget is exceeded, the
+    # experimental path appends complete vertex/triangle topology and rebuilds
+    # all count-dependent tables plus the SIMD constraint schedule. Move and
+    # inert-delete stay on the passthrough.
     # Source-asset baseline: a driven RENDER vert's in-game position is
     # reconstructed from its ROW (relative to the sim triangle), NOT the mmb
     # rest position - so moving a render vert without re-encoding its row
@@ -195,7 +193,26 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
             if _st is not None and _valid is not None and (
                     _reused or _appended_v or len(_valid) < len(_st)):
                 sim_fix = (set(_valid), set(_reused) | _appended_v)
-            if _sp is not None and _st is not None and _reused:
+            _counts_changed = (_sp is not None and _st is not None
+                               and (_ovc0 is None or len(_sp) != _ovc0
+                                    or len(_st) != _otc0))
+            if _counts_changed:
+                _tb = b''.join(pack('<HHH', *t) for t in _st)
+                # Growth can include moved original slots as well as appended
+                # ones.  Pass the current mesh's live triangle slots so the
+                # fabric cooker excludes preserved phantom faces.
+                sim_arg = (_sp, _tb,
+                           set(_valid) if _valid is not None else None)
+                logger.warning(
+                    "SIM topology-growth path: %s->%d vertices, "
+                    "%s->%d triangles",
+                    _ovc0, len(_sp), _otc0, len(_st))
+                if operator:
+                    operator.report({'WARNING'},
+                        "SIM vertex/triangle topology grew using the "
+                        "experimental scheduled-fabric rewriter. Test this "
+                        "output in-game.")
+            elif _sp is not None and _st is not None and _reused:
                 _tb = b''.join(pack('<HHH', *t) for t in _st)
                 sim_reuse_arg = (_sp, _tb, set(_reused))
                 logger.debug(
@@ -206,18 +223,7 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                         f"New _CLOTH_SIM vertices reuse {len(_reused)} deleted "
                         f"slot(s); constraints rewritten in place.")
             elif _sp is not None and _st is not None:
-                if _ovc0 is None or len(_sp) != _ovc0 or len(_st) != _otc0:
-                    _tb = b''.join(pack('<HHH', *t) for t in _st)
-                    sim_arg = (_sp, _tb)
-                    logger.warning(
-                        "Sim counts changed: %s->%d vertices, %s->%d triangles",
-                        _ovc0, len(_sp), _otc0, len(_st))
-                    if operator:
-                        operator.report({'WARNING'},
-                            "Sim vertex/triangle count changed - this is known "
-                            "to be unstable in-game. Use delete+add so new "
-                            "geometry reuses the freed slots instead.")
-                elif _moved:
+                if _moved:
                     sim_move_arg = (_sp, _moved)
                     logger.debug(
                         "Sim move: refreshing rest state for %d moved vertex(s)",
