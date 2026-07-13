@@ -4,6 +4,8 @@ import bmesh
 import bpy
 from mathutils import Vector
 
+from .log import logger
+
 def compute_normals_for_object(obj):
     """
     Compute smooth angle-weighted normals for obj and store them as custom split normals.
@@ -93,7 +95,7 @@ def triangulate_object(obj, compute_normals=False, split_seams=False):
 
         seam_edges = [e for e in bm.edges if e.seam]
         if seam_edges:
-            print(f"[AFoPMT] seam_edges: True")
+            logger.debug("Splitting seam edges before export")
             _bmesh.ops.split_edges(bm, edges=seam_edges)
             bm.to_mesh(obj.data)
             obj.data.update()
@@ -120,5 +122,5 @@ def triangulate_object(obj, compute_normals=False, split_seams=False):
     obj.data.update()
 
     if compute_normals:
-        print(f"[AFoPMT] compute_normals: True")
+        logger.debug("Computing normals before export")
         compute_normals_for_object(obj)

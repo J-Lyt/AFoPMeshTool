@@ -12,6 +12,7 @@ from .binary_io import br
 from .exporter import BME
 from .file_utils import _mod_file_output, get_merged_mmb
 from .importer import BMI
+from .log import logger
 from .mmb import SkeletalMeshAsset
 
 def _compute_inv_bind_from_skeleton(bone_name):
@@ -149,7 +150,7 @@ def _read_donor_matrix(donor_path, target_bone_name, mesh_name):
             f.seek(20 if version == 17 else 16, 1)
         return fallback_matrix
     except Exception as e:
-        print(f"[AFoPMT] Donor Matrix Error: {e}")
+        logger.warning("Could not read donor matrix: %s", e)
         return None
 
 
@@ -212,7 +213,7 @@ def _scan_mesh_used_bone_slots(mesh):
                 used.update(s for s, w in iw.items() if w > 0.0)
         return used
     except Exception as e:
-        print(f"[AFoPMT] _scan_mesh_used_bone_slots error: {e}")
+        logger.warning("Could not scan used mesh bone slots: %s", e)
         return None
 
 
@@ -569,7 +570,7 @@ def _read_donor_skeleton(donor_path: str):
             bones.append((name, mat_raw, m, parent_idx))
         return bones
     except Exception as e:
-        print(f"[AFoPMT] _read_donor_skeleton error: {e}")
+        logger.warning("Could not read donor skeleton: %s", e)
         return None
 
 def _resolve_selected_donor_bones(donor_bones, selected_names):

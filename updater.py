@@ -8,6 +8,8 @@ import urllib.request
 
 import bpy
 
+from .log import logger
+
 
 RAW_BASE = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/master"
 RAW_INIT_URL = f"{RAW_BASE}/__init__.py"
@@ -21,6 +23,7 @@ CODE_FILES = (
     "exporter.py",
     "file_utils.py",
     "importer.py",
+    "log.py",
     "mcloth.py",
     "mmb.py",
     "operators_bones.py",
@@ -70,9 +73,9 @@ def _check_data_files():
         for filename in missing:
             ok, error = _download_data_file(f"{RAW_BASE}/{filename}", filename)
             if ok:
-                print(f"[AFoPMT] {filename} downloaded successfully")
+                logger.info("Downloaded missing data file %s", filename)
             else:
-                print(f"[AFoPMT] Failed to download {filename}: {error}")
+                logger.warning("Failed to download %s: %s", filename, error)
 
     threading.Thread(target=download_missing, daemon=True).start()
 

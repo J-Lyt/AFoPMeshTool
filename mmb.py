@@ -7,6 +7,7 @@ from mathutils import Vector
 
 from .binary_io import bp, br
 from .file_utils import CopyFile
+from .log import logger
 
 # Known values:
 #   0.0     -> float32   : (8 bytes/vert, unquantized)
@@ -91,7 +92,6 @@ class SkeletalMeshAsset(Asset):
                 self.vertex_end_bytes = None
                 self.normals_end_bytes = None
                 self.faces_end_bytes = None
-                self.data_start = 0  # offset within mesh_file BytesIO where this LOD's block begins
                 self.lod_unk = 0  # v11 only: unknown uint32
                 # exported vc when _write_mod_file used the cloth slot-preserving layout
                 self.exported_slot_identity = 0
@@ -128,7 +128,7 @@ class SkeletalMeshAsset(Asset):
                 lod_screen_size = br.float(f)
                 if self.data_offset < self.parent_mesh.parent_sk_mesh.size:
                     self.is_header_lod = True
-                    print("Lod ", self.index, "is in header.")
+                    logger.debug("LOD %d is stored in the header", self.index)
 
             def write(self, f):
                 f.seek(self.start_offset)
@@ -142,33 +142,6 @@ class SkeletalMeshAsset(Asset):
                 f.write(bp.uint32(self.face_block_offset))
                 f.write(bp.uint32(self.data_offset))
                 f.write(bp.uint32(self.data_size))
-
-            def gather_extra_bytes(self, f):
-                offset = f.tell()
-                f.seek(self.data_offset)
-                real_vertex_size = self.vertex_count * self.parent_mesh.vertex_stride
-                extra_bytes_size = self.vertex_data_offset_b - self.vertex_data_offset_a - real_vertex_size
-                f.seek(real_vertex_size, 1)
-                print(f.tell())
-                self.vertex_end_bytes = f.read(extra_bytes_size)
-                print("Vertex Extra Bytes:", self.vertex_end_bytes)
-
-                real_normals_size = self.vertex_count * self.parent_mesh.normals_stride
-                extra_bytes_size = self.face_block_offset - self.vertex_data_offset_b - real_normals_size
-                f.seek(real_normals_size, 1)
-                print(f.tell())
-                self.normals_end_bytes = f.read(extra_bytes_size)
-                print("Normal Extra Bytes:", self.normals_end_bytes)
-
-                real_face_size = self.index_count * 2
-                size_without_face = self.face_block_offset - self.vertex_data_offset_a
-                extra_bytes_size = self.data_size - size_without_face - real_face_size
-                f.seek(real_face_size, 1)
-                print(f.tell())
-                self.faces_end_bytes = f.read(extra_bytes_size)
-                print("Face Extra Bytes:", self.faces_end_bytes)
-
-                f.seek(offset)
 
             def get_vertex_positions(self, raw_mesh_file):
                 vertices = []
@@ -354,12 +327,6 @@ class SkeletalMeshAsset(Asset):
                         f3 = br.uint16(f)
                     tris.append((f1,f2,f3))
                 return tris
-
-            def get_normals_size(self):
-                if self.parent_mesh.normal_type == 0:
-                    return 8
-                else:
-                    return 28
 
             def get_normals(self,raw_mesh_file):
                 normals = []
@@ -603,7 +570,6 @@ class SkeletalMeshAsset(Asset):
             self.normal_type = 0 # 0:int8_norm 1:floats
             self.color_in_normals = True # False when color_count not in normals stride
             self.position_type = 0 # 0:int16_norm 1:floats
-            self.mesh_file = None  # BytesIO of reversed ordered LOD mesh data (used by create_mesh_file)
         def parse(self, f):
             version = self.parent_sk_mesh.version
 
@@ -758,12 +724,11 @@ class SkeletalMeshAsset(Asset):
             else:
                 self.position_type = 0  # int16
 
-            print(f'\nName = {self.name}'
-                  f'\nVertex Stride: {self.vertex_stride}'
-                  f'\nNormals Stride: {self.normals_stride}'
-                  f'\nUV Count: {self.uv_count}'
-                  f'\nColor Count: {self.color_count}'
-                  f'\nNormal Type: {self.normal_type}')
+            logger.debug(
+                "%s: vertex stride=%d, normals stride=%d, UVs=%d, colors=%d, "
+                "normal type=%d",
+                self.name, self.vertex_stride, self.normals_stride,
+                self.uv_count, self.color_count, self.normal_type)
 
             # --- Post-stride skip ---
             # v17 has 4 extra bytes here compared to other versions
@@ -779,9 +744,7 @@ class SkeletalMeshAsset(Asset):
             """
             extract_file = io.BytesIO()
             for lod in reversed(self.lods):
-                # print(f'Copy at {lod.data_offset} size {lod.data_size}')
                 CopyFile(f, extract_file, lod.data_offset, lod.data_size)
-            # print(f'Total size: {sum(lod.data_size for lod in self.lods)}')
             return extract_file
 
     class Bone:
@@ -811,21 +774,3 @@ class SkeletalMeshAsset(Asset):
             mesh = self.Mesh(self, index=m)
             mesh.parse(f)
             self.meshes.append(mesh)
-
-    def clear(self):
-        self.bones = []
-        self.meshes = []
-
-    def get_sorted_lods(self):
-        lod_map = {}
-        for m in self.meshes:
-            for l in m.lods:
-                lod_map[l] = l.data_offset
-        sorted_lods = {k: v for k, v in sorted(lod_map.items(), key=lambda item: item[1])}
-        return sorted_lods
-
-    def get_mesh_data_start_offset(self):
-        lods = self.get_sorted_lods()
-        first_lod = next(iter(lods))
-        print("Mesh Data Start Offset = ", first_lod.data_offset)
-        return first_lod.data_offset

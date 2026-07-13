@@ -1,6 +1,5 @@
 """Blender-side skeletal mesh exporter and MMB header patcher."""
 
-import copy
 import io
 import operator
 from struct import pack, unpack
@@ -18,6 +17,7 @@ from .blender_mesh_utils import (
     triangulate_object,
 )
 from .cloth_export import _sim_free_slot_flags
+from .log import logger
 from .mmb import SkeletalMeshAsset, _resolve_uv_encoding
 
 class BlenderMeshExporter:
@@ -318,9 +318,10 @@ class BlenderMeshExporter:
                                                               _tv[_j]))
                                 _retg += 1
                         if _retg:
-                            print(f"[AFoPMT] {mesh.name}: {_retg} leftover "
-                                  f"phantom tri(s) retargeted off reused "
-                                  f"slots (kept local + inert)")
+                            logger.debug(
+                                "%s: %d leftover phantom triangle(s) retargeted "
+                                "off reused slots",
+                                mesh.name, _retg)
                     fd = bytes(_orig_face_bytes)
                     new_index_count = len(fd) // _isz
                     # Tris that exist in the CURRENT sim mesh (kept originals +
@@ -725,8 +726,10 @@ class BlenderMeshExporter:
             # mesh-slot index, then fall back to treating the group index itself as the mesh
             # slot.  This prevents weights from being silently dropped on export.
             if not vgroup_to_mesh_slot and obj.vertex_groups:
-                print(f"[AFoPMT] WARNING: No vertex groups on '{obj.name}' matched bone names "
-                      f"in mesh '{mesh.name}'. Attempting index-based fallback mapping.")
+                logger.warning(
+                    "No vertex groups on %s matched bone names in mesh %s; "
+                    "attempting index-based fallback mapping",
+                    obj.name, mesh.name)
                 import re as _re
                 for vg in obj.vertex_groups:
                     # Try to parse a trailing integer from the group name (e.g. "Bone_7" -> 7)
@@ -738,12 +741,15 @@ class BlenderMeshExporter:
                     if slot < len(mesh_bones):
                         vgroup_to_mesh_slot[vg.index] = slot
                 if vgroup_to_mesh_slot:
-                    print(f"[AFoPMT] Index-based fallback produced {len(vgroup_to_mesh_slot)} "
-                          f"group mappings for '{obj.name}'.")
+                    logger.info(
+                        "Index-based fallback produced %d group mappings for %s",
+                        len(vgroup_to_mesh_slot), obj.name)
                 else:
-                    print(f"[AFoPMT] ERROR: Index-based fallback also failed for '{obj.name}'. "
-                          f"Weights will be zero. Check that vertex group names match skeleton "
-                          f"bone names or contain a bone index suffix.")
+                    logger.error(
+                        "Index-based fallback failed for %s; weights will be zero. "
+                        "Check that vertex group names match skeleton bone names or "
+                        "contain a bone index suffix",
+                        obj.name)
 
             # For int16 positions, read per-vertex w scale from the original source file.
             # Always read from SWOMT.AssetPath using the original data_offset from the
@@ -1557,75 +1563,5 @@ class BlenderMeshExporter:
                     f.write(bp.uint16(p.vertices[2]))
                     f.write(bp.uint16(p.vertices[1]))
             bm.free()
-
-    @staticmethod
-    def copy_previous_mesh_data(source_path, file, mesh_index=0, lod_index=0):
-        sorted_lods = addon_state.asset.get_sorted_lods()
-        with open(source_path, 'rb') as source:
-            for lod in sorted_lods:
-                print(lod.data_offset, lod.data_size, lod.vertex_count)
-                if lod.index == lod_index and lod.parent_mesh.index == mesh_index:
-                    return
-                source.seek(lod.data_offset)
-                file.write(source.read(lod.data_size))
-
-    @staticmethod
-    def create_mesh_file(mesh_index=0, lod_index=-1):
-        """
-        Creates a BytesIO of the reverse-sorted LODs for a mesh using the edited
-        Blender mesh for the given lod_index (or unedited data for all others).
-        :return: Mesh object with updated LOD offset/size fields and mesh_file set.
-        """
-        SWOMT = bpy.context.scene.SWOMT
-        file = SWOMT.AssetPath
-        mesh_file = io.BytesIO()
-        offset_diff = 0
-        mesh = addon_state.asset.meshes[mesh_index]
-        modded_mesh: SkeletalMeshAsset.Mesh = copy.deepcopy(addon_state.asset.meshes[mesh_index])
-
-        with open(file, 'rb') as source:
-            for lod in reversed(addon_state.asset.meshes[mesh_index].lods):
-                current_modded_lod = modded_mesh.lods[lod.index]
-                current_modded_lod.parent_mesh = modded_mesh
-                new_vertex_data_offset_a = mesh_file.tell()
-                current_modded_lod.data_start = mesh_file.tell() # start of this LOD's block in mesh_file
-                if lod.index == lod_index:
-                    print("Edited LOD")
-                    obj = BME.find_object_by_name(mesh.name + f"_LOD{lod_index}")
-                    current_modded_lod.vertex_count = len(obj.data.vertices)
-                    current_modded_lod.index_count = len(obj.data.polygons) * 3
-                    print("New Vertex count: ", len(obj.data.vertices))
-                    print("New indices count: ", len(obj.data.polygons) * 3)
-                    # Vertices
-                    current_modded_lod.vertex_data_offset_a = mesh_file.tell()
-                    BME.write_vertices(mesh_file, mesh, lod_index)
-                    if lod.vertex_end_bytes is not None:
-                        mesh_file.write(lod.vertex_end_bytes)
-                    # Normals
-                    current_modded_lod.vertex_data_offset_b = mesh_file.tell()
-                    BME.write_normals(mesh_file, mesh, lod_index)
-                    if lod.normals_end_bytes is not None:
-                        mesh_file.write(lod.normals_end_bytes)
-                    # Indices
-                    current_modded_lod.face_block_offset = mesh_file.tell()
-                    BME.write_triangles(mesh_file, mesh, lod_index)
-                    if lod.faces_end_bytes is not None:
-                        mesh_file.write(lod.faces_end_bytes)
-                else:
-                    # Unedited lod - copy from source file
-                    source.seek(lod.data_offset)
-                    current_modded_lod.vertex_data_offset_a = new_vertex_data_offset_a
-                    offset_diff = new_vertex_data_offset_a - lod.vertex_data_offset_a
-                    current_modded_lod.vertex_data_offset_b = lod.vertex_data_offset_b + offset_diff
-                    current_modded_lod.face_block_offset = lod.face_block_offset + offset_diff
-                    mesh_file.write(source.read(lod.data_size))
-
-                current_modded_lod.data_size = mesh_file.tell() - new_vertex_data_offset_a
-                print("\n", lod.index, lod.data_offset, lod.data_size, lod.vertex_count)
-                print("Vertex_data_offset_a = ", new_vertex_data_offset_a, "   was  ", lod.vertex_data_offset_a,
-                      "  diff = ", offset_diff)
-                print("Mesh_File data start : ", new_vertex_data_offset_a, "Data Size : ", current_modded_lod.data_size)
-        modded_mesh.mesh_file = mesh_file
-        return modded_mesh
 
 BME = BlenderMeshExporter

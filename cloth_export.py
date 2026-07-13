@@ -9,6 +9,7 @@ from struct import pack, unpack
 import bpy
 
 from . import addon_state
+from .log import logger
 from .mmb import SkeletalMeshAsset
 
 try:
@@ -21,7 +22,7 @@ except ImportError:
         _spec.loader.exec_module(mcloth)
     except Exception as error:
         mcloth = None
-        print(f'[AFoPMT] mcloth.py not available ({error}) - cloth export disabled.')
+        logger.warning("mcloth.py is unavailable; cloth export is disabled: %s", error)
 
 def _sim_free_slot_flags(orig_vc):
     """[bool]*orig_vc: True where the source .mcloth marks the sim vert FREE
@@ -45,7 +46,7 @@ def _sim_free_slot_flags(orig_vc):
                 return None
             off += size
     except Exception:
-        pass
+        logger.debug("Could not read cloth free-slot flags", exc_info=True)
     return None
 
 
@@ -144,7 +145,7 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
         _src_asset = SkeletalMeshAsset()
         _src_asset.parse(io.BytesIO(_src_bytes))
     except Exception as _se:
-        print(f"[AFoPMT] moved-vert baseline unavailable: {_se}")
+        logger.warning("Moved-vertex baseline is unavailable: %s", _se)
         _src_asset = None
 
     sim_arg = None
@@ -197,8 +198,9 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
             if _sp is not None and _st is not None and _reused:
                 _tb = b''.join(pack('<HHH', *t) for t in _st)
                 sim_reuse_arg = (_sp, _tb, set(_reused))
-                print(f"[AFoPMT] sim budget reuse: {len(_reused)} slot(s) "
-                      f"rewritten in place (counts unchanged)")
+                logger.debug(
+                    "Sim budget reuse: %d slot(s) rewritten in place",
+                    len(_reused))
                 if operator:
                     operator.report({'INFO'},
                         f"New _CLOTH_SIM vertices reuse {len(_reused)} deleted "
@@ -207,8 +209,9 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                 if _ovc0 is None or len(_sp) != _ovc0 or len(_st) != _otc0:
                     _tb = b''.join(pack('<HHH', *t) for t in _st)
                     sim_arg = (_sp, _tb)
-                    print(f"[AFoPMT] sim section: {_ovc0}->{len(_sp)} verts, "
-                          f"{_otc0}->{len(_st)} tris (rewriting count fields + tables)")
+                    logger.warning(
+                        "Sim counts changed: %s->%d vertices, %s->%d triangles",
+                        _ovc0, len(_sp), _otc0, len(_st))
                     if operator:
                         operator.report({'WARNING'},
                             "Sim vertex/triangle count changed - this is known "
@@ -216,14 +219,14 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                             "geometry reuses the freed slots instead.")
                 elif _moved:
                     sim_move_arg = (_sp, _moved)
-                    print(f"[AFoPMT] sim move: {len(_moved)} vert(s) moved; "
-                          f"refreshing sim rest state (positions + rest "
-                          f"lengths) to re-cook the cloth mapping")
+                    logger.debug(
+                        "Sim move: refreshing rest state for %d moved vertex(s)",
+                        len(_moved))
         elif len(_sims) > 1:
-            print("[AFoPMT] sim section: multiple _CLOTH_SIM meshes - skipping "
-                  "sim rewrite (unsupported)")
+            logger.warning(
+                "Multiple _CLOTH_SIM meshes found; sim rewrite is unsupported")
     except Exception as e:
-        print(f"[AFoPMT] sim section pass skipped: {e}")
+        logger.exception("Sim-section pass was skipped: %s", e)
         sim_arg = None
         sim_reuse_arg = None
         sim_move_arg = None
@@ -349,7 +352,7 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                     if zone_tris:
                         _zmsg = ", ".join(f"{z} ({len(ts)} sim tris)"
                                           for z, ts in zone_tris.items())
-                        print(f"[AFoPMT] {sim_name}: cloth zones {_zmsg}")
+                        logger.debug("%s: cloth zones %s", sim_name, _zmsg)
                         if operator:
                             operator.report({'INFO'},
                                             f"Cloth zones active: {_zmsg}")
@@ -412,7 +415,7 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                             if _op3:
                                 _orig_rpos[_li3] = _op3
                 except Exception as _oe:
-                    print(f"[AFoPMT] moved-vert baseline skipped: {_oe}")
+                    logger.warning("Moved-vertex baseline was skipped: %s", _oe)
                     _orig_rpos = {}
 
             _zone_moved_total = 0
@@ -531,9 +534,10 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                         _zmoved += int(_zone_bad and not _struct_bad)
                     _zone_moved_total += _zmoved
                     if _re or _rel:
-                        print(f"[AFoPMT] {block_name}: sim-edit row fix: "
-                              f"{_re} re-attached ({_zmoved} by zone), "
-                              f"{_rel} released to skinning")
+                        logger.debug(
+                            "%s: sim-edit row fix re-attached %d (%d by zone) "
+                            "and released %d to skinning",
+                            block_name, _re, _zmoved, _rel)
                     if _fix_rows:
                         computed[block_name] = sorted(_fix_rows.items())
 
@@ -596,8 +600,9 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                     if _mvd:
                         _done.update(_mvd)
                         computed[block_name] = sorted(_done.items())
-                        print(f"[AFoPMT] {block_name}: recomputed rows for "
-                              f"{len(_mvd)} moved render vert(s)")
+                        logger.debug(
+                            "%s: recomputed rows for %d moved render vertex(s)",
+                            block_name, len(_mvd))
 
                 # Computed rows for appended slots. Three sources of binding:
                 #   1. a driven mmb_vertex_order source vertex (edited/generated
@@ -786,10 +791,12 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                     _merged = dict(computed.get(block_name, []))
                     _merged.update(rows)
                     computed[block_name] = sorted(_merged.items())
-                    print(f"[AFoPMT] {block_name}: computed rows for {len(rows)}"
-                          f"/{slot_total - append_base} appended vert(s) "
-                          f"({retargeted} re-attached, {transferred} nearest-"
-                          f"transferred, {twins} twin(s), {flagged} mask-flagged)")
+                    logger.debug(
+                        "%s: computed rows for %d/%d appended vertices "
+                        "(%d re-attached, %d nearest-transferred, %d twins, "
+                        "%d mask-flagged)",
+                        block_name, len(rows), slot_total - append_base,
+                        retargeted, transferred, twins, flagged)
                 if color_patches:
                     lodn = new_render.lods[li_]
                     hi = sum(new_render.lods[k].data_size
@@ -804,7 +811,7 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                     f"Cloth zones re-assigned {_zone_moved_total} render "
                     f"row(s) across LODs.")
     except Exception as e:
-        print(f"[AFoPMT] mcloth geometry pass skipped: {e}")
+        logger.exception("mcloth geometry pass was skipped: %s", e)
         rebind = {}
         computed = {}
         mmb_color_patches = []
@@ -817,10 +824,11 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                 for _off, _byts in mmb_color_patches:
                     f.seek(_off)
                     f.write(_byts)
-            print(f"[AFoPMT] patched cloth mask colors for "
-                  f"{len(mmb_color_patches)} appended vert(s)")
+            logger.debug(
+                "Patched cloth mask colors for %d appended vertex(s)",
+                len(mmb_color_patches))
         except OSError as e:
-            print(f"[AFoPMT] cloth color patch failed: {e}")
+            logger.warning("Cloth color patch failed: %s", e)
 
     out_bytes, stats = mcloth.rewrite(data, remaps, rebind=rebind,
                                       computed=computed, sim=sim_arg,

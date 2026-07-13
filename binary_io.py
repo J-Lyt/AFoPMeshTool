@@ -146,7 +146,6 @@ class ByteReader:
         w = w & 0x1
 
         vectorLength = math.sqrt(x ** 2 + y ** 2 + z ** 2)
-        # # print(x,y,z)
         if vectorLength != 0:
             x /= vectorLength
             y /= vectorLength
@@ -169,7 +168,6 @@ class ByteReader:
                     row3.append(value)
                 if c == 3:
                     row4.append(value)
-        # print(Matrix((row1,row2,row3,row4)))
         matrix = Matrix((row1, row2, row3, row4))#.inverted()
         return matrix
 class BytePacker:
@@ -196,7 +194,6 @@ class BytePacker:
         return pack('<H', v)
     @staticmethod
     def int16_norm(v):
-        # print(v)
         if -1.0 <= v <= 1.0:
             # if v >= 0:
             #     v = int(abs(v) * (2 ** 15))

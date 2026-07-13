@@ -9,8 +9,12 @@ bl_info = {
     "category": "Import-Export",
 }
 
+import logging
 import os
 import shutil
+
+
+_bootstrap_logger = logging.getLogger("afop_mesh_tool")
 
 
 # Delete the package cache before importing split modules. Blender updates are
@@ -36,6 +40,7 @@ _REQUIRED_SPLIT_MODULES = (
     "exporter.py",
     "file_utils.py",
     "importer.py",
+    "log.py",
     "mmb.py",
     "operators_bones.py",
     "operators_files.py",
@@ -80,7 +85,7 @@ def _bootstrap_split_modules():
             destination = os.path.join(os.path.dirname(__file__), filename)
             os.replace(staged[filename], destination)
             installed.append(destination)
-            print(f"[AFoPMT] Bootstrapped missing module {filename}")
+            _bootstrap_logger.info("Bootstrapped missing module %s", filename)
     except Exception as error:
         for destination in installed:
             try:
@@ -104,14 +109,6 @@ _bootstrap_split_modules()
 
 import bpy
 
-from . import addon_state
-from . import binary_io
-from . import blender_mesh_utils
-from . import cloth_export
-from . import exporter
-from . import file_utils
-from . import importer
-from . import mmb
 from . import operators_bones
 from . import operators_files
 from . import operators_io
@@ -119,17 +116,12 @@ from . import operators_mesh
 from . import settings
 from . import ui
 from . import updater
-from .binary_io import BytePacker, ByteReader, bp, br
-from .cloth_export import _export_mcloth_for_asset
-from .exporter import BME, BlenderMeshExporter
-from .file_utils import _mod_file_output, get_merged_mmb
-from .importer import BMI, BlenderMeshImporter
-from .mmb import Asset, SkeletalMeshAsset
 
 
 # Preserve the historical registration order so saved Blender files and
 # operator availability behave exactly as before the module split.
 classes = (
+    settings.AFOPPreferences,
     settings.SWOMTSettings,
     operators_io.BrowseMMBFile,
     operators_io.BrowseLodPresetsCfg,
@@ -164,31 +156,6 @@ classes = (
     operators_mesh.RevertMesh,
 )
 
-_COMPAT_MODULES = (
-    binary_io,
-    file_utils,
-    mmb,
-    importer,
-    exporter,
-    cloth_export,
-    settings,
-    operators_io,
-    operators_mesh,
-    operators_bones,
-    operators_files,
-    updater,
-    ui,
-)
-
-
-def __getattr__(name):
-    if name == "asset":
-        return addon_state.asset
-    for module in _COMPAT_MODULES:
-        if name in module.__dict__:
-            return module.__dict__[name]
-    raise AttributeError(name)
-
 
 def register():
     for cls in classes:
@@ -196,6 +163,7 @@ def register():
     bpy.types.Scene.SWOMT = bpy.props.PointerProperty(type=settings.SWOMTSettings)
     if settings._on_load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(settings._on_load_post)
+    settings.apply_debug_logging_preference()
     updater.start_update_check()
     updater._check_data_files()
 

@@ -7,7 +7,20 @@ import bpy
 
 from . import addon_state
 from .file_utils import _strip_mod_suffix, get_merged_mmb
+from .log import logger, set_debug
 from .mmb import SkeletalMeshAsset
+
+
+def _on_debug_logging_update(self, context):
+    set_debug(self.debug_logging)
+
+
+def apply_debug_logging_preference():
+    """Restore the saved add-on logging preference after registration."""
+    addon = bpy.context.preferences.addons.get(__package__)
+    if addon is not None:
+        set_debug(addon.preferences.debug_logging)
+
 
 @bpy.app.handlers.persistent
 def _on_load_post(filepath, *args, **kwargs):
@@ -32,12 +45,12 @@ def _on_load_post(filepath, *args, **kwargs):
                         sk_mesh.name = full_stem
                     addon_state.asset = sk_mesh
                 _check_vert_pos_mmb(sk_mesh, path)
-                print(f"[AFoPMT] Loaded '{sk_mesh.name}' from '{path}'")
+                logger.info("Loaded %s from %s", sk_mesh.name, path)
             except Exception as e:
-                print(f"[AFoPMT] Failed to Load '{path}': {e}")
+                logger.warning("Failed to load %s: %s", path, e)
             break
     except Exception as e:
-        print(f"[AFoPMT] _on_load_post error: {e}")
+        logger.exception("Load-post handler failed: %s", e)
 
 def _resolve_asset_name(new_path, old_asset):
     """
@@ -69,7 +82,7 @@ def _auto_load_mmb(self, context):
             addon_state.asset = sk_mesh
         _check_vert_pos_mmb(sk_mesh, path)
     except Exception as e:
-        print(f"MMB auto-load failed: {e}")
+        logger.warning("MMB auto-load failed: %s", e)
 
 def _vert_count_changed():
     """Return True if any imported LOD Blender object has a different vert count than the MMB."""
@@ -93,7 +106,7 @@ def _check_vert_pos_mmb(sk_mesh, path: str):
     try:
         merged = get_merged_mmb(path)
     except Exception as e:
-        print(f"[AFoPMT] _check_vert_pos_mmb: could not open '{path}': {e}")
+        logger.warning("Could not inspect vertex positions in %s: %s", path, e)
         return
 
     for mesh in sk_mesh.meshes:
@@ -110,7 +123,7 @@ def _check_vert_pos_mmb(sk_mesh, path: str):
                 for x, y, z in positions
             )
         except Exception as e:
-            print(f"[AFoPMT] _check_vert_pos_mmb: error reading '{mesh.name}': {e}")
+            logger.warning("Could not inspect vertex positions for %s: %s", mesh.name, e)
             continue
 
         mesh.zeroed_out_in_mmb = is_zeroed
@@ -174,6 +187,23 @@ def _set_export_uvs(self, value):
     self["export_uvs"] = value
     if old != value:
         _on_export_uvs_update(self, None)
+
+
+class AFOPPreferences(bpy.types.AddonPreferences):
+    bl_idname = __package__
+
+    debug_logging: bpy.props.BoolProperty(
+        name="Enable Debug Logging",
+        default=False,
+        description="Write diagnostic messages to Blender's system console",
+        update=_on_debug_logging_update,
+    )
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "debug_logging")
+        layout.label(text="Diagnostic messages are written to Blender's system console.")
+
 
 class SWOMTSettings(bpy.types.PropertyGroup):
     AssetPath: bpy.props.StringProperty(name="Asset Path", update=_auto_load_mmb)
@@ -243,4 +273,4 @@ class SWOMTSettings(bpy.types.PropertyGroup):
         subtype="FILE_PATH",
     )
 
-CLASSES = (SWOMTSettings,)
+CLASSES = (AFOPPreferences, SWOMTSettings)

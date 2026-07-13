@@ -7,6 +7,7 @@ import bpy
 from mathutils import Euler, Matrix, Vector
 
 from .blender_mesh_utils import compute_normals_for_object
+from .log import logger
 from .mmb import SkeletalMeshAsset
 
 class BlenderMeshImporter:
@@ -121,7 +122,7 @@ class BlenderMeshImporter:
         if mesh.uv_count > 0:
             _enc_map = getattr(lod, 'last_uv_encodings', {})
             _enc_list = '/'.join(_enc_map.get(i, '?') for i in range(mesh.uv_count))
-            print(f'UV Encoding: {mesh.uv_count} ({_enc_list})')
+            logger.debug("UV encoding: %d (%s)", mesh.uv_count, _enc_list)
 
         # Store per-UV-layer centred flags as mesh attributes so export can
         # reverse the correct transform without re-detecting from Blender values.
@@ -200,7 +201,7 @@ class BlenderMeshImporter:
             degenerate = all_w_zero or all_same_dir or mostly_zero or bad_correlation
 
             if not degenerate:
-                print(f"[AFoPMT] {obj.name}: Importing normals from file")
+                logger.debug("%s: importing normals from file", obj.name)
                 obj_data.normals_split_custom_set_from_vertices(computed_normals)
             else:
                 reasons = []
@@ -208,7 +209,9 @@ class BlenderMeshImporter:
                 if all_same_dir: reasons.append("All Same Direction")
                 if mostly_zero: reasons.append(f"Mostly Zero ({zero_count}/{len(computed_normals)})")
                 if bad_correlation: reasons.append(f"No Face Correlation (avg_dot={avg_dot:.3f})")
-                print(f"[AFoPMT] {obj.name}: Degenerate Normals Detected ({', '.join(reasons)}) - Computing Normals")
+                logger.warning(
+                    "%s: degenerate normals detected (%s); computing normals",
+                    obj.name, ', '.join(reasons))
 
         if degenerate:
             compute_normals_for_object(obj)
