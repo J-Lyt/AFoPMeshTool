@@ -34,8 +34,11 @@ def _sim_free_slot_flags(orig_vc):
             return None
         with open(src, 'rb') as f:
             d = f.read()
-        stream_end = unpack('<I', d[16:20])[0]
-        off = 20
+        streams, _footer_offset = mcloth.parse_streams(d)
+        if len(streams) != 1:
+            return None
+        off = streams[0]['start']
+        stream_end = streams[0]['end']
         while off + 8 <= stream_end:
             tag, size = unpack('<II', d[off:off + 8])
             if (tag & 0xFFFF) == mcloth.T_SIM_REST:
@@ -124,12 +127,12 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                 old_to_new = {i: i for i in range(new_vc)}
             remaps[block_name] = (new_vc, src_block, old_to_new)
 
-    # Sim-section sync: BUDGET REUSE remains the confirmed path. New sim verts
+    # Sim-section sync: BUDGET REUSE remains the preferred path. New sim verts
     # occupy reused (deleted) slots while the vanilla budget is sufficient,
     # producing a value-only rewrite. If the vertex budget is exceeded, the
-    # experimental path appends complete vertex/triangle topology and rebuilds
-    # all count-dependent tables plus the SIMD constraint schedule. Move and
-    # inert-delete stay on the passthrough.
+    # confirmed growth path appends complete vertex/triangle topology and
+    # rebuilds all count-dependent tables plus the SIMD constraint schedule.
+    # Move and inert-delete stay on the passthrough.
     # Source-asset baseline: a driven RENDER vert's in-game position is
     # reconstructed from its ROW (relative to the sim triangle), NOT the mmb
     # rest position - so moving a render vert without re-encoding its row
@@ -203,15 +206,14 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                 # fabric cooker excludes preserved phantom faces.
                 sim_arg = (_sp, _tb,
                            set(_valid) if _valid is not None else None)
-                logger.warning(
+                logger.info(
                     "SIM topology-growth path: %s->%d vertices, "
                     "%s->%d triangles",
                     _ovc0, len(_sp), _otc0, len(_st))
                 if operator:
-                    operator.report({'WARNING'},
-                        "SIM vertex/triangle topology grew using the "
-                        "experimental scheduled-fabric rewriter. Test this "
-                        "output in-game.")
+                    operator.report({'INFO'},
+                        f"_CLOTH_SIM topology grew to {len(_sp)} vertices and "
+                        f"{len(_st)} triangles.")
             elif _sp is not None and _st is not None and _reused:
                 _tb = b''.join(pack('<HHH', *t) for t in _st)
                 sim_reuse_arg = (_sp, _tb, set(_reused))

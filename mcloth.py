@@ -1,7 +1,7 @@
 # .mcloth reader/writer for the AFoP Mesh Tool.
 #
 # Pure module: no bpy imports, usable standalone (tests, CLI tooling).
-# The Blender-side layer (_export_mcloth_for_asset) lives in __init__.py.
+# The Blender-side layer (_export_mcloth_for_asset) lives in cloth_export.py.
 #
 # ---------------- Format ----------------
 # .mcloth files drive cloth: a low-res <name>_CLOTH_SIM mesh is simulated and
@@ -43,7 +43,7 @@
 #   P' = w*a' + u*b' + v*c' + h*n';  N' = u_N*e1' + v_N*e2' + dot(N,n)*n'; etc.
 # Rows for NEW vertices are therefore computable exactly: compute_row_values().
 # The exporter still uses a slot-preserving layout for cloth render meshes
-# (see _write_mod_file in __init__.py) as the safest, in-game-verified path.
+# (see _write_mod_file in exporter.py) as the safest, in-game-verified path.
 
 import math
 import os
@@ -87,11 +87,11 @@ SCALE_TABLE_PAIRS = VALUE_TABLES + ((0x1137, 0x1138, 2), (0x1139, 0x113a, 1))
 #            movable endpoint (0x110b flag == 0.0).
 #   0x1124 = u16 vertex-index PAIRS, section by section (mIndices)
 #   0x110d = u8 rest length per constraint, per section quantized to that
-#            section's own range, EACH SECTION padded to 16B, then a trailing
-#            32-byte record (kept verbatim; meaning unknown)
+#            section's own range, EACH SECTION padded to 16B, followed by
+#            per-vertex tether-length windows and a u16 duplicate of 0x112a
 #   0x110e = 6 x (scale float, min float, max float) quantization triplets,
 #            scale = (max-min)/254.5; [0:3] = the 3 rest-length sections,
-#            [3:6] = other quantized data (kept verbatim)
+#            [3:6] = the tether-length windows in 0x110d
 #   0x110c u32[6]: [0:3] = ceil(section/16) SIMD-16 group counts. Each of
 #            [3:6] is either zero (disabled for that section) or ceil(V/16).
 #            Preserve that zero/nonzero mask and refresh every nonzero particle
@@ -108,14 +108,13 @@ SCALE_TABLE_PAIRS = VALUE_TABLES + ((0x1137, 0x1138, 2), (0x1139, 0x113a, 1))
 #   flag (free list must not change); 0x112a/0x11b3 rows -> donor values;
 #   0x1113 mirrors the new tri buffer (same size); constraint rows in
 #   0x1124/0x110d whose pairs reference a reused slot are REWRITTEN in place
-#   (cooked pairs + rest lengths quantized under the section's EXISTING
-#   0x110e range, clamped) - spare rows are repointed to a duplicate of a
-#   cooked pair (a doubled distance constraint is valid), excess cooked
-#   constraints are dropped. 0x11dX/0x12eX etc. stay verbatim (per-tri
-#   records go stale in VALUE for reused tris but stay structurally valid).
-# Vertex/triangle append modes (pinned or cooked-free) are experimental.  Their
-# fabric rows must be re-scheduled after rows are removed or added; preserving
-# a stale 0x1111 prefix while compacting 0x1124 creates SIMD write conflicts.
+#   (cooked pairs + rest lengths); 0x110e ranges widen as needed and existing
+#   values are requantized. Spare rows duplicate a cooked pair; excess cooked
+#   constraints are dropped. The 0x110d tether trailer is refreshed as well.
+# Confirmed GROW strategy: append complete vertex/triangle topology and rebuild
+# every count-dependent fabric table. Fabric rows must be re-scheduled after
+# rows are removed or added; preserving a stale 0x1111 prefix while compacting
+# 0x1124 creates SIMD write conflicts.
 SIM_VC_FIELDS = (0x1102,)              # u32 at payload +0 = sim vertex count
 SIM_TC_FIELDS = (0x1112, 0x11d1)       # u32 at payload +0 = sim triangle count
 SIM_PADV_FIELDS = (0x111d,)            # u32 = ceil(sim vertex count, 16)
@@ -133,7 +132,6 @@ SIM_TRI_TABLES = {0x11d2: 1, 0x11d3: 2}  # bytes per sim tri (unpadded)
 T_SIM_VP_META = 0x11d1                 # [triangle count, 0x11d5 u16 count]
 T_SIM_VP_COUNTS = 0x11d2               # u8 count per triangle
 T_SIM_VP_OFFSETS = 0x11d3              # u16 CSR offset per triangle
-T_SIM_VP_SCALE = 0x11d4                # float3 global sampling parameters
 T_SIM_VP_VALUES = 0x11d5               # packed u8x2 barycentric sample weights
 T_SIM_REST = 0x110b                    # float4 rest position + flag per vert
 T_SIM_TRIS = 0x1113                    # sim triangle index buffer copy
@@ -418,8 +416,7 @@ def parse_blocks(data):
     return stream_end, blocks
 
 
-def rebind_heights(data, srcb, rows, sim_verts, sim_tris, new_pos,
-                   tri_remap=None):
+def rebind_heights(data, srcb, rows, sim_verts, sim_tris, new_pos):
     """
     Recompute the per-driven-vertex height byte (table 0x1126) from the NEW
     render vertex positions: h = signed perpendicular distance to the stored
@@ -433,8 +430,6 @@ def rebind_heights(data, srcb, rows, sim_verts, sim_tris, new_pos,
     heights = []
     for nv, r in rows:
         ti = unpack('<H', data[toff + 8 + r * 2:toff + 10 + r * 2])[0]
-        if tri_remap:
-            ti = tri_remap.get(ti, ti)
         if ti >= len(sim_tris) or nv >= len(new_pos):
             return None
         i0, i1, i2 = sim_tris[ti]
@@ -477,8 +472,7 @@ def _patched_header(data, tgt, new_vc, new_A, new_B):
     return bytes(tp)
 
 
-def _build_single(data, blocks, tgt, block_name, new_vc, source, rebind,
-                  tri_remap=None):
+def _build_single(data, blocks, tgt, block_name, new_vc, source, rebind):
     """Single-source block rebuild: rows are kept at byte level (blocked
     layout aware). A full-identity mapping copies table payloads verbatim."""
     src_name, old_to_new = source
@@ -497,7 +491,7 @@ def _build_single(data, blocks, tgt, block_name, new_vc, source, rebind,
     rows.sort()
     new_B = len(rows)
     # identity: same block, every row kept with its original index and order
-    identity = (not tri_remap and src_name == block_name and new_B == src_B
+    identity = (src_name == block_name and new_B == src_B
                 and all(nv == src_idx[r] for nv, r in rows))
 
     # Recompute heights from new positions when geometry is available
@@ -505,16 +499,11 @@ def _build_single(data, blocks, tgt, block_name, new_vc, source, rebind,
     if rebind and block_name in rebind and new_B:
         sim_verts, sim_tris, new_pos = rebind[block_name]
         rebind_result = rebind_heights(data, srcb, rows,
-                                       sim_verts, sim_tris, new_pos,
-                                       tri_remap=tri_remap)
+                                       sim_verts, sim_tris, new_pos)
 
     new_A = _mapping_allocation_count(tgt, new_B)
 
     header = _patched_header(data, tgt, new_vc, new_A, new_B)
-
-    def tri_row(tbl, row):
-        raw = unpack('<H', tbl[row * 2:row * 2 + 2])[0]
-        return pack('<H', tri_remap.get(raw, raw))
 
     pieces = []
     for tag, off, size in tgt['order']:
@@ -535,8 +524,7 @@ def _build_single(data, blocks, tgt, block_name, new_vc, source, rebind,
                 payload = data[so2 + 8:so2 + ss2]  # verbatim, incl. block padding
             elif t == T_TRI:
                 tbl = data[so2 + 8:so2 + ss2]
-                payload = b''.join(tri_row(tbl, r) if tri_remap
-                                   else tbl[r * 2:r * 2 + 2]
+                payload = b''.join(tbl[r * 2:r * 2 + 2]
                                    for _nv, r in rows)
             else:
                 lanes = 2 if t in TABLES_2B else 1
@@ -554,7 +542,7 @@ def _build_single(data, blocks, tgt, block_name, new_vc, source, rebind,
 
 
 def _build_values(data, blocks, tgt, block_name, new_vc, source, computed,
-                  rebind, tri_remap=None):
+                  rebind):
     """
     Value-pipeline block rebuild: kept rows are dequantized from the source
     block and merged with computed rows (from compute_row_values), then
@@ -585,8 +573,6 @@ def _build_values(data, blocks, tgt, block_name, new_vc, source, computed,
         if nv is None or nv >= new_vc:
             continue
         ti = unpack('<H', data[tri_off + r * 2:tri_off + r * 2 + 2])[0]
-        if tri_remap:
-            ti = tri_remap.get(ti, ti)
         vals = {'tri': ti}
         for sc_tag, tb_tag, lanes in VALUE_TABLES:
             s, mn = scales[tb_tag]
@@ -1044,7 +1030,7 @@ def _sim_overrides(data, stream_end, new_pos, new_tri_bytes, valid_tris=None,
             orig_tc = unpack('<I', data[scan + 8:scan + 12])[0]
         if t in (T_SIM_SECTS, T_SIM_PAIRS, T_SIM_RESTL, T_SIM_QUANT, T_SIM_REST,
                  T_SIM_VP_META, T_SIM_VP_COUNTS, T_SIM_VP_OFFSETS,
-                 T_SIM_VP_SCALE, T_SIM_VP_VALUES, 0x112a,
+                 T_SIM_VP_VALUES, 0x112a,
                  T_SIM_AUX_HEADER, T_SIM_AUX_VALUES, T_SIM_AUX_DESCS):
             orig.setdefault(t, data[scan + 8:scan + size])
         scan += size
@@ -1830,7 +1816,7 @@ def _emit_region(data, lo, hi, overrides):
 
 
 def rewrite(data, remaps, rebind=None, computed=None, sim=None, sim_free=False,
-            sim_reuse=None, sim_move=None, sim_tri_remap=None):
+            sim_reuse=None, sim_move=None):
     """
     Rewrite the mcloth chunk stream, remapping the per-LOD driven-vertex blocks.
 
@@ -1858,9 +1844,6 @@ def rewrite(data, remaps, rebind=None, computed=None, sim=None, sim_free=False,
     :param sim_move: (new_sim_positions, moved_slot_set) for a MOVE (topology
            unchanged): refresh 0x110b positions + rest lengths/tethers for the
            moved verts. Also forces the engine to re-cook the render mapping.
-    :param sim_tri_remap: optional old->new sim triangle-ID map applied only to
-           rows retained from the source render blocks. Synthesized rows already
-           address the exported topology and are deliberately not remapped.
     :return: (new file bytes, {block_name: (old_B, new_B)})
     """
     stream_end, blocks = parse_blocks(data)
@@ -1879,15 +1862,13 @@ def rewrite(data, remaps, rebind=None, computed=None, sim=None, sim_free=False,
         extra = (computed or {}).get(block_name) or []
         if extra:
             pieces, new_B = _build_values(data, blocks, tgt, block_name, new_vc,
-                                          (src_name, old_to_new), extra, rebind,
-                                          tri_remap=sim_tri_remap)
+                                          (src_name, old_to_new), extra, rebind)
         else:
             pieces, new_B = _build_single(data, blocks, tgt, block_name, new_vc,
-                                          (src_name, old_to_new), rebind,
-                                          tri_remap=sim_tri_remap)
+                                          (src_name, old_to_new), rebind)
 
         start = tgt['order'][0][1]
-        last_tag, last_off, last_size = tgt['order'][-1]
+        _, last_off, last_size = tgt['order'][-1]
         spans.append((start, last_off + last_size, pieces))
         # old B of the TARGET block for reporting
         toff2, tsize2 = tgt['chunks'][T_INDICES]
@@ -1933,68 +1914,6 @@ def mmb_lod_u16_tris(file_bytes, mesh, li):
     base = lod.data_offset + (lod.face_block_offset - higher)
     return [unpack('<HHH', file_bytes[base + i * 6: base + i * 6 + 6])
             for i in range(lod.index_count // 3)]
-
-
-def mmb_lod_swap_components(file_bytes, mesh, li, vertex_pairs, triangle_pairs):
-    """Swap two equal-sized SIM components in an MMB LOD without changing
-    counts or layout.
-
-    ``vertex_pairs`` and ``triangle_pairs`` are ``(old_id, appended_id)``
-    pairs. Complete position and normal-stream records are exchanged. Each
-    exchanged triangle is also rewritten through the bidirectional vertex-ID
-    map, so the geometry stays intact while the two components trade IDs.
-    """
-    lod = mesh.lods[li]
-    if mesh.position_type != 1:
-        raise ValueError("SIM component swapping requires float positions")
-    if lod.size_a != lod.face_block_offset // 2:
-        raise ValueError("SIM component swapping requires uint16 indices")
-    vp = [(int(a), int(b)) for a, b in vertex_pairs]
-    tp = [(int(a), int(b)) for a, b in triangle_pairs]
-    if not vp or not tp:
-        raise ValueError("SIM component swap cannot be empty")
-    if len({a for p in vp for a in p}) != len(vp) * 2:
-        raise ValueError("SIM vertex swap IDs overlap")
-    if len({a for p in tp for a in p}) != len(tp) * 2:
-        raise ValueError("SIM triangle swap IDs overlap")
-    if any(a < 0 or b < 0 or a >= lod.vertex_count or b >= lod.vertex_count
-           for a, b in vp):
-        raise ValueError("SIM vertex swap ID is out of range")
-    tc = lod.index_count // 3
-    if any(a < 0 or b < 0 or a >= tc or b >= tc for a, b in tp):
-        raise ValueError("SIM triangle swap ID is out of range")
-
-    higher = sum(mesh.lods[k].data_size
-                 for k in range(li + 1, len(mesh.lods)))
-    pos_base = lod.data_offset + (lod.vertex_data_offset_a - higher)
-    nor_base = lod.data_offset + (lod.vertex_data_offset_b - higher)
-    tri_base = lod.data_offset + (lod.face_block_offset - higher)
-    out = bytearray(file_bytes)
-
-    def swap_records(base, stride, pairs):
-        if stride <= 0:
-            return
-        for a, b in pairs:
-            ao, bo = base + a * stride, base + b * stride
-            ar, br = bytes(out[ao:ao + stride]), bytes(out[bo:bo + stride])
-            if len(ar) != stride or len(br) != stride:
-                raise ValueError("SIM component record extends past the MMB")
-            out[ao:ao + stride], out[bo:bo + stride] = br, ar
-
-    swap_records(pos_base, mesh.vertex_stride, vp)
-    swap_records(nor_base, mesh.normals_stride, vp)
-
-    vmap = {a: b for a, b in vp}
-    vmap.update({b: a for a, b in vp})
-    for a, b in tp:
-        ao, bo = tri_base + a * 6, tri_base + b * 6
-        at = unpack('<HHH', bytes(out[ao:ao + 6]))
-        bt = unpack('<HHH', bytes(out[bo:bo + 6]))
-        if not all(v in vmap for v in at + bt):
-            raise ValueError("SIM component triangle crosses the swap boundary")
-        out[ao:ao + 6] = pack('<HHH', *(vmap[v] for v in bt))
-        out[bo:bo + 6] = pack('<HHH', *(vmap[v] for v in at))
-    return bytes(out)
 
 
 def mmb_lod_color_bytes(file_bytes, mesh, li):
