@@ -93,6 +93,11 @@ class SkeletalMeshAsset(Asset):
                 self.normals_end_bytes = None
                 self.faces_end_bytes = None
                 self.lod_unk = 0  # v11 only: unknown uint32
+                # Primary face-index width encoded by size_a:
+                #   size_a * 2 == face_block_offset -> uint16
+                #   size_a * 4 == face_block_offset -> uint32
+                # None means the LOD is empty or its header is inconsistent.
+                self.index_width_bytes = None
                 # exported vc when _write_mod_file used the cloth slot-preserving layout
                 self.exported_slot_identity = 0
                 # appended slot -> mmb_vertex_order source, from the export-time
@@ -118,10 +123,19 @@ class SkeletalMeshAsset(Asset):
                 if self.parent_mesh.parent_sk_mesh.version == 11:
                     self.lod_unk = br.uint32(f)
                 self.index_count = br.uint32(f)
-                self.size_a = br.uint32(f)  # seems to be face_block_offset divided by 2
+                self.size_a = br.uint32(f)  # face_block_offset divided by index width
                 self.vertex_data_offset_a = br.uint32(f)
                 self.vertex_data_offset_b = br.uint32(f)
                 self.face_block_offset = br.uint32(f)
+                if (self.index_count > 0 and self.face_block_offset > 0
+                        and self.size_a * 4 == self.face_block_offset
+                        and self.size_a * 2 != self.face_block_offset):
+                    self.index_width_bytes = 4
+                elif (self.index_count > 0 and self.face_block_offset > 0
+                        and self.size_a * 2 == self.face_block_offset):
+                    self.index_width_bytes = 2
+                else:
+                    self.index_width_bytes = None
                 self.data_offset_file_pos = f.tell()
                 self.data_offset = br.uint32(f)
                 self.data_size = br.uint32(f)
@@ -136,7 +150,11 @@ class SkeletalMeshAsset(Asset):
                 if self.parent_mesh.parent_sk_mesh.version == 11:
                     f.write(bp.uint32(self.lod_unk))
                 f.write(bp.uint32(self.index_count))
-                f.write(bp.uint32(int(self.face_block_offset / 2)))
+                width = self.index_width_bytes
+                if width not in (2, 4):
+                    width = 4 if self.parent_mesh.index_width_flag == 1 else 2
+                self.size_a = self.face_block_offset // width
+                f.write(bp.uint32(self.size_a))
                 f.write(bp.uint32(self.vertex_data_offset_a))
                 f.write(bp.uint32(self.vertex_data_offset_b))
                 f.write(bp.uint32(self.face_block_offset))
@@ -303,19 +321,22 @@ class SkeletalMeshAsset(Asset):
                 tris = []
                 f = raw_mesh_file
                 f.seek(self.face_block_offset)
-                use_uint32 = False
-                if self.index_count > 0:
-                    # Detect uint32 indices
-                    if self.size_a == self.face_block_offset // 4 and self.size_a != self.face_block_offset // 2:
-                        use_uint32 = True
-                    else:
-                        peek_bytes = f.read(16)
-                        f.seek(self.face_block_offset)
-                        if len(peek_bytes) >= 16:
-                            import struct as _struct
-                            hi_words = [_struct.unpack('<H', peek_bytes[i:i + 2])[0]
-                                        for i in range(2, 16, 4)]
-                            use_uint32 = all(v == 0 for v in hi_words)
+                use_uint32 = self.index_width_bytes == 4
+                if self.index_width_bytes is None and self.index_count > 0:
+                    # Malformed/ambiguous legacy fallback. Valid stock files encode
+                    # the width deterministically through size_a.
+                    peek_bytes = f.read(16)
+                    f.seek(self.face_block_offset)
+                    if len(peek_bytes) >= 16:
+                        import struct as _struct
+                        hi_words = [_struct.unpack('<H', peek_bytes[i:i + 2])[0]
+                                    for i in range(2, 16, 4)]
+                        use_uint32 = all(v == 0 for v in hi_words)
+                    logger.warning(
+                        "%s LOD%d has an ambiguous index-width header; using the "
+                        "legacy byte probe (%s)",
+                        self.parent_mesh.name, self.index,
+                        "uint32" if use_uint32 else "uint16")
                 for i in range(int(self.index_count/3)):
                     if use_uint32:
                         f1 = br.uint32(f)
@@ -570,6 +591,17 @@ class SkeletalMeshAsset(Asset):
             self.normal_type = 0 # 0:int8_norm 1:floats
             self.color_in_normals = True # False when color_count not in normals stride
             self.position_type = 0 # 0:int16_norm 1:floats
+            # Per-mesh tail. The first uint32 is the engine's primary index-width
+            # flag (0=u16, 1=u32); the next three are aggregate mesh counts.
+            self.index_width_flag_offset = 0
+            self.index_width_flag = 0
+            self.total_vertex_count_offset = 0
+            self.total_vertex_count = 0
+            self.total_index_count_offset = 0
+            self.total_index_count = 0
+            self.total_data_size_offset = 0
+            self.total_data_size = 0
+            self.tail_extra_u32 = None
         def parse(self, f):
             version = self.parent_sk_mesh.version
 
@@ -730,12 +762,33 @@ class SkeletalMeshAsset(Asset):
                 self.name, self.vertex_stride, self.normals_stride,
                 self.uv_count, self.color_count, self.normal_type)
 
-            # --- Post-stride skip ---
-            # v17 has 4 extra bytes here compared to other versions
+            # --- Per-mesh tail ---
+            # Corpus-confirmed across v11-v17:
+            #   [index_width_flag, total_vc, total_ic, total_data]
+            # v17 carries one additional unknown uint32 which is preserved.
+            self.index_width_flag_offset = f.tell()
+            self.index_width_flag = br.uint32(f)
+            self.total_vertex_count_offset = f.tell()
+            self.total_vertex_count = br.uint32(f)
+            self.total_index_count_offset = f.tell()
+            self.total_index_count = br.uint32(f)
+            self.total_data_size_offset = f.tell()
+            self.total_data_size = br.uint32(f)
             if version == 17:
-                f.seek(20, 1)
-            else:
-                f.seek(16, 1)
+                self.tail_extra_u32 = br.uint32(f)
+
+            widths = {lod.index_width_bytes for lod in self.lods
+                      if lod.index_width_bytes in (2, 4)}
+            expected_flag = 1 if widths == {4} else 0 if widths == {2} else None
+            if len(widths) > 1:
+                logger.debug(
+                    "%s contains mixed index widths; remaining uint16 LOD "
+                    "index buffers will be widened to uint32",
+                    self.name)
+            elif expected_flag is not None and self.index_width_flag != expected_flag:
+                logger.warning(
+                    "%s index-width flag is %d but its LOD headers encode uint%d",
+                    self.name, self.index_width_flag, 32 if expected_flag else 16)
         def extract_mesh_file(self,f):
             """
             Creates a file gathering the raw data of all Lods the Mesh.
