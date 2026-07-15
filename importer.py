@@ -201,8 +201,37 @@ class BlenderMeshImporter:
             degenerate = all_w_zero or all_same_dir or mostly_zero or bad_correlation
 
             if not degenerate:
-                logger.debug("%s: importing normals from file", obj.name)
-                obj_data.normals_split_custom_set_from_vertices(computed_normals)
+                # Blender's custom-normal API expects exactly one usable vector
+                # per mesh vertex. Validate the buffer before entering the C API,
+                # where a short list can otherwise cause a hard crash.
+                nverts = len(obj_data.vertices)
+                if len(computed_normals) != nverts:
+                    logger.warning(
+                        "%s: file normal count %d does not match vertex count %d; "
+                        "computing normals instead",
+                        obj.name, len(computed_normals), nverts)
+                    degenerate = True
+                else:
+                    safe_normals = []
+                    for normal in computed_normals:
+                        try:
+                            length = normal.length
+                            finite = all(math.isfinite(component) for component in normal)
+                        except (AttributeError, TypeError, ValueError):
+                            length = 0.0
+                            finite = False
+                        if not finite or not math.isfinite(length) or length < 1e-6:
+                            safe_normals.append(Vector((0.0, 0.0, 1.0)))
+                        else:
+                            safe_normals.append(normal)
+                    try:
+                        logger.debug("%s: importing normals from file", obj.name)
+                        obj_data.normals_split_custom_set_from_vertices(safe_normals)
+                    except Exception as error:
+                        logger.warning(
+                            "%s: applying file normals failed (%s); computing normals instead",
+                            obj.name, error)
+                        degenerate = True
             else:
                 reasons = []
                 if all_w_zero: reasons.append("All w=0 (e.g. VAT Data)")

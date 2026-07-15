@@ -635,15 +635,15 @@ class SkeletalMeshAsset(Asset):
             #   v11/v12:        no root_bone_index, no lod_info_type
             #   v13, u>0:       root_bone_index[1]  lod_info_type[1]
             #   v13, u==0:      (no root_bone_index, no lod_info_type)
-            #   v14, u>0:       root_bone_index[1]  lod_info_type[1]
+            #   v14, u>0:       root_bone_index[2]  lod_info_type[1]
             #   v14, u==0:      lod_info_type[1]
             #   v15/16/17, u>0: root_bone_index[2]  lod_info_type[1]
             #   v15/16/17, u==0: lod_info_type[1]
             if u_count > 0 and version not in (11, 12):
-                if version in (13, 14):
-                    f.seek(1, 1)  # v13/v14: 1-byte root_bone_index
-                else:             # v15, v16, v17
-                    f.seek(2, 1)  # v15+: 2-byte root_bone_index
+                if version == 13:
+                    f.seek(1, 1)  # v13: 1-byte root_bone_index
+                else:             # v14, v15, v16, v17
+                    f.seek(2, 1)  # v14+: 2-byte root_bone_index
                 lod_info_type = br.uint8(f)
             else:
                 if version in (11, 12, 13):
@@ -686,7 +686,6 @@ class SkeletalMeshAsset(Asset):
                 f.seek(8,1) # skip unk
 
             self.uv_count = br.uint8(f)
-            f.seek(4 * self.uv_count, 1)
 
             # uv_divisors: divisor table read from file (see _UV_KNOWN_DIVISORS).
             # count_c/color_count is the authoritative UV set count when all entries
@@ -694,8 +693,16 @@ class SkeletalMeshAsset(Asset):
             # the header but count_c=2 with valid divisors for both UV sets).
             self.uv_divisors = None
             if version == 11:
+                # In v11 this block stores one float32 divisor per UV set, not
+                # hashes. Retain recognised values so each set is decoded with
+                # its actual scale; unknown values keep the existing fallback.
+                _div_raw = [f.read(4) for _ in range(self.uv_count)]
+                _candidates = _uv_divisor_candidates(_div_raw)
+                if _candidates is not None:
+                    self.uv_divisors = _candidates
                 self.color_count = 0 # v11 does not store color_count; always 0
             elif version in (16, 17):
+                f.seek(4 * self.uv_count, 1)
                 self.color_count = br.uint8(f)
                 f.seek(4 * self.color_count, 1)
                 f.seek(4, 1) # unk after color (v16/v17)
@@ -706,6 +713,7 @@ class SkeletalMeshAsset(Asset):
                     self.uv_divisors = _candidates
                     self.uv_count = count_c
             else:
+                f.seek(4 * self.uv_count, 1)
                 f.seek(4, 1) # unk before color (v12/v13/v15)
                 self.color_count = br.uint8(f)
                 _div_raw = [f.read(4) for _ in range(self.color_count)]
@@ -820,7 +828,7 @@ class SkeletalMeshAsset(Asset):
     def parse(self,f):
         super().parse(f)
         if self.version not in (11, 12, 13, 14, 15, 16, 17):
-            raise Exception(f'Unsupported .mmb version: {self.version}. Supported versions: 11, 12, 13, 15, 16, 17.')
+            raise Exception(f'Unsupported .mmb version: {self.version}. Supported versions: 11, 12, 13, 14, 15, 16, 17.')
         self.bone_count = br.uint32(f)
         for b in range(self.bone_count):
             self.bones.append(self.Bone(f))

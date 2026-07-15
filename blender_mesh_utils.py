@@ -49,7 +49,20 @@ def compute_normals_for_object(obj):
 
     bm_orig.free()
 
-    obj_data.normals_split_custom_set_from_vertices(smooth_normals)
+    # This should already be one normal per original vertex, but keep the list
+    # exact before handing it to Blender's custom-normal C API.
+    nverts = len(obj_data.vertices)
+    if len(smooth_normals) != nverts:
+        logger.warning(
+            "%s: computed normal count %d does not match vertex count %d; repairing buffer",
+            obj.name, len(smooth_normals), nverts)
+        smooth_normals = (
+            smooth_normals + [Vector((0.0, 0.0, 1.0))] * nverts
+        )[:nverts]
+    try:
+        obj_data.normals_split_custom_set_from_vertices(smooth_normals)
+    except Exception as error:
+        logger.warning("%s: could not apply computed custom normals (%s)", obj.name, error)
     obj_data.update()
 
 def find_object_by_name(name=""):

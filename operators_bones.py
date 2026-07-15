@@ -131,7 +131,7 @@ def _read_donor_matrix(donor_path, target_bone_name, mesh_name):
             if version not in (11, 12, 13, 14, 15, 16, 17):
                 break
             if u_count > 0 and version != 12:
-                f.seek(1 if version in (13, 14) else 2, 1)
+                f.seek(1 if version == 13 else 2, 1)
                 lod_info_type = br.uint8(f)
             else:
                 lod_info_type = 0 if version in (12, 13) else br.uint8(f)
@@ -757,7 +757,7 @@ def _do_merge_skeletons(context, operator, src_filepath, donor_bones, mode_label
             mp += 2 # skeleton index
         # Pre-LOD bytes
         if u_count > 0 and version not in (11, 12):
-            mp += 1 if version in (13, 14) else 2 # root_bone_index
+            mp += 1 if version == 13 else 2 # root_bone_index
             lod_info_type = file_data[mp]; mp += 1
         else:
             if version in (11, 12, 13):
