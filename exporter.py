@@ -6,6 +6,7 @@ from struct import pack, unpack
 
 import bmesh
 import bpy
+import numpy as np
 from mathutils import Vector
 
 from . import addon_state
@@ -20,11 +21,301 @@ from .cloth_export import _sim_free_slot_flags
 from .log import logger
 from .mmb import SkeletalMeshAsset, _resolve_uv_encoding
 
+
+def _patch_mesh_tail_delta(file_data, mesh, vertex_delta=0, index_delta=0,
+                           data_delta=0, flag=None):
+    """Apply known semantic deltas to a mesh's aggregate tail fields.
+
+    The tail data total is not simply sum(lod.data_size): stock files may
+    exclude 4-24 bytes of terminal/padding data. Updating by typed-payload
+    delta preserves that source-specific convention.
+    """
+    off = getattr(mesh, 'index_width_flag_offset', 0)
+    if off <= 0 or off + 16 > len(file_data):
+        raise ValueError(f"'{mesh.name}' has no valid mesh-tail offset")
+    old_flag, total_vc, total_ic, total_data = unpack(
+        '<4I', file_data[off:off + 16])
+    new_values = (
+        old_flag if flag is None else flag,
+        total_vc + vertex_delta,
+        total_ic + index_delta,
+        total_data + data_delta,
+    )
+    if any(v < 0 or v > 0xFFFFFFFF for v in new_values):
+        raise ValueError(f"'{mesh.name}' mesh-tail update is outside uint32 range")
+    file_data[off:off + 16] = pack('<4I', *new_values)
+    mesh.index_width_flag = new_values[0]
+    mesh.total_vertex_count = new_values[1]
+    mesh.total_index_count = new_values[2]
+    mesh.total_data_size = new_values[3]
+
+
+def _sync_asset_layout(parsed_asset):
+    """Refresh binary offsets/counts without discarding export-time cloth state."""
+    current = addon_state.asset
+    if current is None or len(current.meshes) != len(parsed_asset.meshes):
+        return
+    current.size = parsed_asset.size
+    for old_mesh, new_mesh in zip(current.meshes, parsed_asset.meshes):
+        for attr in (
+                'name_offset', 'name_length', 'lod_count', 'lod_info_type',
+                'vertex_stride', 'normals_stride', 'u_count_offset',
+                'bone_table_end_offset', 'index_width_flag_offset',
+                'index_width_flag', 'total_vertex_count_offset',
+                'total_vertex_count', 'total_index_count_offset',
+                'total_index_count', 'total_data_size_offset',
+                'total_data_size', 'tail_extra_u32'):
+            setattr(old_mesh, attr, getattr(new_mesh, attr))
+        old_mesh.mesh_bone_file_offsets = list(new_mesh.mesh_bone_file_offsets)
+        if len(old_mesh.lods) != len(new_mesh.lods):
+            continue
+        for old_lod, new_lod in zip(old_mesh.lods, new_mesh.lods):
+            for attr in (
+                    'start_offset', 'vertex_count', 'index_count', 'size_a',
+                    'vertex_data_offset_a', 'vertex_data_offset_b',
+                    'face_block_offset', 'data_offset_file_pos', 'data_offset',
+                    'data_size', 'is_header_lod', 'lod_unk',
+                    'index_width_bytes'):
+                setattr(old_lod, attr, getattr(new_lod, attr))
+
+
 class BlenderMeshExporter:
     _compute_normals_for_object = staticmethod(compute_normals_for_object)
     find_object_by_name = staticmethod(find_object_by_name)
     _bake_parent_inverse = staticmethod(bake_parent_inverse)
     _triangulate_object = staticmethod(triangulate_object)
+
+    @staticmethod
+    def promote_mixed_index_widths(file_path: str):
+        """Widen mixed-width meshes to uniform uint32 index buffers.
+
+        The engine's width flag is per mesh, while size_a records the matching
+        width in every LOD header. If one LOD becomes uint32, all non-empty
+        sibling LODs are widened. Non-index bytes and face trailers are copied
+        verbatim; primary/secondary offsets and asset_size are patched as one
+        transaction. Returns the widened mesh names.
+        """
+        with open(file_path, 'rb') as f:
+            original = bytearray(f.read())
+        parsed = SkeletalMeshAsset()
+        parsed.parse(io.BytesIO(bytes(original)))
+
+        widen_meshes = set()
+        flag_only_meshes = set()
+        for mi, mesh in enumerate(parsed.meshes):
+            widths = {lod.index_width_bytes for lod in mesh.lods
+                      if lod.index_width_bytes in (2, 4)}
+            invalid = [lod.index for lod in mesh.lods
+                       if lod.index_count > 0 and lod.index_width_bytes not in (2, 4)]
+            if invalid:
+                raise ValueError(
+                    f"'{mesh.name}' has ambiguous index width in LOD(s) {invalid}")
+            if any(lod.vertex_count > 65535 and lod.index_width_bytes == 2
+                   for lod in mesh.lods):
+                raise ValueError(
+                    f"'{mesh.name}' contains a uint16 LOD above 65535 vertices")
+            if 2 in widths and (4 in widths or mesh.index_width_flag == 1):
+                widen_meshes.add(mi)
+            elif widths == {4} and mesh.index_width_flag != 1:
+                flag_only_meshes.add(mi)
+
+        if not widen_meshes and not flag_only_meshes:
+            _sync_asset_layout(parsed)
+            return []
+
+        blocks = {}
+        new_width = {}
+        widening_delta = {mi: 0 for mi in widen_meshes}
+        for mi, mesh in enumerate(parsed.meshes):
+            old_higher = 0
+            new_higher = 0
+            for lod in reversed(mesh.lods):
+                if lod.data_size <= 0:
+                    continue
+                key = (mi, lod.index)
+                intra_voa = lod.vertex_data_offset_a - old_higher
+                intra_vob = lod.vertex_data_offset_b - old_higher
+                intra_fb = lod.face_block_offset - old_higher
+                old_intra_fb = intra_fb
+                if not (0 <= intra_voa <= intra_vob <= intra_fb <= lod.data_size):
+                    raise ValueError(
+                        f"'{mesh.name}' LOD{lod.index} has invalid primary offsets")
+                block = bytes(original[lod.data_offset:lod.data_offset + lod.data_size])
+                if len(block) != lod.data_size:
+                    raise ValueError(f"'{mesh.name}' LOD{lod.index} is truncated")
+                width = lod.index_width_bytes
+                if width not in (2, 4):
+                    # Empty face domains have no width-dependent bytes.
+                    width = 4 if mesh.index_width_flag == 1 else 2
+                old_face_end = old_intra_fb + lod.index_count * width
+                if mi in widen_meshes and lod.index_count > 0 and width == 2:
+                    face_end = intra_fb + lod.index_count * 2
+                    if face_end > len(block):
+                        raise ValueError(
+                            f"'{mesh.name}' LOD{lod.index} index buffer is truncated")
+                    narrow = block[intra_fb:face_end]
+                    wide = np.frombuffer(narrow, dtype='<u2').astype('<u4').tobytes()
+                    # Preserve all bytes before the face buffer and every trailer
+                    # byte after it. Do not invent alignment after the trailer.
+                    block = block[:intra_fb] + wide + block[face_end:]
+                    width = 4
+                    widening_delta[mi] += lod.index_count * 2
+                if mi in widen_meshes and lod.index_count > 0 and width == 4:
+                    # face_block_offset is cumulative across reverse-ordered
+                    # sibling blocks. A widened higher LOD can shift the next
+                    # face buffer to 2 mod 4 even when its own intra-block
+                    # layout was aligned. Insert only the required pre-index
+                    # sentinel padding; trailers remain byte-identical.
+                    alignment = (-(new_higher + intra_fb)) % 4
+                    if alignment:
+                        padding = (b'\xfa\x7f' * 2)[:alignment]
+                        block = block[:intra_fb] + padding + block[intra_fb:]
+                        intra_fb += alignment
+                blocks[key] = {
+                    'bytes': block,
+                    'old_offset': lod.data_offset,
+                    'old_size': lod.data_size,
+                    'intra_voa': intra_voa,
+                    'intra_vob': intra_vob,
+                    'intra_fb': intra_fb,
+                    'old_intra_fb': old_intra_fb,
+                    'old_face_end': old_face_end,
+                }
+                new_width[key] = width
+                old_higher += lod.data_size
+                new_higher += len(block)
+
+        order = sorted((info['old_offset'], key) for key, info in blocks.items())
+        if not order:
+            raise ValueError('MMB has no primary LOD blocks to widen')
+        for (prev_off, prev_key), (next_off, _next_key) in zip(order, order[1:]):
+            previous_end = prev_off + blocks[prev_key]['old_size']
+            if next_off < previous_end:
+                raise ValueError(
+                    f'Primary LOD blocks overlap at 0x{next_off:X}')
+
+        data_start = order[0][0]
+        new_offsets = {}
+        out = bytearray(original[:data_start])
+        cursor = data_start
+        for old_offset, key in order:
+            info = blocks[key]
+            out += original[cursor:old_offset]
+            new_offsets[key] = len(out)
+            out += info['bytes']
+            cursor = old_offset + info['old_size']
+        out += original[cursor:]
+        total_shift = len(out) - len(original)
+
+        new_fields = {}
+        for mi, mesh in enumerate(parsed.meshes):
+            new_higher = 0
+            for lod in reversed(mesh.lods):
+                key = (mi, lod.index)
+                if key not in blocks:
+                    continue
+                info = blocks[key]
+                width = new_width[key]
+                voa = new_higher + info['intra_voa']
+                vob = new_higher + info['intra_vob']
+                fb = new_higher + info['intra_fb']
+                if fb % width:
+                    raise ValueError(
+                        f"'{mesh.name}' LOD{lod.index} face offset is not uint{width * 8}-aligned")
+                new_fields[key] = (fb // width, voa, vob, fb, len(info['bytes']))
+                new_higher += len(info['bytes'])
+
+        for mi, mesh in enumerate(parsed.meshes):
+            for lod in mesh.lods:
+                key = (mi, lod.index)
+                if key not in new_fields:
+                    continue
+                size_a, voa, vob, fb, data_size = new_fields[key]
+                pos = lod.start_offset + lod.lod_field_offset
+                out[pos + 8:pos + 12] = pack('<I', size_a)
+                out[pos + 12:pos + 16] = pack('<I', voa)
+                out[pos + 16:pos + 20] = pack('<I', vob)
+                out[pos + 20:pos + 24] = pack('<I', fb)
+                out[pos + 24:pos + 28] = pack('<I', new_offsets[key])
+                out[pos + 28:pos + 32] = pack('<I', data_size)
+
+        old_asset_size = unpack('<I', original[4:8])[0]
+        header_growth = sum(
+            len(blocks[key]['bytes']) - blocks[key]['old_size']
+            for old_offset, key in order if old_offset < old_asset_size)
+        out[4:8] = pack('<I', old_asset_size + header_growth)
+
+        if total_shift:
+            growth_events = [
+                (old_offset + blocks[key]['old_size'],
+                 len(blocks[key]['bytes']) - blocks[key]['old_size'])
+                for old_offset, key in order
+                if len(blocks[key]['bytes']) != blocks[key]['old_size']
+            ]
+            for mesh in parsed.meshes:
+                if mesh.lod_info_type != 2:
+                    continue
+                for lod in mesh.lods:
+                    pos = lod.start_offset + lod.lod_field_offset + 56
+                    sec2_offset = unpack('<I', original[pos:pos + 4])[0]
+                    if sec2_offset:
+                        container = next(
+                            ((old_offset, key) for old_offset, key in order
+                             if old_offset <= sec2_offset
+                             < old_offset + blocks[key]['old_size']),
+                            None)
+                        if container is not None:
+                            old_offset, key = container
+                            info = blocks[key]
+                            relative = sec2_offset - old_offset
+                            block_delta = len(info['bytes']) - info['old_size']
+                            if (block_delta and info['old_intra_fb'] <= relative
+                                    < info['old_face_end']):
+                                raise ValueError(
+                                    f"'{mesh.name}' LOD{lod.index} sec2 points into "
+                                    "a widened primary index buffer")
+                            if relative >= info['old_face_end']:
+                                relative += block_delta
+                            new_sec2_offset = new_offsets[key] + relative
+                        else:
+                            shift = sum(delta for event_offset, delta in growth_events
+                                        if event_offset <= sec2_offset)
+                            new_sec2_offset = sec2_offset + shift
+                        out[pos:pos + 4] = pack('<I', new_sec2_offset)
+
+        for mi, mesh in enumerate(parsed.meshes):
+            widths = {new_width[(mi, lod.index)] for lod in mesh.lods
+                      if (mi, lod.index) in new_width and lod.index_count > 0}
+            if len(widths) > 1:
+                raise ValueError(f"'{mesh.name}' is still mixed-width after widening")
+            flag = 1 if widths == {4} else 0
+            data_delta = widening_delta.get(mi, 0)
+            _patch_mesh_tail_delta(
+                out, mesh,
+                vertex_delta=sum(lod.vertex_count for lod in mesh.lods)
+                             - mesh.total_vertex_count,
+                index_delta=sum(lod.index_count for lod in mesh.lods)
+                            - mesh.total_index_count,
+                data_delta=data_delta,
+                flag=flag)
+
+        validated = SkeletalMeshAsset()
+        validated.parse(io.BytesIO(bytes(out)))
+        for mesh in validated.meshes:
+            widths = {lod.index_width_bytes for lod in mesh.lods
+                      if lod.index_width_bytes in (2, 4)}
+            expected_flag = 1 if widths == {4} else 0 if widths == {2} else None
+            if len(widths) > 1 or (expected_flag is not None
+                                   and mesh.index_width_flag != expected_flag):
+                raise ValueError(f"'{mesh.name}' failed uint32 widening validation")
+
+        with open(file_path, 'wb') as f:
+            f.write(out)
+        _sync_asset_layout(validated)
+        widened_names = [parsed.meshes[mi].name for mi in sorted(widen_meshes)]
+        for name in widened_names:
+            logger.info("Widened all %s LOD index buffers to uint32", name)
+        return widened_names
 
     @staticmethod
     def _write_mod_file(edited_lod_index_per_mesh: dict, out_path: str, src_path: str = None):
@@ -180,7 +471,8 @@ class BlenderMeshExporter:
             # Detect uint32 indices
             orig_sa_pre = unpack('<I', file_data[lod.start_offset + lod.lod_field_offset + 8: lod.start_offset + lod.lod_field_offset + 12])[0]
             orig_fb_pre = unpack('<I', file_data[lod.start_offset + lod.lod_field_offset + 20: lod.start_offset + lod.lod_field_offset + 24])[0]
-            orig_uses_uint32_pre = (orig_fb_pre > 0 and orig_sa_pre == orig_fb_pre // 4)
+            orig_uses_uint32_pre = (
+                orig_fb_pre > 0 and orig_sa_pre * 4 == orig_fb_pre)
             use_uint32_faces = orig_uses_uint32_pre or slot_final_vc > 65535
             BME.write_triangles(faces_buf, mesh, lod_index, force_uint32=use_uint32_faces)
 
@@ -361,28 +653,24 @@ class BlenderMeshExporter:
             # New intra-block positions based on actual buffer sizes.
             new_intra_vob = intra_voa + len(vd)
             new_intra_fb  = new_intra_vob + len(nd)
+            if use_uint32_faces:
+                alignment = (-(higher_size + new_intra_fb)) % 4
+                if alignment:
+                    nd += (b'\xfa\x7f' * 2)[:alignment]
+                    new_intra_fb += alignment
 
             # new_data_size is the only writable region (vd+nd+fd), excluding the preserved prefix bytes.
             file_lod_data_size = unpack('<I', file_data[lod.start_offset + lod.lod_field_offset + 28:lod.start_offset + lod.lod_field_offset + 32])[0]
             orig_data_size   = file_lod_data_size - intra_voa  # writable region in source
 
             # Preserve any trailing bytes after face data (e.g. fa7f sentinel padding).
-            if orig_uses_uint32_pre:
-                # Must use ORIGINAL vd/nd/fd sizes to correctly locate trailing bytes.
-                orig_vc = unpack('<I', file_data[lod.start_offset:lod.start_offset + 4])[0]
-                orig_ic = unpack('<I', file_data[lod.start_offset + lod.lod_field_offset + 4:lod.start_offset + lod.lod_field_offset + 8])[0]
-                orig_sa = unpack('<I', file_data[lod.start_offset + lod.lod_field_offset + 8:lod.start_offset + lod.lod_field_offset + 12])[0]
-                orig_fb_hdr = unpack('<I', file_data[lod.start_offset + lod.lod_field_offset + 20:lod.start_offset + lod.lod_field_offset + 24])[0]
-                orig_idx_size = 4 if (orig_fb_hdr > 0 and orig_sa == orig_fb_hdr // 4) else 2
-                orig_vd_size = orig_vc * mesh.vertex_stride
-                orig_nd_size = orig_vc * mesh.normals_stride
-                orig_fd_size = orig_ic * orig_idx_size
-            else:
-                orig_vc = unpack('<I', file_data[lod.start_offset:lod.start_offset + 4])[0]
-                orig_ic = unpack('<I', file_data[lod.start_offset + lod.lod_field_offset + 4:lod.start_offset + lod.lod_field_offset + 8])[0]
-                orig_vd_size = orig_vc * mesh.vertex_stride
-                orig_nd_size = orig_vc * mesh.normals_stride
-                orig_fd_size = orig_ic * 2 # uint16 indices
+            orig_idx_size = 4 if orig_uses_uint32_pre else 2
+            # Use ORIGINAL vd/nd/fd sizes to correctly locate trailing bytes.
+            orig_vc = unpack('<I', file_data[lod.start_offset:lod.start_offset + 4])[0]
+            orig_ic = unpack('<I', file_data[lod.start_offset + lod.lod_field_offset + 4:lod.start_offset + lod.lod_field_offset + 8])[0]
+            orig_vd_size = orig_vc * mesh.vertex_stride
+            orig_nd_size = orig_vc * mesh.normals_stride
+            orig_fd_size = orig_ic * orig_idx_size
             orig_trailing_size = orig_data_size - orig_vd_size - orig_nd_size - orig_fd_size
             if orig_trailing_size > 0:
                 trailing_abs = lod.data_offset + intra_voa + orig_vd_size + orig_nd_size + orig_fd_size
@@ -394,10 +682,6 @@ class BlenderMeshExporter:
             new_data_size    = len(vd) + len(nd) + len(fd) + len(trailing_bytes)
             delta = new_data_size - orig_data_size  # bytes added (negative = shrink)
 
-            # Absolute positions in file_data
-            abs_voa     = lod.data_offset + intra_voa
-            new_abs_vob = lod.data_offset + new_intra_vob
-            new_abs_fb  = lod.data_offset + new_intra_fb
             # Insertion point is at the end of the full block (including prefix)
             insert_at   = lod.data_offset + file_lod_data_size
 
@@ -508,6 +792,26 @@ class BlenderMeshExporter:
                     other_lod.vertex_data_offset_a = unpack('<I', file_data[other_lod_so + other_lod_fo + 12:other_lod_so + other_lod_fo + 16])[0]
                     other_lod.vertex_data_offset_b = unpack('<I', file_data[other_lod_so + other_lod_fo + 16:other_lod_so + other_lod_fo + 20])[0]
                     other_lod.face_block_offset = unpack('<I', file_data[other_lod_so + other_lod_fo + 20:other_lod_so + other_lod_fo + 24])[0]
+                    other_lod.size_a = unpack('<I', file_data[other_lod_so + other_lod_fo + 8:other_lod_so + other_lod_fo + 12])[0]
+
+            # Keep the per-mesh aggregate tail correct for ordinary edits. If
+            # this LOD just crossed the uint16 limit the mesh can be temporarily
+            # mixed-width; the final widening pass handles its siblings and
+            # changes the flag only after every requested LOD has been written.
+            new_index_width = 4 if use_uint32_faces else 2
+            semantic_data_delta = (
+                (new_vert_count - orig_vc)
+                * (mesh.vertex_stride + mesh.normals_stride)
+                + new_index_count * new_index_width
+                - orig_ic * orig_idx_size
+            )
+            _patch_mesh_tail_delta(
+                file_data, mesh,
+                vertex_delta=new_vert_count - orig_vc,
+                index_delta=new_index_count - orig_ic,
+                data_delta=semantic_data_delta)
+            lod.size_a = new_size_a
+            lod.index_width_bytes = new_index_width
 
         with open(out_path, 'wb') as out:
             out.write(file_data)

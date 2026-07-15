@@ -134,6 +134,14 @@ class ExportLOD(bpy.types.Operator):
         for mesh in addon_state.asset.meshes:
             BME._apply_header_patches(mod_file, mesh, addon_state.asset, operator=self)
 
+        # A single oversized LOD makes the whole mesh uint32. Widen every
+        # sibling LOD and set the per-mesh tail flag before cloth processing.
+        try:
+            BME.promote_mixed_index_widths(mod_file)
+        except Exception as e:
+            self.report({'ERROR'}, f"uint32 index widening failed: {e}")
+            return {'CANCELLED'}
+
         # Rewrite the paired .mcloth (if any) so the cloth vertex mapping matches this export
         _export_mcloth_for_asset(mod_file, operator=self)
 
@@ -259,13 +267,15 @@ class ExportAllLODs(bpy.types.Operator):
                     BME._triangulate_object(tri_obj,
                                             compute_normals=context.scene.SWOMT.compute_normals_on_export)
 
-        # Export each LOD level in order (0 -> 3). After the first pass has
-        # written mod_file, subsequent passes read from it so each LOD level
-        # accumulates on top of the previous one.
+        # Export in reverse LOD order (3 -> 0), matching the primary-block
+        # cumulative layout. Each LOD is then aligned against already-finalized
+        # higher-LOD sizes; later passes cannot invalidate its uint32 size_a.
+        # After the first pass has written mod_file, subsequent passes read from
+        # it so every LOD level accumulates on top of the previous one.
         exported_any = False
         current_src = None  # None -> _write_mod_file reads SWOMT.AssetPath
         try:
-            for lod_n in range(4):
+            for lod_n in reversed(range(4)):
                 edited = {}
                 for m in addon_state.asset.meshes:
                     if len(m.lods) <= lod_n:
@@ -301,6 +311,13 @@ class ExportAllLODs(bpy.types.Operator):
         # Apply header-level patches once after all LODs are written
         for mesh in addon_state.asset.meshes:
             BME._apply_header_patches(mod_file, mesh, addon_state.asset, operator=self)
+
+        # Enforce one primary-index width across every LOD of each mesh.
+        try:
+            BME.promote_mixed_index_widths(mod_file)
+        except Exception as e:
+            self.report({'ERROR'}, f"uint32 index widening failed: {e}")
+            return {'CANCELLED'}
 
         # Rewrite the paired .mcloth (if any) so the cloth vertex mapping matches this export
         _export_mcloth_for_asset(mod_file, operator=self)
