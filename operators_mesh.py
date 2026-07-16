@@ -5,9 +5,18 @@ import bpy
 from . import addon_state
 from .exporter import BME
 
-def _max_weights_for_mesh(mesh):
-    """Maximum usable influences from declared weight and index capacities."""
-    return mesh.influence_capacity()
+def _max_weights_for_mesh(mesh, lod0_obj=None):
+    """Safe generated-LOD limit: source usage capped by declared capacity."""
+    capacity = mesh.influence_capacity()
+    if lod0_obj is None and mesh.lods:
+        lod0 = mesh.lods[0]
+        lod0_obj = BME.find_object_by_name(
+            lod0.blender_obj_name or f"{mesh.name}_LOD0")
+    if lod0_obj is not None:
+        source_limit = lod0_obj.get("mmb_source_influence_limit")
+        if isinstance(source_limit, int) and source_limit > 0:
+            return min(capacity, source_limit)
+    return capacity
 
 def _limit_vertex_weights(obj, limit):
     """Keep the highest vertex-group weights per vertex, removing the lowest and
@@ -61,7 +70,7 @@ class GenerateLODs(bpy.types.Operator):
         layout.label(text=f"Generate LODs for '{mesh.name}' from LOD0")
         layout.label(
             text=f"Max weights per vertex: {_max_weights_for_mesh(mesh)} "
-                 "(vertex declaration)")
+                 "(source LOD0 / declaration)")
         for li in range(1, min(len(mesh.lods), 4)):
             layout.prop(self, f"ratio_lod{li}")
         layout.prop(self, "replace_existing")
@@ -92,7 +101,7 @@ class GenerateLODs(bpy.types.Operator):
         else:
             collection = context.scene.collection
 
-        max_w = _max_weights_for_mesh(mesh)
+        max_w = _max_weights_for_mesh(mesh, lod0_obj)
         ratios = {1: self.ratio_lod1, 2: self.ratio_lod2, 3: self.ratio_lod3}
         created, skipped = [], []
 

@@ -247,6 +247,15 @@ class BlenderMeshImporter:
 
         # Import Bone Weights
         weights = lod.get_bone_weights(raw_mesh_file)
+        # The declaration describes storage capacity, not necessarily the
+        # runtime influence count used by this asset. Preserve the observed
+        # source limit for generated LODs (for example, Banshee declares eight
+        # lanes but every stock vertex uses at most six).
+        source_influence_limit = max(
+            (len(vertex_weights) for vertex_weights in weights), default=0)
+        if source_influence_limit:
+            obj["mmb_source_influence_limit"] = min(
+                mesh.influence_capacity(), source_influence_limit)
         mesh_bones = list(mesh.mesh_bones.keys())
         # Only create vertex groups for bones this mesh references
         for real_bone_index in mesh_bones:
