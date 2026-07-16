@@ -1,6 +1,7 @@
 """Blender-side skeletal mesh exporter and MMB header patcher."""
 
 import io
+import math
 import operator
 from struct import pack, unpack
 
@@ -20,6 +21,138 @@ from .blender_mesh_utils import (
 from .cloth_export import _sim_free_slot_flags
 from .log import logger
 from .mmb import SkeletalMeshAsset, _resolve_uv_encoding
+
+
+def _bounds_tolerance(*values):
+    """Allow one int16 position-quantization step when comparing stock bounds."""
+    scale = max((abs(value) for value in values), default=1.0)
+    return max(1e-6, scale / 32767.0 + 1e-6)
+
+
+def _expanded_bounds_values(existing, points):
+    """Return an expanded 12-float bounds block, or None when already covered.
+
+    Stock layout:
+      min.xyz, max.xyz, max distance from origin, center.xyz,
+      max 3D distance from center, max XZ distance from center.
+
+    Existing coverage is never reduced. If the AABB center moves, the previous
+    3D/XZ radii are translated conservatively so the old volume remains covered.
+    """
+    if len(existing) != 12 or not all(math.isfinite(value) for value in existing):
+        raise ValueError("mesh bounds contain non-finite values")
+    if any(existing[axis] > existing[axis + 3] for axis in range(3)):
+        raise ValueError("mesh bounds have an inverted AABB")
+    if not points:
+        return None
+    if any(len(point) < 3 or not all(math.isfinite(point[axis]) for axis in range(3))
+           for point in points):
+        raise ValueError("mesh geometry contains non-finite positions")
+
+    point_min = [min(point[axis] for point in points) for axis in range(3)]
+    point_max = [max(point[axis] for point in points) for axis in range(3)]
+    old_center = existing[7:10]
+    point_origin_radius = max(math.sqrt(sum(point[axis] ** 2 for axis in range(3)))
+                              for point in points)
+    point_old_radius = max(math.sqrt(sum(
+        (point[axis] - old_center[axis]) ** 2 for axis in range(3)))
+        for point in points)
+    point_old_xz_radius = max(math.hypot(
+        point[0] - old_center[0], point[2] - old_center[2])
+        for point in points)
+
+    outside = any(
+        point_min[axis] < existing[axis] - _bounds_tolerance(
+            existing[axis], existing[axis + 3])
+        or point_max[axis] > existing[axis + 3] + _bounds_tolerance(
+            existing[axis], existing[axis + 3])
+        for axis in range(3))
+    radial_tolerance = math.sqrt(3.0) * _bounds_tolerance(*existing[:6])
+    xz_tolerance = math.sqrt(2.0) * _bounds_tolerance(*existing[:6])
+    outside = outside or (
+        point_origin_radius > existing[6] + radial_tolerance
+        or point_old_radius > existing[10] + radial_tolerance
+        or point_old_xz_radius > existing[11] + xz_tolerance)
+    if not outside:
+        return None
+
+    new_min = [min(existing[axis], point_min[axis]) for axis in range(3)]
+    new_max = [max(existing[axis + 3], point_max[axis]) for axis in range(3)]
+    new_center = [(new_min[axis] + new_max[axis]) * 0.5 for axis in range(3)]
+
+    point_radius = max(math.sqrt(sum(
+        (point[axis] - new_center[axis]) ** 2 for axis in range(3)))
+        for point in points)
+    point_xz_radius = max(math.hypot(
+        point[0] - new_center[0], point[2] - new_center[2])
+        for point in points)
+    center_shift = math.sqrt(sum(
+        (new_center[axis] - old_center[axis]) ** 2 for axis in range(3)))
+    center_xz_shift = math.hypot(
+        new_center[0] - old_center[0], new_center[2] - old_center[2])
+
+    return (
+        *new_min,
+        *new_max,
+        max(existing[6], point_origin_radius),
+        *new_center,
+        max(point_radius, existing[10] + center_shift),
+        max(point_xz_radius, existing[11] + center_xz_shift),
+    )
+
+
+def _expand_mesh_bounds_data(file_data, mesh_indices):
+    """Expand selected mesh bounds in memory and return (bytes, changed names)."""
+    original = bytes(file_data)
+    parsed = SkeletalMeshAsset()
+    parsed.parse(io.BytesIO(original))
+    requested = sorted(set(mesh_indices))
+    invalid = [index for index in requested
+               if index < 0 or index >= len(parsed.meshes)]
+    if invalid:
+        raise ValueError(f"invalid mesh indices for bounds update: {invalid}")
+
+    out = bytearray(original)
+    changed_names = []
+    for mesh_index in requested:
+        mesh = parsed.meshes[mesh_index]
+        raw_mesh = mesh.extract_mesh_file(io.BytesIO(original))
+        points = []
+        for lod in mesh.lods:
+            if lod.vertex_count > 0 and lod.index_count > 0:
+                points.extend(lod.get_declared_vertex_positions(raw_mesh))
+        if not points:
+            continue
+        offset = mesh.mesh_bounds_offset
+        if offset <= 0 or offset + 48 > len(original):
+            raise ValueError(f"'{mesh.name}' has no valid bounds block")
+        existing = unpack('<12f', original[offset:offset + 48])
+        expanded = _expanded_bounds_values(existing, points)
+        if expanded is None:
+            continue
+        position_elements = mesh.elements(semantic=0, stream=0)
+        position_element = position_elements[0] if position_elements else None
+        declared_format = position_element['format'] if position_element else None
+        declared_offset = position_element['offset'] if position_element else None
+        writer_compatible = (
+            declared_offset == 0
+            and ((declared_format == 11 and mesh.position_type == 0)
+                 or (declared_format == 6 and mesh.position_type == 1))
+        )
+        if not writer_compatible:
+            logger.warning(
+                "%s: culling-bounds expansion skipped because declared "
+                "POSITION format %s disagrees with the legacy vertex writer",
+                mesh.name,
+                declared_format if declared_format is not None else 'unknown')
+            continue
+        out[offset:offset + 48] = pack('<12f', *expanded)
+        changed_names.append(mesh.name)
+
+    # Bounds are header-local and must not disturb any structural parse state.
+    validated = SkeletalMeshAsset()
+    validated.parse(io.BytesIO(bytes(out)))
+    return bytes(out), changed_names
 
 
 def _patch_mesh_tail_delta(file_data, mesh, vertex_delta=0, index_delta=0,
@@ -58,7 +191,8 @@ def _sync_asset_layout(parsed_asset):
     current.size = parsed_asset.size
     for old_mesh, new_mesh in zip(current.meshes, parsed_asset.meshes):
         for attr in (
-                'name_offset', 'name_length', 'lod_count', 'lod_info_type',
+                'name_offset', 'name_length', 'mesh_bounds_offset',
+                'lod_count', 'lod_info_type',
                 'vertex_stride', 'normals_stride', 'u_count_offset',
                 'bone_table_end_offset', 'index_width_flag_offset',
                 'index_width_flag', 'total_vertex_count_offset',
@@ -316,6 +450,26 @@ class BlenderMeshExporter:
         for name in widened_names:
             logger.info("Widened all %s LOD index buffers to uint32", name)
         return widened_names
+
+    @staticmethod
+    def expand_mesh_bounds(file_path: str, mesh_indices):
+        """Expand final-file culling bounds for the selected exported meshes.
+
+        The calculation is transactional: the complete output is parsed and all
+        bounds are calculated before any file write. Existing coverage is retained,
+        and a file already contained by its bounds remains byte-identical. Returns
+        the names of meshes whose bounds changed.
+        """
+        with open(file_path, 'rb') as stream:
+            original = stream.read()
+        updated, changed_names = _expand_mesh_bounds_data(original, mesh_indices)
+        if not changed_names:
+            return []
+        with open(file_path, 'wb') as stream:
+            stream.write(updated)
+        for name in changed_names:
+            logger.info("Expanded culling bounds for %s", name)
+        return changed_names
 
     @staticmethod
     def _write_mod_file(edited_lod_index_per_mesh: dict, out_path: str, src_path: str = None):

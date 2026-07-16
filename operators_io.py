@@ -142,6 +142,13 @@ class ExportLOD(bpy.types.Operator):
             self.report({'ERROR'}, f"uint32 index widening failed: {e}")
             return {'CANCELLED'}
 
+        # Update only when final exported geometry exceeds existing culling bounds.
+        try:
+            BME.expand_mesh_bounds(mod_file, {self.mesh_index})
+        except Exception as e:
+            self.report({'ERROR'}, f"mesh bounds update failed: {e}")
+            return {'CANCELLED'}
+
         # Rewrite the paired .mcloth (if any) so the cloth vertex mapping matches this export
         _export_mcloth_for_asset(mod_file, operator=self)
 
@@ -273,6 +280,7 @@ class ExportAllLODs(bpy.types.Operator):
         # After the first pass has written mod_file, subsequent passes read from
         # it so every LOD level accumulates on top of the previous one.
         exported_any = False
+        exported_mesh_indices = set()
         current_src = None  # None -> _write_mod_file reads SWOMT.AssetPath
         try:
             for lod_n in reversed(range(4)):
@@ -292,6 +300,7 @@ class ExportAllLODs(bpy.types.Operator):
                     BME._write_mod_file(edited_lod_index_per_mesh=edited, out_path=mod_file,
                                         src_path=current_src)
                     exported_any = True
+                    exported_mesh_indices.update(edited)
                     current_src = mod_file
                 except Exception as e:
                     self.report({'ERROR'}, f"Export LOD{lod_n} failed: {e}")
@@ -317,6 +326,14 @@ class ExportAllLODs(bpy.types.Operator):
             BME.promote_mixed_index_widths(mod_file)
         except Exception as e:
             self.report({'ERROR'}, f"uint32 index widening failed: {e}")
+            return {'CANCELLED'}
+
+        # Run once against the complete multi-LOD output so every sibling LOD
+        # contributes to the final per-mesh bounds.
+        try:
+            BME.expand_mesh_bounds(mod_file, exported_mesh_indices)
+        except Exception as e:
+            self.report({'ERROR'}, f"mesh bounds update failed: {e}")
             return {'CANCELLED'}
 
         # Rewrite the paired .mcloth (if any) so the cloth vertex mapping matches this export

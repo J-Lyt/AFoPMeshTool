@@ -19,6 +19,42 @@ from .log import logger
 # these values, so genuine hashes are never mistaken for divisors.
 _UV_KNOWN_DIVISORS = (0.0, 4095.0, 4096.0, 32767.0)
 
+# Formats needed to locate and decode the declared stream-0 POSITION element
+# for bounds calculation. Other declaration semantics remain on the existing
+# staged migration path.
+_VERTEX_FORMAT_LAYOUTS = {
+    5: ('f', 4, 16), 6: ('f', 3, 12), 8: ('f', 2, 8),
+    11: ('h', 4, 8), 14: ('B', 4, 4), 15: ('B', 4, 4),
+    18: ('H', 2, 4), 19: ('h', 2, 4), 60: ('H', 4, 8),
+    61: ('b', 4, 4),
+}
+
+
+def _parse_vertex_declaration(raw_values):
+    """Decode declaration fields and track byte offsets within each stream."""
+    offsets = {0: 0, 1: 0}
+    offsets_known = {0: True, 1: True}
+    elements = []
+    for value in raw_values:
+        stream = (value >> 31) & 1
+        vertex_format = value & 0xFFFF
+        layout = _VERTEX_FORMAT_LAYOUTS.get(vertex_format)
+        offset = offsets[stream] if offsets_known[stream] else None
+        size = layout[2] if layout else None
+        elements.append({
+            'stream': stream,
+            'set': (value >> 24) & 0x7F,
+            'semantic': (value >> 16) & 0xFF,
+            'format': vertex_format,
+            'offset': offset,
+            'size': size,
+        })
+        if layout is None:
+            offsets_known[stream] = False
+        elif offsets_known[stream]:
+            offsets[stream] += size
+    return elements
+
 def _uv_divisor_candidates(raw4_list):
     """Decode a list of 4-byte chunks to float32 divisors, or return None if any
     value is not a recognised divisor (i.e. the block is not a divisor table)."""
@@ -186,6 +222,40 @@ class SkeletalMeshAsset(Asset):
                     f.seek(stride_start + stride)
                     vertices.append(pos)
                 return vertices
+
+            def get_declared_vertex_positions(self, raw_mesh_file):
+                """Read positions from the authoritative declaration when known."""
+                elements = self.parent_mesh.elements(semantic=0, stream=0)
+                if not elements:
+                    return self.get_vertex_positions(raw_mesh_file)
+                element = elements[0]
+                offset = element['offset']
+                vertex_format = element['format']
+                layout = _VERTEX_FORMAT_LAYOUTS.get(vertex_format)
+                if (offset is None or layout is None
+                        or vertex_format not in (5, 6, 11)):
+                    return self.get_vertex_positions(raw_mesh_file)
+                code, count, size = layout
+                stride = self.parent_mesh.vertex_stride
+                if offset + size > stride:
+                    return self.get_vertex_positions(raw_mesh_file)
+
+                raw_mesh_file.seek(self.vertex_data_offset_a)
+                block = raw_mesh_file.read(self.vertex_count * stride)
+                if len(block) != self.vertex_count * stride:
+                    raise ValueError(
+                        f"'{self.parent_mesh.name}' LOD{self.index} vertex block is truncated")
+                positions = []
+                for vertex_index in range(self.vertex_count):
+                    start = vertex_index * stride + offset
+                    values = unpack(f'<{count}{code}', block[start:start + size])
+                    if vertex_format == 11:
+                        scale = values[3]
+                        positions.append(tuple(
+                            values[axis] / 32767.0 * scale for axis in range(3)))
+                    else:  # float3/float4 POSITION; xyz are direct
+                        positions.append(tuple(values[:3]))
+                return positions
 
             def get_bone_weights(self, raw_mesh_file):
                 bone_weights = []
@@ -574,6 +644,7 @@ class SkeletalMeshAsset(Asset):
             self.name = ""
             self.name_offset = 0        # byte offset of the uint16 length prefix in the source file
             self.name_length = 0        # original byte count of the name field (from the uint16 prefix)
+            self.mesh_bounds_offset = 0 # 48-byte AABB/radius block after the mesh name
             self.pending_rename_new = ""  # staged mesh rename — applied to _MOD copy on next export
             self.zeroed_out_in_session = False # True if mesh was zeroed out this session
             self.zeroed_out_in_mmb = False     # True if mesh was zeroed out in the mmb
@@ -593,6 +664,7 @@ class SkeletalMeshAsset(Asset):
             self.normal_type = 0 # 0:int8_norm 1:floats
             self.color_in_normals = True # False when color_count not in normals stride
             self.position_type = 0 # 0:int16_norm 1:floats
+            self.vertex_elements = [] # decoded declaration metadata
             # Per-mesh tail. The first uint32 is the engine's primary index-width
             # flag (0=u16, 1=u32); the next three are aggregate mesh counts.
             self.index_width_flag_offset = 0
@@ -604,6 +676,12 @@ class SkeletalMeshAsset(Asset):
             self.total_data_size_offset = 0
             self.total_data_size = 0
             self.tail_extra_u32 = None
+        def elements(self, semantic, stream=None, semantic_set=None):
+            """Return declaration elements matching a semantic and optional stream/set."""
+            return [element for element in self.vertex_elements
+                    if element['semantic'] == semantic
+                    and (stream is None or element['stream'] == stream)
+                    and (semantic_set is None or element['set'] == semantic_set)]
         def parse(self, f):
             version = self.parent_sk_mesh.version
 
@@ -611,14 +689,17 @@ class SkeletalMeshAsset(Asset):
             _nlen = unpack('<H', f.read(2))[0]
             self.name_length = _nlen
             self.name = br.string(f, _nlen).rstrip('\x00')
-            f.seek(48, 1)  # some kind of matrix
+            self.mesh_bounds_offset = f.tell()
+            f.seek(48, 1)  # AABB, center and culling radii
             f.seek(1, 1)
             if version == 11:
-                f.seek(1, 1) # skip x_count
-                f.seek(4 * br.uint16(f), 1)
+                f.seek(1, 1) # declaration flag
+                x_count = br.uint16(f)
             else:
                 x_count = br.uint8(f)
-                f.seek(1 + 4 * x_count, 1)
+                f.seek(1, 1) # declaration flag
+            declaration_raw = [br.uint32(f) for _ in range(x_count)]
+            self.vertex_elements = _parse_vertex_declaration(declaration_raw)
             self.u_count_offset = f.tell()
             u_count = br.uint16(f)
             for b in range(u_count):
