@@ -20,7 +20,14 @@ from .blender_mesh_utils import (
 )
 from .cloth_export import _sim_free_slot_flags
 from .log import logger
-from .mmb import SkeletalMeshAsset, _resolve_uv_encoding
+from .mmb import (
+    SkeletalMeshAsset,
+    _VERTEX_FORMAT_LAYOUTS,
+    _pack_vertex_format,
+    _read_vertex_format,
+    _resolve_uv_encoding,
+    _weight_format_scale,
+)
 
 
 def _bounds_tolerance(*values):
@@ -135,14 +142,13 @@ def _expand_mesh_bounds_data(file_data, mesh_indices):
         declared_format = position_element['format'] if position_element else None
         declared_offset = position_element['offset'] if position_element else None
         writer_compatible = (
-            declared_offset == 0
-            and ((declared_format == 11 and mesh.position_type == 0)
-                 or (declared_format == 6 and mesh.position_type == 1))
+            declared_offset is not None
+            and declared_format in (5, 6, 11)
         )
         if not writer_compatible:
             logger.warning(
                 "%s: culling-bounds expansion skipped because declared "
-                "POSITION format %s disagrees with the legacy vertex writer",
+                "POSITION format %s is not writable",
                 mesh.name,
                 declared_format if declared_format is not None else 'unknown')
             continue
@@ -667,13 +673,24 @@ class BlenderMeshExporter:
                 # where the source bytes (file_data) are still intact - the
                 # exported mmb may overwrite the source file (chained _MOD
                 # exports), so the mcloth layer can't recompute this afterward.
-                if _is_cloth_sim and mesh.position_type == 1:
+                _position_elements = mesh.elements(semantic=0, stream=0)
+                if _is_cloth_sim and len(_position_elements) == 1:
+                    _position = _position_elements[0]
+                    _po = _position['offset']
+                    _pf = _position['format']
+                    def _decode_position(_row):
+                        _raw = _read_vertex_format(_row, _po, _pf)
+                        if _pf == 11:
+                            return tuple(_raw[i] / 32767.0 * _raw[3]
+                                         for i in range(3))
+                        return tuple(_raw[:3])
                     for _slot in slot_map.values():
                         if _slot >= _orig_vc_file or _slot in lod.exported_sim_reused:
                             continue
                         _o = _abs_voa + _slot * vs
-                        _op = unpack('<fff', file_data[_o:_o + 12])
-                        _np = unpack('<fff', _vd_out[_slot * vs:_slot * vs + 12])
+                        _op = _decode_position(file_data[_o:_o + vs])
+                        _np = _decode_position(
+                            _vd_out[_slot * vs:(_slot + 1) * vs])
                         if ((_np[0]-_op[0])**2 + (_np[1]-_op[1])**2
                                 + (_np[2]-_op[2])**2) > 2.5e-9:  # 0.05mm
                             lod.exported_sim_moved.add(_slot)
@@ -762,13 +779,14 @@ class BlenderMeshExporter:
                     # position, keeping the phantom local and inert.
                     _problem_slots = (set(lod.exported_sim_reused)
                                       | set(lod.exported_sim_moved))
-                    if _problem_slots and mesh.position_type == 1:
+                    if _problem_slots and len(_position_elements) == 1:
                         _leftover = {t for tl in _orig_tri_slots.values()
                                      for t in tl} - _written_tris
                         _surv = sorted(set(_claimed) - _problem_slots)
                         def _fpos(s):
-                            return unpack('<fff', file_data[
-                                _abs_voa + s * vs:_abs_voa + s * vs + 12])
+                            _start = _abs_voa + s * vs
+                            return _decode_position(
+                                file_data[_start:_start + vs])
                         _spos = {s: _fpos(s) for s in _surv}
                         _near = {}
                         for s in _problem_slots:
@@ -1122,7 +1140,8 @@ class BlenderMeshExporter:
                 for lod in mesh.lods:
                     for v in range(lod.vertex_count):
                         f.seek(lod.data_offset + v * mesh.vertex_stride)
-                        lod.write_vertex_position(f, pos=(0.0, 0.0, 0.0), scale=None if mesh.position_type == 1 else 1)
+                        lod.write_vertex_position(
+                            f, pos=(0.0, 0.0, 0.0), scale=1)
 
         # Mesh name rename
         if mesh.pending_rename_new:
@@ -1217,412 +1236,262 @@ class BlenderMeshExporter:
 
     @staticmethod
     def write_vertices(file, mesh:SkeletalMeshAsset.Mesh, lod_index=0):
-        f = file
+        """Write stream-0 rows from their declarations, preserving untouched bytes."""
         obj = BME.find_object_by_name(mesh.name + f"_LOD{lod_index}")
+        if not obj:
+            return
+
         lod: SkeletalMeshAsset.Mesh.LOD = mesh.lods[lod_index]
-        if obj:
-            data = obj.data
-            bm = bmesh.new()
-            bm.from_mesh(data)
-            bm.verts.ensure_lookup_table()
-            stride = mesh.vertex_stride
-            pos_length = 8 if mesh.position_type == 0 else 12
-            mesh_bones = list(mesh.mesh_bones.keys())  # skeleton bone indices in mesh-slot order
+        data = obj.data
+        stride = mesh.vertex_stride
+        position_elements = mesh.elements(semantic=0, stream=0)
+        weight_elements = sorted(
+            mesh.elements(semantic=2, stream=0),
+            key=lambda element: (element['set'], element['offset']))
+        index_elements = sorted(
+            mesh.elements(semantic=3, stream=0),
+            key=lambda element: (element['set'], element['offset']))
 
-            # Map: bone name -> mesh slot index
-            name_to_mesh_slot = {}
-            for slot, skel_idx in enumerate(mesh_bones):
-                if skel_idx < len(addon_state.asset.bones):
-                    name_to_mesh_slot[addon_state.asset.bones[skel_idx].name] = slot
+        if len(position_elements) != 1:
+            raise ValueError(
+                f"'{mesh.name}' must declare exactly one stream-0 POSITION element")
+        position = position_elements[0]
+        if position['format'] not in (5, 6, 11):
+            raise ValueError(
+                f"'{mesh.name}' uses unsupported POSITION format {position['format']}")
 
-            # Map: Blender vertex group index -> mesh slot index (matched by bone name)
-            vgroup_to_mesh_slot = {}
-            for vg in obj.vertex_groups:
-                if vg.name in name_to_mesh_slot:
-                    vgroup_to_mesh_slot[vg.index] = name_to_mesh_slot[vg.name]
+        stream0_elements = [
+            element for element in mesh.vertex_elements
+            if element['stream'] == 0
+        ]
+        for element in stream0_elements:
+            layout = _VERTEX_FORMAT_LAYOUTS.get(element['format'])
+            offset = element['offset']
+            if layout is None or offset is None or offset + layout[2] > stride:
+                raise ValueError(
+                    f"'{mesh.name}' has an unsupported stream-0 declaration "
+                    f"(semantic {element['semantic']}, format {element['format']})")
 
-            # Fallback: if no vertex groups matched by name (e.g. bone names differ between
-            # models), attempt to match by the numeric suffix of the group name against the
-            # mesh-slot index, then fall back to treating the group index itself as the mesh
-            # slot.  This prevents weights from being silently dropped on export.
-            if not vgroup_to_mesh_slot and obj.vertex_groups:
-                logger.warning(
-                    "No vertex groups on %s matched bone names in mesh %s; "
-                    "attempting index-based fallback mapping",
-                    obj.name, mesh.name)
-                import re as _re
-                for vg in obj.vertex_groups:
-                    # Try to parse a trailing integer from the group name (e.g. "Bone_7" -> 7)
-                    m = _re.search(r'(\d+)$', vg.name)
-                    if m:
-                        slot = int(m.group(1))
-                    else:
-                        slot = vg.index
-                    if slot < len(mesh_bones):
-                        vgroup_to_mesh_slot[vg.index] = slot
-                if vgroup_to_mesh_slot:
-                    logger.info(
-                        "Index-based fallback produced %d group mappings for %s",
-                        len(vgroup_to_mesh_slot), obj.name)
-                else:
-                    logger.error(
-                        "Index-based fallback failed for %s; weights will be zero. "
-                        "Check that vertex group names match skeleton bone names or "
-                        "contain a bone index suffix",
-                        obj.name)
+        if weight_elements:
+            weight_scales = {
+                _weight_format_scale(element['format'])
+                for element in weight_elements
+            }
+            if len(weight_scales) != 1:
+                raise ValueError(
+                    f"'{mesh.name}' mixes incompatible BLENDWEIGHT formats")
+            weight_scale = weight_scales.pop()
+        else:
+            weight_scale = None
 
-            # For int16 positions, read per-vertex w scale from the original source file.
-            # Always read from SWOMT.AssetPath using the original data_offset from the
-            # file header. lod.data_offset may have been corrupted in-memory by a prior
-            # mesh export in the same _write_mod_file call (ExportAllLODs exports all
-            # meshes at a given LOD level in one call).
-            SWOMT = bpy.context.scene.SWOMT
-            src_path = SWOMT.AssetPath
-            with open(src_path, 'rb') as _f:
-                _f.seek(lod.data_offset_file_pos)
-                orig_data_offset = unpack('<I', _f.read(4))[0]
+        for element in index_elements:
+            if element['format'] not in (15, 18, 60):
+                raise ValueError(
+                    f"'{mesh.name}' uses unsupported BLENDINDICES format "
+                    f"{element['format']}")
 
-            if mesh.position_type == 0:
-                original_w = []
-                higher_size_w = sum(
-                    mesh.lods[li].data_size
-                    for li in range(lod_index + 1, len(mesh.lods))
-                )
-                intra_voa_w = lod.vertex_data_offset_a - higher_size_w
-                abs_voa_w_read = orig_data_offset + intra_voa_w
-                with open(src_path, 'rb') as src:
-                    src.seek(abs_voa_w_read + 6)  # skip x,y,z int16s to reach w
-                    for _ in range(lod.vertex_count):
-                        original_w.append(unpack('<h', src.read(2))[0])
-                        src.seek(stride - 2, 1)
-                if len(data.vertices) != lod.vertex_count:
-                    # Replacement mesh: derive a scale from the new mesh's actual
-                    # extents so every coordinate fits in [-scale, scale] without
-                    # overflow or silent skipping.  Averaging the original w values
-                    # is unreliable when the replacement is a different size/position.
-                    if data.vertices:
-                        max_coord = max(
-                            max(abs(v.co.x), abs(v.co.y), abs(v.co.z))
-                            for v in data.vertices
-                        )
-                    else:
-                        max_coord = 1.0
-                    fallback_scale = max(1, int(max_coord) + 1)
-                    original_w = [fallback_scale] * len(data.vertices)
+        weight_capacity = sum(
+            _VERTEX_FORMAT_LAYOUTS[element['format']][1]
+            for element in weight_elements)
+        index_capacity = sum(
+            _VERTEX_FORMAT_LAYOUTS[element['format']][1]
+            for element in index_elements)
+        if weight_elements and not index_elements:
+            raise ValueError(
+                f"'{mesh.name}' declares weights without bone indices")
+        influence_capacity = mesh.influence_capacity()
+
+        mesh_bones = list(mesh.mesh_bones.keys())
+        name_to_mesh_slot = {}
+        for slot, skeleton_index in enumerate(mesh_bones):
+            if skeleton_index < len(addon_state.asset.bones):
+                bone_name = addon_state.asset.bones[skeleton_index].name
+                name_to_mesh_slot[bone_name] = slot
+
+        vgroup_to_mesh_slot = {
+            group.index: name_to_mesh_slot[group.name]
+            for group in obj.vertex_groups
+            if group.name in name_to_mesh_slot
+        }
+        if not vgroup_to_mesh_slot and obj.vertex_groups:
+            import re as _re
+            logger.warning(
+                "No vertex groups on %s matched bone names in mesh %s; "
+                "attempting index-based fallback mapping",
+                obj.name, mesh.name)
+            for group in obj.vertex_groups:
+                match = _re.search(r'(\d+)$', group.name)
+                slot = int(match.group(1)) if match else group.index
+                if slot < len(mesh_bones):
+                    vgroup_to_mesh_slot[group.index] = slot
+            if vgroup_to_mesh_slot:
+                logger.info(
+                    "Index-based fallback produced %d group mappings for %s",
+                    len(vgroup_to_mesh_slot), obj.name)
+
+        source_lod_value = obj.get('mmb_lod_source', lod_index)
+        source_lod_index = (
+            source_lod_value if isinstance(source_lod_value, int)
+            else lod_index)
+        if not 0 <= source_lod_index < len(mesh.lods):
+            source_lod_index = lod_index
+        source_lod = mesh.lods[source_lod_index]
+        source_rows = []
+        source_count = 0
+        source_path = bpy.context.scene.SWOMT.AssetPath
+        with open(source_path, 'rb') as source_file:
+            source_bytes = source_file.read()
+        try:
+            source_count = unpack(
+                '<I', source_bytes[source_lod.start_offset:
+                                    source_lod.start_offset + 4])[0]
+            source_data_offset = unpack(
+                '<I', source_bytes[source_lod.data_offset_file_pos:
+                                    source_lod.data_offset_file_pos + 4])[0]
+            source_vertex_offset = unpack(
+                '<I', source_bytes[
+                    source_lod.start_offset + source_lod.lod_field_offset + 12:
+                    source_lod.start_offset + source_lod.lod_field_offset + 16])[0]
+            source_higher_size = sum(
+                unpack(
+                    '<I', source_bytes[
+                        mesh.lods[index].data_offset_file_pos + 4:
+                        mesh.lods[index].data_offset_file_pos + 8])[0]
+                for index in range(source_lod_index + 1, len(mesh.lods)))
+            source_absolute = (
+                source_data_offset + source_vertex_offset - source_higher_size)
+            source_end = source_absolute + source_count * stride
+            if source_absolute < 0 or source_end > len(source_bytes):
+                raise ValueError("source vertex block is outside the file")
+            source_block = source_bytes[source_absolute:source_end]
+            source_rows = [
+                source_block[index * stride:(index + 1) * stride]
+                for index in range(source_count)
+            ]
+        except (IndexError, ValueError, TypeError) as exc:
+            raise ValueError(
+                f"'{mesh.name}' LOD{source_lod_index} source rows could not be read: "
+                f"{exc}") from exc
+
+        original_order = data.attributes.get("mmb_vertex_order")
+        rewrite_weights = (
+            bpy.context.scene.SWOMT.export_weights
+            or len(data.vertices) != lod.vertex_count)
+
+        for vertex_index, vertex in enumerate(data.vertices):
+            source_index = None
+            if original_order is not None:
+                candidate = original_order.data[vertex_index].value
+                if 0 <= candidate < source_count:
+                    source_index = candidate
+            elif vertex_index < source_count:
+                source_index = vertex_index
+
+            if source_index is None:
+                row = bytearray(stride)
             else:
-                original_w = [None] * len(data.vertices)
+                row = bytearray(source_rows[source_index])
 
-            # Read original weight+index bytes per vertex when THIS LOD's vert count
-            # is unchanged (they are indexed by vertex index) and export_weights is unchecked.
-            export_weights = (bpy.context.scene.SWOMT.export_weights
-                              or len(data.vertices) != lod.vertex_count)
-            weight_bytes_per_vert = stride - pos_length
-
-            # Compute abs_voa once for weight reading (use orig_data_offset from file)
-            higher_size_w = sum(
-                mesh.lods[li].data_size
-                for li in range(lod_index + 1, len(mesh.lods))
-            )
-            intra_voa_w = lod.vertex_data_offset_a - higher_size_w
-            abs_voa_w   = orig_data_offset + intra_voa_w
-
-            orig_weight_bytes = None
-            # Per-vertex data needed when export_weights=True and stride=32
-            orig_stride32_data = None
-            # Per-vertex original index bytes for packed-uint8 strides (stride=16 int16, else-branch)
-            # Used to preserve the original bone index in zero-weight padding slots, which the
-            # game may use as secondary bone references independent of weight.
-            orig_index_bytes = None
-            # Detect stride=32 layout variant
-            stride32_use_u16 = stride == 32 and len(mesh.mesh_bones) > 256
-
-            # Layout C: 12x uint8 weights, 12x uint8 indices.
-            stride32_layout_c = False
-            if stride == 32 and not stride32_use_u16 and lod.vertex_count > 0:
-                _n_slots = len(mesh.mesh_bones)
-                with open(src_path, 'rb') as _src_lc:
-                    _src_lc.seek(abs_voa_w + pos_length)
-                    _peek24 = _src_lc.read(24)
-                _a_w_check = unpack('<8H', _peek24[:16])
-                if sum(_a_w_check) != 32767:
-                    _c_i_check = list(_peek24[12:24])
-                    if _n_slots <= 256 and all(0 <= x < _n_slots for x in _c_i_check):
-                        stride32_layout_c = True
-
-            if not export_weights and weight_bytes_per_vert > 0:
-                orig_weight_bytes = []
-                with open(src_path, 'rb') as src:
-                    for vi in range(lod.vertex_count):
-                        src.seek(abs_voa_w + vi * stride + pos_length)
-                        orig_weight_bytes.append(src.read(weight_bytes_per_vert))
-            elif export_weights:
-                # Read the original weight/index data from the source file for stride=32
-                # meshes, where the layout variant (A/B/C) and active slot count must be
-                # preserved. Other strides always write weights sorted by descending weight.
-                if stride == 32 and lod.vertex_count > 0:
-                    orig_stride32_data = []
-                    with open(src_path, 'rb') as src:
-                        for vi in range(lod.vertex_count):
-                            src.seek(abs_voa_w + vi * stride + pos_length)
-                            if stride32_use_u16:
-                                # Layout B
-                                all_w = list(src.read(6))
-                                src.seek(2, 1) # skip 2 padding bytes
-                                all_i = list(unpack('<6H', src.read(12)))
-                            elif stride32_layout_c:
-                                # Layout C
-                                all_w = list(src.read(12))
-                                all_i = list(src.read(12))
-                            else:
-                                # Layout A
-                                all_w = unpack('<8H', src.read(16))
-                                all_i = list(src.read(8))
-                            orig_stride32_data.append((all_w, all_i))
-                elif stride not in (12, 20, 32, 36, 40, 44) and lod.vertex_count > 0:
-                    # Packed uint8 strides (stride=16 int16, stride=24, and any other else-branch
-                    # strides): read the original index bytes so zero-weight padding slots can
-                    # preserve the original bone index rather than being zeroed out.
-                    wc_idx = int(weight_bytes_per_vert / 2)
-                    orig_index_bytes = []
-                    with open(src_path, 'rb') as src:
-                        for vi in range(lod.vertex_count):
-                            src.seek(abs_voa_w + vi * stride + pos_length + wc_idx)
-                            orig_index_bytes.append(src.read(wc_idx))
-
-            for vi, v in enumerate(bm.verts):
-                stride_start = f.tell()
-
-                # Write position
-                lod.write_vertex_position(
-                    f,
-                    pos=BME.convert_coordinate(v.co),
-                    scale=original_w[vi],
-                )
-                f.seek(stride_start + pos_length)
-
-                # Write bone weights - use original bytes if vert count is unchanged
-                if orig_weight_bytes is not None:
-                    f.write(orig_weight_bytes[vi])
-                    f.seek(stride_start + stride)
-                    continue
-
-                # Gather bone weights
-                raw_weights = []
-                if weight_bytes_per_vert > 0:
-                    vertex = data.vertices[v.index]
-                    for vge in vertex.groups:
-                        slot = vgroup_to_mesh_slot.get(vge.group)
-                        if slot is not None and vge.weight > 0.0:
-                            raw_weights.append((slot, vge.weight))
-                    raw_weights.sort(key=lambda x: x[1], reverse=True)
-
-                    if not raw_weights:
-                        raise ValueError(
-                            f"'{mesh.name}' LOD{lod_index} has vertices with no bone weights. "
-                            f"Assign bone weights to all vertices before exporting."
-                        )
-
-                # Write bone weights
-                #
-                # *** If a new `elif stride == N:` is added to the branch below, or an
-                # existing stride's index width (bp.uint8 vs bp.uint16) is changed,
-                # update '_UINT8_INDEX_LIMITED_STRIDES/_UINT16_NON_LIMITED_STRIDES' to match.
-                # Otherwise, the 256-slot-reuse logic in Add Bone Slots will stop catching meshes that need it. ***
-                if weight_bytes_per_vert == 0:
-                    pass
-                elif stride == 12:
-                    # 4x uint8 bone slot indices, no weight bytes - Weight 1.0 on first index
-                    for _ in range(4):
-                        f.write(bp.uint8(raw_weights[0][0] if raw_weights else 0))
-
-                elif stride == 16:
-                    if pos_length == 12:
-                        # Float XYZ position (12b) + 1x uint8 bone slot index + 3b padding.
-                        # Same as stride=12 (weight 1.0 on first index) but with float positions.
-                        slot = raw_weights[0][0] if raw_weights else 0
-                        f.write(bp.uint8(slot))
-                        f.write(b'\x00\x00\x00')  # 3 padding bytes
-                    else:
-                        # Int16 position (8b) + 4x uint8_norm weights + 4x uint8 indices
-                        wc = 4
-                        sw = BME.normalize_weights(raw_weights, wc)
-                        enc = BME.encode_weights_u8(sw)
-                        for i in range(wc):
-                            f.write(bp.uint8(enc[i][1] if i < len(enc) else 0))
-                        orig_idx = orig_index_bytes[vi] if (orig_index_bytes is not None and vi < len(orig_index_bytes)) else None
-                        for i in range(wc):
-                            if i < len(enc):
-                                f.write(bp.uint8(enc[i][0]))
-                            else:
-                                f.write(bp.uint8(orig_idx[i] if orig_idx is not None else 0))
-
-                elif stride == 20:
-                    max_bones = 4
-                    sw = BME.normalize_weights(raw_weights, max_bones)
-                    enc = BME.encode_weights_u16(sw)
-                    for _, e in enc:
-                        f.write(bp.uint16(e))
-                    for _ in range(max_bones - len(enc)):
-                        f.write(bp.uint16(0))
-                    for s, _ in enc:
-                        f.write(bp.uint8(s))
-                    for _ in range(max_bones - len(enc)):
-                        f.write(bp.uint8(0))
-
-                elif stride == 32:
-                    vert_count_matches = len(data.vertices) == lod.vertex_count
-                    if orig_stride32_data is not None and vert_count_matches and vi < len(orig_stride32_data):
-                        orig_all_w, orig_all_i = orig_stride32_data[vi]
-                        if stride32_use_u16:
-                            # Layout B
-                            remaining = {s: w for s, w in BME.normalize_weights(raw_weights, 6)}
-                            # fill zero-weight slots with any added-bone weights that original indices don't cover.
-                            all_i = list(orig_all_i)
-                            extra = sorted(remaining.keys() - set(all_i),
-                                           key=lambda s: remaining[s], reverse=True)
-                            for k in range(6):
-                                if all_i[k] not in remaining and extra:
-                                    all_i[k] = extra.pop(0)
-                            # Pre-encode all 6 weights as a batch to fix rounding sum
-                            ordered = [(all_i[k], remaining.pop(all_i[k], 0.0)) for k in range(6)]
-                            enc = BME.encode_weights_u8(ordered)
-                            for _, e in enc:
-                                f.write(bp.uint8(e))
-                            f.write(b'\x00\x00') # 2 padding bytes
-                            # Write 6 uint16 indices
-                            for idx in all_i:
-                                f.write(bp.uint16(idx))
-                        elif stride32_layout_c:
-                            # Layout C
-                            remaining = {s: w for s, w in BME.normalize_weights(raw_weights, 12)}
-                            all_i = list(orig_all_i)
-                            extra = sorted(remaining.keys() - set(all_i),
-                                           key=lambda s: remaining[s], reverse=True)
-                            for k in range(12):
-                                if all_i[k] not in remaining and extra:
-                                    all_i[k] = extra.pop(0)
-                            # Pre-encode all 12 weights as a batch to fix rounding sum
-                            ordered = [(all_i[k], remaining.pop(all_i[k], 0.0)) for k in range(12)]
-                            enc = BME.encode_weights_u8(ordered)
-                            for _, e in enc:
-                                f.write(bp.uint8(e))
-                            for bone in all_i:
-                                f.write(bp.uint8(bone))
-                        else:
-                            # Layout A
-                            weight_slots = range(8) if sum(orig_all_w) == 32767 else range(4)
-                            remaining = {s: w for s, w in BME.normalize_weights(raw_weights, len(weight_slots))}
-                            # Inject added-bone weights into zero-weight positions.
-                            all_i = list(orig_all_i)
-                            empty_slots = [k for k in weight_slots if orig_all_w[k] == 0]
-                            extra = sorted(remaining.keys() - set(all_i),
-                                           key=lambda s: remaining[s], reverse=True)
-                            for k in empty_slots:
-                                if not extra:
-                                    break
-                                all_i[k] = extra.pop(0)
-                            # Pre-encode active weight slots as a batch to fix rounding sum
-                            ordered = [(all_i[slot], remaining.pop(all_i[slot], 0.0)) for slot in weight_slots]
-                            enc = BME.encode_weights_u16(ordered)
-                            for _, e in enc:
-                                f.write(bp.uint16(e))
-                            for slot in range(len(weight_slots), 8):
-                                f.write(bp.uint16(orig_all_w[slot]))
-                            for bone in all_i:
-                                f.write(bp.uint8(bone))
-                    else:
-                        # Vert count changed: write by weight desc
-                        if stride32_use_u16:
-                            # Layout B
-                            sw = BME.normalize_weights(raw_weights, 6)
-                            enc = BME.encode_weights_u8(sw)
-                            for _, e in enc:
-                                f.write(bp.uint8(e))
-                            for _ in range(6 - len(enc)):
-                                f.write(bp.uint8(0))
-                            f.write(b'\x00\x00')
-                            for s, _ in sw[:6]:
-                                f.write(bp.uint16(s))
-                            for _ in range(6 - min(len(sw), 6)):
-                                f.write(bp.uint16(0))
-                        elif stride32_layout_c:
-                            # Layout C
-                            sw = BME.normalize_weights(raw_weights, 12)
-                            enc = BME.encode_weights_u8(sw)
-                            for _, e in enc:
-                                f.write(bp.uint8(e))
-                            for _ in range(12 - len(enc)):
-                                f.write(bp.uint8(0))
-                            for s, _ in sw:
-                                f.write(bp.uint8(s))
-                            for _ in range(12 - len(sw)):
-                                f.write(bp.uint8(0))
-                        else:
-                            # Layout A
-                            sw = BME.normalize_weights(raw_weights, 8)
-                            enc = BME.encode_weights_u16(sw)
-                            for _, e in enc:
-                                f.write(bp.uint16(e))
-                            for _ in range(8 - len(enc)):
-                                f.write(bp.uint16(0))
-                            for s, _ in sw:
-                                f.write(bp.uint8(s))
-                            for _ in range(8 - len(sw)):
-                                f.write(bp.uint8(0))
-
-                elif stride == 36:
-                    max_bones = 8
-                    sw = BME.normalize_weights(raw_weights, max_bones)
-                    enc = BME.encode_weights_u16(sw)
-                    for _, e in enc:
-                        f.write(bp.uint16(e))
-                    for _ in range(max_bones - len(enc)):
-                        f.write(bp.uint16(0))
-                    for s, _ in sw:
-                        f.write(bp.uint8(s))
-                    for _ in range(max_bones - len(sw)):
-                        f.write(bp.uint8(0))
-
-                elif stride == 40:
-                    max_bones = 8
-                    sw = BME.normalize_weights(raw_weights, max_bones)
-                    enc = BME.encode_weights_u16(sw)
-                    for _, e in enc:
-                        f.write(bp.uint16(e))
-                    for _ in range(max_bones - len(enc)):
-                        f.write(bp.uint16(0))
-                    for s, _ in sw:
-                        f.write(bp.uint16(s))
-                    for _ in range(max_bones - len(sw)):
-                        f.write(bp.uint16(0))
-
-                elif stride == 44:
-                    max_bones = 12
-                    sw = BME.normalize_weights(raw_weights, max_bones)
-                    enc = BME.encode_weights_u8(sw)
-                    for i in range(max_bones):
-                        f.write(bp.uint8(enc[i][1] if i < len(enc) else 0))
-                    for i in range(max_bones):
-                        f.write(bp.uint16(enc[i][0] if i < len(enc) else 0))
-
+            position_values = BME.convert_coordinate(vertex.co)
+            if not all(math.isfinite(value) for value in position_values):
+                raise ValueError(
+                    f"'{mesh.name}' vertex {vertex_index} has a non-finite position")
+            position_format = position['format']
+            position_offset = position['offset']
+            if position_format == 11:
+                source_scale = None
+                if source_index is not None:
+                    source_values = _read_vertex_format(
+                        row, position_offset, position_format)
+                    source_scale = source_values[3]
+                max_coordinate = max(abs(value) for value in position_values)
+                if source_scale and max_coordinate <= abs(source_scale):
+                    scale = source_scale
                 else:
-                    wc = int((stride - pos_length) / 2)
-                    sw = BME.normalize_weights(raw_weights, wc)
-                    enc = BME.encode_weights_u8(sw)
-                    for i in range(wc):
-                        f.write(bp.uint8(enc[i][1] if i < len(enc) else 0))
-                    orig_idx = orig_index_bytes[vi] if (orig_index_bytes is not None and vi < len(orig_index_bytes)) else None
-                    for i in range(wc):
-                        if i < len(enc):
-                            f.write(bp.uint8(enc[i][0]))
-                        else:
-                            f.write(bp.uint8(orig_idx[i] if orig_idx is not None else 0))
+                    scale = max(1, int(math.ceil(max_coordinate)))
+                if abs(scale) > 32767:
+                    raise ValueError(
+                        f"'{mesh.name}' vertex {vertex_index} exceeds the int16 "
+                        "POSITION scale range")
+                encoded_position = [
+                    int(round(value / scale * 32767))
+                    for value in position_values
+                ] + [scale]
+            elif position_format == 6:
+                encoded_position = list(position_values)
+            else:
+                fourth = 1.0
+                if source_index is not None:
+                    fourth = _read_vertex_format(
+                        row, position_offset, position_format)[3]
+                encoded_position = list(position_values) + [fourth]
+            packed_position = _pack_vertex_format(
+                position_format, encoded_position)
+            row[position_offset:position_offset + len(packed_position)] = (
+                packed_position)
 
-                # Advance to next vertex slot
-                f.seek(stride_start + stride)
-            bm.free()
+            if rewrite_weights and index_elements:
+                raw_weights = []
+                for assignment in vertex.groups:
+                    mesh_slot = vgroup_to_mesh_slot.get(assignment.group)
+                    if mesh_slot is not None and assignment.weight > 0.0:
+                        raw_weights.append((mesh_slot, assignment.weight))
+                raw_weights.sort(key=lambda pair: pair[1], reverse=True)
 
+                if raw_weights:
+                    capacity = influence_capacity if weight_elements else 1
+                    normalized = BME.normalize_weights(raw_weights, capacity)
+                    if weight_scale == 255:
+                        encoded_pairs = BME.encode_weights_u8(normalized)
+                    elif weight_scale == 32767:
+                        encoded_pairs = BME.encode_weights_u16(normalized)
+                    else:
+                        encoded_pairs = [(normalized[0][0], 1)]
 
+                    encoded_indices = [pair[0] for pair in encoded_pairs]
+                    for element in index_elements:
+                        component_count = _VERTEX_FORMAT_LAYOUTS[
+                            element['format']][1]
+                        existing = _read_vertex_format(
+                            row, element['offset'], element['format'])
+                        replacement_indices = encoded_indices[:component_count]
+                        encoded_indices = encoded_indices[component_count:]
+                        existing[:len(replacement_indices)] = replacement_indices
+                        index_limit = (255 if element['format'] == 15
+                                       else 65535)
+                        if any(value < 0 or value > index_limit
+                               for value in existing):
+                            raise ValueError(
+                                f"'{mesh.name}' bone-index format {element['format']} "
+                                f"cannot store slot {max(existing)} on vertex "
+                                f"{vertex_index}")
+                        packed_indices = _pack_vertex_format(
+                            element['format'], existing)
+                        offset = element['offset']
+                        row[offset:offset + len(packed_indices)] = packed_indices
+
+                    if weight_elements:
+                        encoded_weights = [pair[1] for pair in encoded_pairs]
+                        encoded_weights.extend(
+                            [0] * (weight_capacity - len(encoded_weights)))
+                        cursor = 0
+                        for element in weight_elements:
+                            component_count = _VERTEX_FORMAT_LAYOUTS[
+                                element['format']][1]
+                            values = encoded_weights[
+                                cursor:cursor + component_count]
+                            cursor += component_count
+                            packed_weights = _pack_vertex_format(
+                                element['format'], values)
+                            offset = element['offset']
+                            row[offset:offset + len(packed_weights)] = (
+                                packed_weights)
+                elif source_index is None:
+                    raise ValueError(
+                        f"'{mesh.name}' vertex {vertex_index} has no usable bone "
+                        "weights or source row")
+
+            file.write(row)
 
     @staticmethod
     def write_normals(file, mesh:SkeletalMeshAsset.Mesh, lod_index=0):

@@ -1,7 +1,7 @@
 """Snowdrop .mmb format model and parser."""
 
 import io
-from struct import unpack
+from struct import pack, unpack
 
 from mathutils import Vector
 
@@ -19,9 +19,9 @@ from .log import logger
 # these values, so genuine hashes are never mistaken for divisors.
 _UV_KNOWN_DIVISORS = (0.0, 4095.0, 4096.0, 32767.0)
 
-# Formats needed to locate and decode the declared stream-0 POSITION element
-# for bounds calculation. Other declaration semantics remain on the existing
-# staged migration path.
+# Vertex formats currently observed in stock stream-0 declarations. They cover
+# POSITION, BLENDWEIGHT, and BLENDINDICES for the declaration-driven reader and
+# writer; unrecognised formats fail before any row bytes are changed.
 _VERTEX_FORMAT_LAYOUTS = {
     5: ('f', 4, 16), 6: ('f', 3, 12), 8: ('f', 2, 8),
     11: ('h', 4, 8), 14: ('B', 4, 4), 15: ('B', 4, 4),
@@ -54,6 +54,43 @@ def _parse_vertex_declaration(raw_values):
         elif offsets_known[stream]:
             offsets[stream] += size
     return elements
+
+
+def _read_vertex_format(buffer, offset, vertex_format):
+    """Read raw components for one declared vertex element."""
+    layout = _VERTEX_FORMAT_LAYOUTS.get(vertex_format)
+    if layout is None:
+        raise ValueError(f"unsupported vertex format {vertex_format}")
+    code, count, size = layout
+    if offset is None or offset < 0 or offset + size > len(buffer):
+        raise ValueError(f"vertex format {vertex_format} is outside its stream row")
+    return list(unpack(f'<{count}{code}', buffer[offset:offset + size]))
+
+
+def _pack_vertex_format(vertex_format, values):
+    """Pack raw components for one declared vertex element."""
+    layout = _VERTEX_FORMAT_LAYOUTS.get(vertex_format)
+    if layout is None:
+        raise ValueError(f"unsupported vertex format {vertex_format}")
+    code, count, _size = layout
+    values = list(values[:count]) + [0] * max(0, count - len(values))
+    if code != 'f':
+        limits = {
+            'b': (-128, 127), 'B': (0, 255),
+            'h': (-32768, 32767), 'H': (0, 65535),
+        }
+        low, high = limits[code]
+        values = [max(low, min(high, int(round(value)))) for value in values]
+    return pack(f'<{count}{code}', *values)
+
+
+def _weight_format_scale(vertex_format):
+    """Return the normalized full-scale value for a declared weight format."""
+    if vertex_format == 14:  # uint8x4
+        return 255
+    if vertex_format in (11, 19):  # signed int16x4/x2
+        return 32767
+    raise ValueError(f"unsupported BLENDWEIGHT format {vertex_format}")
 
 def _uv_divisor_candidates(raw4_list):
     """Decode a list of 4-byte chunks to float32 divisors, or return None if any
@@ -200,188 +237,83 @@ class SkeletalMeshAsset(Asset):
                 f.write(bp.uint32(self.data_size))
 
             def get_vertex_positions(self, raw_mesh_file):
-                vertices = []
                 mesh = self.parent_mesh
                 stride = mesh.vertex_stride
-                f = raw_mesh_file
-                f.seek(self.vertex_data_offset_a)
-                pos = (0.0,0.0,0.0)
-                for v in range(self.vertex_count):
-                    stride_start = f.tell()
-                    if mesh.position_type == 0:
-                        x = br.int16_norm(f)
-                        y = br.int16_norm(f)
-                        z = br.int16_norm(f)
-                        w = br.int16(f)
-                        pos = (x*w,y*w,z*w)
-                    elif mesh.position_type == 1:
-                        x = br.float(f)
-                        y = br.float(f)
-                        z = br.float(f)
-                        pos = (x,y,z)
-                    f.seek(stride_start + stride)
-                    vertices.append(pos)
-                return vertices
-
-            def get_declared_vertex_positions(self, raw_mesh_file):
-                """Read positions from the authoritative declaration when known."""
-                elements = self.parent_mesh.elements(semantic=0, stream=0)
-                if not elements:
-                    return self.get_vertex_positions(raw_mesh_file)
+                elements = mesh.elements(semantic=0, stream=0)
+                if len(elements) != 1:
+                    raise ValueError(
+                        f"'{mesh.name}' must declare exactly one stream-0 POSITION element")
                 element = elements[0]
-                offset = element['offset']
                 vertex_format = element['format']
-                layout = _VERTEX_FORMAT_LAYOUTS.get(vertex_format)
-                if (offset is None or layout is None
-                        or vertex_format not in (5, 6, 11)):
-                    return self.get_vertex_positions(raw_mesh_file)
-                code, count, size = layout
-                stride = self.parent_mesh.vertex_stride
-                if offset + size > stride:
-                    return self.get_vertex_positions(raw_mesh_file)
-
+                if vertex_format not in (5, 6, 11) or element['offset'] is None:
+                    raise ValueError(
+                        f"'{mesh.name}' uses unsupported POSITION format {vertex_format}")
                 raw_mesh_file.seek(self.vertex_data_offset_a)
                 block = raw_mesh_file.read(self.vertex_count * stride)
                 if len(block) != self.vertex_count * stride:
                     raise ValueError(
-                        f"'{self.parent_mesh.name}' LOD{self.index} vertex block is truncated")
-                positions = []
+                        f"'{mesh.name}' LOD{self.index} vertex block is truncated")
+                vertices = []
                 for vertex_index in range(self.vertex_count):
-                    start = vertex_index * stride + offset
-                    values = unpack(f'<{count}{code}', block[start:start + size])
+                    row_start = vertex_index * stride
+                    values = _read_vertex_format(
+                        block, row_start + element['offset'], vertex_format)
                     if vertex_format == 11:
                         scale = values[3]
-                        positions.append(tuple(
+                        vertices.append(tuple(
                             values[axis] / 32767.0 * scale for axis in range(3)))
-                    else:  # float3/float4 POSITION; xyz are direct
-                        positions.append(tuple(values[:3]))
-                return positions
+                    else:  # float3/float4 POSITION
+                        vertices.append(tuple(values[:3]))
+                return vertices
+
+            def get_declared_vertex_positions(self, raw_mesh_file):
+                """Compatibility name for the now declaration-driven position reader."""
+                return self.get_vertex_positions(raw_mesh_file)
 
             def get_bone_weights(self, raw_mesh_file):
-                bone_weights = []
-                stride = self.parent_mesh.vertex_stride
-                f = raw_mesh_file
-                # Detect stride-32 layout
-                stride32_layout = None
-                if stride == 32 and self.vertex_count > 0:
-                    n_slots = len(self.parent_mesh.mesh_bones)
-                    f.seek(self.vertex_data_offset_a + 8)
-                    peek = f.read(24)
-                    w8_u16 = [unpack('<H', peek[i * 2:i * 2 + 2])[0] for i in range(8)]
-                    if sum(w8_u16) == 32767:
-                        stride32_layout = 'A'
-                    else:
-                        c12_idx = list(peek[12:24])
-                        if n_slots <= 256 and all(0 <= x < n_slots for x in c12_idx):
-                            stride32_layout = 'C'
-                        else:
-                            stride32_layout = 'B'
+                mesh = self.parent_mesh
+                stride = mesh.vertex_stride
+                weight_elements = sorted(
+                    mesh.elements(semantic=2, stream=0),
+                    key=lambda element: (element['set'], element['offset']))
+                index_elements = sorted(
+                    mesh.elements(semantic=3, stream=0),
+                    key=lambda element: (element['set'], element['offset']))
+                for element in weight_elements:
+                    _weight_format_scale(element['format'])
+                for element in index_elements:
+                    if element['format'] not in (15, 18, 60):
+                        raise ValueError(
+                            f"'{mesh.name}' uses unsupported BLENDINDICES format "
+                            f"{element['format']}")
+                raw_mesh_file.seek(self.vertex_data_offset_a)
+                block = raw_mesh_file.read(self.vertex_count * stride)
+                if len(block) != self.vertex_count * stride:
+                    raise ValueError(
+                        f"'{mesh.name}' LOD{self.index} vertex block is truncated")
 
-                f.seek(self.vertex_data_offset_a)
-                for v in range(self.vertex_count):
-                    iw = {}
-                    stride_start = f.tell()
-                    if stride == 12:
-                        # 4x uint8 bone slot indices, no weight bytes - Weight 1.0 on first index
-                        f.seek(8, 1)
-                        indices = [br.uint8(f) for _ in range(4)]
-                        iw[indices[0]] = 1.0
-                    elif stride == 16:
-                        if self.parent_mesh.position_type == 1:
-                            # Float XYZ position (12b) + 1x uint8 bone slot index + 3b padding.
-                            # Same as stride=12 (weight 1.0 on first index) but with float positions.
-                            f.seek(12, 1)
-                            index = br.uint8(f)
-                            iw[index] = 1.0
-                        else:
-                            # Int16 position (8b) + 4x uint8_norm weights + 4x uint8 indices
-                            f.seek(8, 1)
-                            weight_count = 4
-                            weights = []
-                            for w in range(weight_count):
-                                weight = br.uint8_norm(f)
-                                if weight > 0.0:
-                                    weights.append(weight)
-                            for i in range(weight_count):
-                                if i < len(weights):
-                                    iw[br.uint8(f)] = weights[i]
-                                else:
-                                    f.seek(1, 1)
-                    elif stride == 20:
-                        pos_skip = 12 if self.parent_mesh.position_type == 1 else 8
-                        f.seek(pos_skip, 1)
-                        remaining = stride - pos_skip
-                        index_count = 4
-                        weight_count = (remaining - index_count) // 2
-                        weights = [br.uint16(f) / 32767.0 for _ in range(weight_count)]
-                        indices = [br.uint8(f) for _ in range(index_count)]
-                        for i in range(weight_count):
-                            if weights[i] > 0.0:
-                                iw[indices[i]] = weights[i]
-                    elif stride == 32:
-                        f.seek(8, 1)
-                        if stride32_layout == 'A':
-                            # Layout A: 8x uint16 weights, 8x uint8 indices
-                            w8 = [br.uint16(f) / 32767.0 for _ in range(8)]
-                            idx8 = [br.uint8(f) for _ in range(8)]
-                            for i in range(8):
-                                if w8[i] > 0.0:
-                                    iw[idx8[i]] = iw.get(idx8[i], 0.0) + w8[i]
-                        elif stride32_layout == 'C':
-                            # Layout C: 12x uint8 weights, 12x uint8 indices
-                            w12 = [br.uint8(f) for _ in range(12)]
-                            idx12 = [br.uint8(f) for _ in range(12)]
-                            for i in range(12):
-                                wt = w12[i] / 255.0
-                                if wt > 0.0:
-                                    iw[idx12[i]] = iw.get(idx12[i], 0.0) + wt
-                        else:
-                            # Layout B: 6x uint8 weights, pad2, 6x uint16 indices, pad4
-                            weights = [br.uint8_norm(f) for _ in range(6)]
-                            f.seek(2, 1)  # skip 2 padding bytes
-                            indices = [br.uint16(f) for _ in range(6)]
-                            for i in range(6):
-                                if weights[i] > 0.0:
-                                    iw[indices[i]] = iw.get(indices[i], 0.0) + weights[i]
-                    elif stride == 36:
-                        f.seek(12, 1)
-                        weights = [br.uint16(f) / 32767.0 for _ in range(8)]
-                        indices = [br.uint8(f) for _ in range(8)]
-                        for i in range(8):
-                            if weights[i] > 0.0:
-                                iw[indices[i]] = weights[i]
-                    elif stride == 40:
-                        f.seek(8, 1)
-                        weights = [br.uint16(f) / 32767.0 for _ in range(8)]
-                        indices = [br.uint16(f) for _ in range(8)]
-                        for i in range(8):
-                            if weights[i] > 0.0:
-                                iw[indices[i]] = weights[i]
-                    elif stride == 44:
-                        pos_skip = 12 if self.parent_mesh.position_type == 1 else 8
-                        f.seek(pos_skip, 1)
-                        weight_count = 12
-                        weights = [br.uint8_norm(f) for _ in range(weight_count)]
-                        indices = [br.uint16(f) for _ in range(weight_count)]
-                        for i in range(weight_count):
-                            if weights[i] > 0.0:
-                                iw[indices[i]] = weights[i]
+                bone_weights = []
+                for vertex_index in range(self.vertex_count):
+                    row_start = vertex_index * stride
+                    weights = []
+                    indices = []
+                    for element in weight_elements:
+                        values = _read_vertex_format(
+                            block, row_start + element['offset'], element['format'])
+                        scale = _weight_format_scale(element['format'])
+                        weights.extend(value / scale for value in values)
+                    for element in index_elements:
+                        indices.extend(int(value) for value in _read_vertex_format(
+                            block, row_start + element['offset'], element['format']))
+                    combined = {}
+                    if not weight_elements:
+                        if indices:
+                            combined[indices[0]] = 1.0
                     else:
-                        pos_length = 12 if self.parent_mesh.position_type == 1 else 8
-                        f.seek(pos_length, 1)
-                        weight_count = int((stride - pos_length) / 2)
-                        weights = []
-                        for w in range(weight_count):
-                            weight = br.uint8_norm(f)
+                        for weight, index in zip(weights, indices):
                             if weight > 0.0:
-                                weights.append(weight)
-                        for i in range(weight_count):
-                            if i < len(weights):
-                                iw[br.uint8(f)] = weights[i]
-                            else:
-                                f.seek(1, 1)
-                    f.seek(stride_start + stride)
-                    bone_weights.append(iw)
+                                combined[index] = combined.get(index, 0.0) + weight
+                    bone_weights.append(combined)
                 return bone_weights
 
             def get_triangles(self,raw_mesh_file):
@@ -609,33 +541,38 @@ class SkeletalMeshAsset(Asset):
                 :param file: file to write on
                 :param pos: (x,y,z) world-space position in the same units get_vertex_positions returns.
                 :param scale: the per-vertex w value read from the original file.
-                              For position_type 0: world = int16_norm(raw) * w,
+                              For format 11: world = int16_norm(raw) * w,
                               so the inverse is raw = round(world / w * 32767), packed as int16.
                               If None or 0, the vertex is skipped (zero-displacement override).
                 :return:
                 """
                 f = file
-                x = pos[0]
-                y = pos[1]
-                z = pos[2]
                 stride = self.parent_mesh.vertex_stride
                 stride_start = f.tell()
-                if self.parent_mesh.position_type == 0:
-                    if scale is None or scale == 0:
-                        f.seek(stride_start + stride)
-                        return
-                    # Auto-expand scale if vertex exceeds original bounds (e.g. after scaling up)
-                    max_abs = max(abs(x), abs(y), abs(z))
-                    if max_abs >= abs(scale):
-                        scale = min(32767, int(max_abs) + 1)
-                    f.write(bp.int16_norm(max(-1.0, min(1.0, x / scale))))
-                    f.write(bp.int16_norm(max(-1.0, min(1.0, y / scale))))
-                    f.write(bp.int16_norm(max(-1.0, min(1.0, z / scale))))
-                    f.write(bp.int16(scale))
-                elif self.parent_mesh.position_type == 1:
-                    f.write(bp.float(x))
-                    f.write(bp.float(y))
-                    f.write(bp.float(z))
+                elements = self.parent_mesh.elements(semantic=0, stream=0)
+                if len(elements) != 1 or elements[0]['offset'] is None:
+                    raise ValueError(
+                        f"'{self.parent_mesh.name}' has no writable POSITION declaration")
+                element = elements[0]
+                vertex_format = element['format']
+                f.seek(stride_start + element['offset'])
+                if vertex_format == 11:
+                    max_abs = max(abs(value) for value in pos)
+                    if scale is None or scale == 0 or max_abs >= abs(scale):
+                        scale = max(1, int(max_abs) + 1)
+                    if abs(scale) > 32767:
+                        raise ValueError(
+                            f"'{self.parent_mesh.name}' position scale exceeds int16 range")
+                    values = [value / scale * 32767.0 for value in pos]
+                    f.write(_pack_vertex_format(11, [*values, scale]))
+                elif vertex_format == 6:
+                    f.write(_pack_vertex_format(6, pos))
+                elif vertex_format == 5:
+                    f.write(_pack_vertex_format(5, [*pos, 1.0]))
+                else:
+                    raise ValueError(
+                        f"'{self.parent_mesh.name}' uses unsupported POSITION format "
+                        f"{vertex_format}")
                 f.seek(stride_start + stride)
 
         def __init__(self,parent_sk_mesh, index=0):
@@ -663,7 +600,7 @@ class SkeletalMeshAsset(Asset):
             self.uv_count = 0
             self.normal_type = 0 # 0:int8_norm 1:floats
             self.color_in_normals = True # False when color_count not in normals stride
-            self.position_type = 0 # 0:int16_norm 1:floats
+            self.position_type = 0 # compatibility: 0=int16 POSITION, 1=float POSITION
             self.vertex_elements = [] # decoded declaration metadata
             # Per-mesh tail. The first uint32 is the engine's primary index-width
             # flag (0=u16, 1=u32); the next three are aggregate mesh counts.
@@ -682,6 +619,19 @@ class SkeletalMeshAsset(Asset):
                     if element['semantic'] == semantic
                     and (stream is None or element['stream'] == stream)
                     and (semantic_set is None or element['set'] == semantic_set)]
+        def influence_capacity(self):
+            """Usable stream-0 skinning influences declared for one vertex."""
+            weights = self.elements(semantic=2, stream=0)
+            indices = self.elements(semantic=3, stream=0)
+            index_capacity = sum(
+                _VERTEX_FORMAT_LAYOUTS[element['format']][1]
+                for element in indices)
+            if not weights:
+                return 1 if index_capacity else 0
+            weight_capacity = sum(
+                _VERTEX_FORMAT_LAYOUTS[element['format']][1]
+                for element in weights)
+            return min(weight_capacity, index_capacity)
         def parse(self, f):
             version = self.parent_sk_mesh.version
 
@@ -827,25 +777,19 @@ class SkeletalMeshAsset(Asset):
                 self.normal_type = 0  # int8_norm normal(4) + tangent(4) = 8 bytes fixed
             # Layout for both types: color(4*cc) first, then normal block, then UV(4*uv)
 
-            # --- Position type detection ---
-            # Uses the same normals_base formula:
-            #   normals_base == 28 -> float positions (3 × float32, 12 bytes)
-            #   normals_base == 12 -> int16 positions (4 × int16 x/y/z/scale, 8 bytes)
-            #   other              -> default to int16
-            # Override: vertex_stride in (32,40) is always int16;
-            #           vertex_stride in (28,36) is always float.
-            # stride=44 is NOT overridden — some (e.g. gear upperbody) are float (nb=28)
-            #   while others (e.g. head, nb=8) are correctly int16 via the formula.
-            if self.vertex_stride in (32, 40):
-                self.position_type = 0  # int16
-            elif self.vertex_stride in (28, 36):
-                self.position_type = 1  # float
-            elif self.vertex_stride == 12:
-                self.position_type = 1 if u_count == 0 else 0
-            elif _normals_base >= 28:
-                self.position_type = 1  # float
+            # Retained as a compatibility attribute for cloth/export code, but
+            # now derived from the authoritative stream-0 declaration.
+            _position_elements = self.elements(semantic=0, stream=0)
+            _position_format = (_position_elements[0]['format']
+                                if len(_position_elements) == 1 else None)
+            if _position_format == 11:
+                self.position_type = 0
+            elif _position_format in (5, 6):
+                self.position_type = 1
             else:
-                self.position_type = 0  # int16
+                raise ValueError(
+                    f"'{self.name}' uses unsupported POSITION declaration "
+                    f"{_position_format}")
 
             logger.debug(
                 "%s: vertex stride=%d, normals stride=%d, UVs=%d, colors=%d, "

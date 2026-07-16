@@ -166,28 +166,12 @@ def _bone_search_cb(self, context, edit_text):
     ]
 
 
-# Vertex strides whose bone-slot index is written as a single byte on export,
-# with no fallback - can only address 256 mesh-bone-table slots.
-#
-# *** If these sets aren't updated for new or changes in strides, the "ubyte format requires 0 <= number <= 255" error
-# will be thrown. ***
-#
-# Stride 32 is included here even though one of its three layouts (Layout C) is uint8-indexed.
-# (write_vertices already self-detects and switches stride 32 to a uint16-index layout)
-_UINT8_INDEX_LIMITED_STRIDES = {12, 16, 20, 36}
-_UINT16_NON_LIMITED_STRIDES = {32, 40, 44}
-
 def _mesh_is_uint8_index_limited(mesh):
-    """True if this mesh's vertex format caps bone-slot indices at 255."""
-    stride = getattr(mesh, "vertex_stride", None)
-    if not stride or stride <= 0:
+    """True when a declared bone-index element stores uint8 components."""
+    index_elements = mesh.elements(semantic=3, stream=0)
+    if not index_elements:
         return False
-    if stride in _UINT8_INDEX_LIMITED_STRIDES:
-        return True
-    if stride in _UINT16_NON_LIMITED_STRIDES:
-        return False
-    # Unrecognized strides fall into 'write_vertices' 'else' uint8 branch.
-    return True
+    return any(element['format'] == 15 for element in index_elements)
 
 def _scan_mesh_used_bone_slots(mesh):
     """
@@ -247,7 +231,7 @@ def _find_unused_mesh_bone_slot(mesh, used=None):
 def _add_or_reuse_mesh_bone_slot(mesh, new_skel_idx, new_matrix, used_slots_cache=None):
     """
     Add a new bone to `mesh`'s bone table, reusing an unused slot instead of
-    appending past the uint8 limit when the mesh's vertex stride is limited.
+    appending past the uint8 limit when its declared bone indices are uint8.
 
     `used_slots_cache`: pass a dict when adding several bones to the same mesh at once -
     keyed by `id(mesh)`, so the weight scan only happens once per mesh instead of per bone.
@@ -510,11 +494,11 @@ class AddMeshBone(bpy.types.Operator):
                     f"Choose a donor MMB whose mesh already uses that bone.")
                 return {'CANCELLED'}
 
-        # Stage the addition - reuses an unused slot in place if this mesh's vertex is uint8 limited.
+        # Stage the addition; reuse an unused slot when this mesh declares uint8 indices.
         status, info = _add_or_reuse_mesh_bone_slot(mesh, new_skel_idx, new_matrix)
         if status == 'full':
             self.report({'ERROR'},
-                f"'{mesh.name}' uses a vertex stride limited to 256 bone slots (uint8) and has "
+                f"'{mesh.name}' uses uint8 bone indices (256 slots maximum) and has "
                 f"no un-weighted slot to reuse.")
             return {'CANCELLED'}
 

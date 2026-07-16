@@ -6,24 +6,8 @@ from . import addon_state
 from .exporter import BME
 
 def _max_weights_for_mesh(mesh):
-    """Max bone influences per vertex that the mesh's vertex stride can store.
-    Mirrors the per-stride weight layouts in get_bone_weights/write_vertices."""
-    stride = mesh.vertex_stride
-    pos_length = 12 if mesh.position_type == 1 else 8
-    if stride == 12:
-        return 1   # 4x uint8 index, weight 1.0 on first index
-    if stride == 16:
-        return 1 if mesh.position_type == 1 else 2  # float pos: single index; int16 pos: 2 weights
-    if stride == 20:
-        return 2 if mesh.position_type == 1 else 4
-    if stride == 32:
-        # Layout B (>256 bone slots) holds 6; layout A holds 8 (C holds 12 but 8 is a safe cap).
-        return 6 if len(mesh.mesh_bones) > 256 else 8
-    if stride in (36, 40):
-        return 8
-    if stride == 44:
-        return 12
-    return max(1, (stride - pos_length) // 2)  # packed uint8 weight+index pairs
+    """Maximum usable influences from declared weight and index capacities."""
+    return mesh.influence_capacity()
 
 def _limit_vertex_weights(obj, limit):
     """Keep the highest vertex-group weights per vertex, removing the lowest and
@@ -75,7 +59,9 @@ class GenerateLODs(bpy.types.Operator):
         layout = self.layout
         mesh = addon_state.asset.meshes[self.mesh_index]
         layout.label(text=f"Generate LODs for '{mesh.name}' from LOD0")
-        layout.label(text=f"Max weights per vertex: {_max_weights_for_mesh(mesh)} (vertex stride {mesh.vertex_stride})")
+        layout.label(
+            text=f"Max weights per vertex: {_max_weights_for_mesh(mesh)} "
+                 "(vertex declaration)")
         for li in range(1, min(len(mesh.lods), 4)):
             layout.prop(self, f"ratio_lod{li}")
         layout.prop(self, "replace_existing")
