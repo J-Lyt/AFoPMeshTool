@@ -20,6 +20,7 @@ CODE_FILES = (
     "file_utils.py",
     "importer.py",
     "log.py",
+    "meshlet.py",
     "mcloth.py",
     "mmb.py",
     "operators_bones.py",

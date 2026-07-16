@@ -3,6 +3,7 @@
 import io
 import math
 import operator
+import os
 from struct import pack, unpack
 
 import bmesh
@@ -20,6 +21,7 @@ from .blender_mesh_utils import (
 )
 from .cloth_export import _sim_free_slot_flags
 from .log import logger
+from . import meshlet as meshlet_codec
 from .mmb import (
     SkeletalMeshAsset,
     _VERTEX_FORMAT_LAYOUTS,
@@ -217,6 +219,107 @@ def _sync_asset_layout(parsed_asset):
                     'data_size', 'is_header_lod', 'lod_unk',
                     'index_width_bytes'):
                 setattr(old_lod, attr, getattr(new_lod, attr))
+
+
+def _regenerate_meshlet_data(file_data, lod_keys):
+    """Rebuild changed secondary sections from the finalized primary buffers."""
+    if not lod_keys:
+        return bytearray(file_data)
+
+    source = bytes(file_data)
+    parsed = SkeletalMeshAsset()
+    parsed.parse(io.BytesIO(source))
+    meshlet_codec.validate_region(source, parsed)
+    regenerated = {}
+    raw_meshes = {}
+
+    for mesh_index, lod_index in sorted(lod_keys):
+        if not 0 <= mesh_index < len(parsed.meshes):
+            raise ValueError(f"meshlet regeneration has invalid mesh index {mesh_index}")
+        mesh = parsed.meshes[mesh_index]
+        if mesh.lod_info_type != 2 or not 0 <= lod_index < len(mesh.lods):
+            raise ValueError(
+                f"'{mesh.name}' LOD{lod_index} has no regenerable meshlet section")
+        lod = mesh.lods[lod_index]
+        if lod.vertex_count <= 0 or lod.index_count <= 0:
+            raise ValueError(
+                f"'{mesh.name}' LOD{lod_index} cannot regenerate an empty meshlet section")
+
+        positions = mesh.elements(semantic=0, stream=0)
+        if len(positions) != 1:
+            raise ValueError(
+                f"'{mesh.name}' must declare exactly one stream-0 POSITION element")
+        position = positions[0]
+        layout = _VERTEX_FORMAT_LAYOUTS.get(position['format'])
+        if layout is None or position['offset'] != 0:
+            raise ValueError(
+                f"'{mesh.name}' meshlet regeneration requires a supported, "
+                "first-in-stream POSITION declaration")
+        position_size = layout[2]
+        if position_size > mesh.vertex_stride:
+            raise ValueError(f"'{mesh.name}' POSITION exceeds its stream-0 stride")
+
+        raw_mesh = raw_meshes.get(mesh_index)
+        if raw_mesh is None:
+            raw_mesh = mesh.extract_mesh_file(io.BytesIO(source))
+            raw_meshes[mesh_index] = raw_mesh
+        points = lod.get_declared_vertex_positions(raw_mesh)
+        triangles = lod.get_triangles(raw_mesh)
+
+        raw_mesh.seek(lod.vertex_data_offset_a)
+        stream0 = raw_mesh.read(lod.vertex_count * mesh.vertex_stride)
+        if len(stream0) != lod.vertex_count * mesh.vertex_stride:
+            raise ValueError(f"'{mesh.name}' LOD{lod_index} stream 0 is truncated")
+        vertex_payload = [
+            stream0[index * mesh.vertex_stride + position_size:
+                    (index + 1) * mesh.vertex_stride]
+            for index in range(lod.vertex_count)]
+
+        normal_payload = None
+        if mesh.normals_stride:
+            raw_mesh.seek(lod.vertex_data_offset_b)
+            stream1 = raw_mesh.read(lod.vertex_count * mesh.normals_stride)
+            if len(stream1) != lod.vertex_count * mesh.normals_stride:
+                raise ValueError(f"'{mesh.name}' LOD{lod_index} stream 1 is truncated")
+            normal_payload = [
+                stream1[index * mesh.normals_stride:
+                        (index + 1) * mesh.normals_stride]
+                for index in range(lod.vertex_count)]
+
+            descriptor_offset = lod.start_offset + lod.lod_field_offset + 36
+            f0, _f1, f2, f3, f4, _f5, _f6 = unpack(
+                '<7I', source[descriptor_offset:descriptor_offset + 28])
+            normal_region_size = f4 - f3
+            if normal_region_size % mesh.normals_stride:
+                raise ValueError(
+                    f"'{mesh.name}' LOD{lod_index} meshlet normal region is not "
+                    "divisible by its declared stride")
+            duplicated_count = normal_region_size // mesh.normals_stride
+            expected_meshlet_stride = 8 + mesh.vertex_stride - position_size
+            if (duplicated_count <= 0
+                    or f3 - f2 != duplicated_count * expected_meshlet_stride):
+                raise ValueError(
+                    f"'{mesh.name}' LOD{lod_index} meshlet vertex payload does not "
+                    "match its declaration-driven stride")
+
+        skinned = bool(mesh.elements(semantic=3, stream=0))
+        vertex_skin = lod.get_bone_weights(raw_mesh) if skinned else None
+        regenerated[(mesh_index, lod_index)] = meshlet_codec.encode_section(
+            points, triangles,
+            vertex_payload=vertex_payload,
+            normal_payload=normal_payload,
+            skinned=skinned,
+            vertex_skin=vertex_skin)
+
+    rebuilt = meshlet_codec.rebuild_region(source, parsed, regenerated)
+    validated = SkeletalMeshAsset()
+    validated.parse(io.BytesIO(rebuilt))
+    meshlet_codec.validate_region(rebuilt, validated)
+    for mesh_index, lod_index in sorted(regenerated):
+        logger.info(
+            "Regenerated meshlet section for %s LOD%d",
+            parsed.meshes[mesh_index].name, lod_index)
+    return bytearray(rebuilt)
 
 
 class BlenderMeshExporter:
@@ -510,6 +613,7 @@ class BlenderMeshExporter:
 
         # Read asset.size (bytes 4-8) - boundary between header and streaming sections
         asset_size = unpack('<I', file_data[4:8])[0]
+        meshlet_regeneration = set()
 
         for mesh_index, lod_index in edited_lod_index_per_mesh.items():
             if lod_index < 0:
@@ -872,6 +976,36 @@ class BlenderMeshExporter:
             orig_vd_size = orig_vc * mesh.vertex_stride
             orig_nd_size = orig_vc * mesh.normals_stride
             orig_fd_size = orig_ic * orig_idx_size
+            old_intra_vob = lod.vertex_data_offset_b - higher_size
+            old_intra_fb = lod.face_block_offset - higher_size
+            old_stream0 = bytes(file_data[
+                lod.data_offset + intra_voa:
+                lod.data_offset + intra_voa + orig_vd_size])
+            old_stream1 = bytes(file_data[
+                lod.data_offset + old_intra_vob:
+                lod.data_offset + old_intra_vob + orig_nd_size])
+            old_indices = bytes(file_data[
+                lod.data_offset + old_intra_fb:
+                lod.data_offset + old_intra_fb + orig_fd_size])
+            meshlet_content_changed = (
+                new_vert_count != orig_vc
+                or new_index_count != orig_ic
+                or vd[:new_vert_count * mesh.vertex_stride] != old_stream0
+                or nd[:new_vert_count * mesh.normals_stride] != old_stream1
+                or fd[:new_index_count * (4 if use_uint32_faces else 2)]
+                != old_indices)
+            if mesh.lod_info_type == 2:
+                descriptor_offset = lod.start_offset + lod.lod_field_offset + 36
+                f0, _f1, _f2, _f3, f4, _f5, f6 = unpack(
+                    '<7I', file_data[
+                        descriptor_offset:descriptor_offset + 28])
+                meshlet_index_bytes = f0 + f6 - f4
+                meshlet_stale = (
+                    meshlet_index_bytes < 0
+                    or meshlet_index_bytes % 4 != 0
+                    or meshlet_index_bytes // 4 * 3 != orig_ic)
+                if meshlet_content_changed or meshlet_stale:
+                    meshlet_regeneration.add((mesh_index, lod_index))
             orig_trailing_size = orig_data_size - orig_vd_size - orig_nd_size - orig_fd_size
             if orig_trailing_size > 0:
                 trailing_abs = lod.data_offset + intra_voa + orig_vd_size + orig_nd_size + orig_fd_size
@@ -1047,8 +1181,33 @@ class BlenderMeshExporter:
             lod.size_a = new_size_a
             lod.index_width_bytes = new_index_width
 
-        with open(out_path, 'wb') as out:
-            out.write(file_data)
+        if meshlet_regeneration:
+            try:
+                file_data = _regenerate_meshlet_data(
+                    file_data, meshlet_regeneration)
+            except Exception as error:
+                names = ', '.join(
+                    f"{addon_state.asset.meshes[mesh_index].name} LOD{lod_index}"
+                    for mesh_index, lod_index in sorted(meshlet_regeneration))
+                raise ValueError(
+                    f"Meshlet regeneration failed for {names}; export was "
+                    f"cancelled to avoid stale secondary geometry: {error}") from error
+
+        # Chained Export All passes can read and replace the same _MOD path.
+        # Write a sibling first so Windows never has to truncate the current
+        # source while a decoder still owns a transient read handle. This also
+        # prevents a failed write from leaving a partial MMB behind.
+        temporary_path = out_path + '.export_tmp'
+        try:
+            with open(temporary_path, 'wb') as out:
+                out.write(file_data)
+            os.replace(temporary_path, out_path)
+        finally:
+            try:
+                if os.path.exists(temporary_path):
+                    os.remove(temporary_path)
+            except OSError:
+                pass
 
 
     @staticmethod
