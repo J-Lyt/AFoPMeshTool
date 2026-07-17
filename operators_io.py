@@ -31,6 +31,37 @@ class BrowseMMBFile(bpy.types.Operator):
         context.scene.SWOMT.AssetPath = self.filepath
         return {'FINISHED'}
 
+
+class BrowseExportDirectory(bpy.types.Operator):
+    """Choose where exported MMB and paired mcloth files are written."""
+
+    bl_idname = "object.browse_export_directory"
+    bl_label = "Choose Export Folder"
+
+    directory: bpy.props.StringProperty(subtype="DIR_PATH")
+
+    def invoke(self, context, event):
+        current = bpy.path.abspath(context.scene.SWOMT.ExportPath)
+        if current:
+            self.directory = current
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        context.scene.SWOMT.ExportPath = self.directory
+        return {'FINISHED'}
+
+
+def _export_mod_path(settings):
+    """Return the protected output filename inside the selected export folder."""
+    src_path = bpy.path.abspath(settings.AssetPath)
+    export_dir = bpy.path.abspath(settings.ExportPath) if settings.ExportPath else os.path.dirname(src_path)
+    if not export_dir or not os.path.isdir(export_dir):
+        raise FileNotFoundError(f"Export folder does not exist: {export_dir or '(empty)'}")
+    destination = os.path.join(export_dir, os.path.basename(src_path))
+    return _mod_file_output(destination, overwrite=settings.overwrite_existing)
+
+
 class LoadMMB(bpy.types.Operator):
     """Reads data from base .mmb file"""
     bl_idname = "object.load_mmb"
@@ -98,7 +129,11 @@ class ExportLOD(bpy.types.Operator):
 
         SWOMT = context.scene.SWOMT
         src_path = SWOMT.AssetPath
-        mod_file = _mod_file_output(src_path, overwrite=SWOMT.overwrite_existing)
+        try:
+            mod_file = _export_mod_path(SWOMT)
+        except OSError as error:
+            self.report({'ERROR'}, str(error))
+            return {'CANCELLED'}
 
         # Triangulate the Blender mesh before export so all faces are tris
         mesh = addon_state.asset.meshes[self.mesh_index]
@@ -170,11 +205,12 @@ class ExportLOD(bpy.types.Operator):
 
         return {'FINISHED'}
 
-def _import_all_lods(context, lod_n):
-    """Shared import logic for ImportAllLODNs operators."""
-    sk_mesh = addon_state.asset
+def _import_all_lods(context, lod_n, skeletal_mesh=None, asset_path=None):
+    """Shared import logic, optionally using an MMB without loading it as the current asset."""
+    sk_mesh = skeletal_mesh if skeletal_mesh is not None else addon_state.asset
     SWOMT = context.scene.SWOMT
-    merged_mmb = get_merged_mmb(SWOMT["AssetPath"])
+    source_path = asset_path if asset_path is not None else SWOMT["AssetPath"]
+    merged_mmb = get_merged_mmb(source_path)
     is_new_armature = bpy.data.objects.find(sk_mesh.name) == -1
     armature = BMI.find_or_create_skeleton(sk_mesh)
     last_obj = None
@@ -260,7 +296,11 @@ class ExportAllLODs(bpy.types.Operator):
 
         SWOMT = context.scene.SWOMT
         src_path = SWOMT.AssetPath
-        mod_file = _mod_file_output(src_path, overwrite=SWOMT.overwrite_existing)
+        try:
+            mod_file = _export_mod_path(SWOMT)
+        except OSError as error:
+            self.report({'ERROR'}, str(error))
+            return {'CANCELLED'}
 
         # Bake parent inverse and triangulate every LOD object that exists in the scene.
         # Baking must happen before triangulation so vertex positions are correct.
@@ -358,6 +398,6 @@ class ExportAllLODs(bpy.types.Operator):
         return {'FINISHED'}
 
 CLASSES = (
-    BrowseMMBFile, LoadMMB, ImportLOD, ExportLOD, ImportAllLOD0s,
+    BrowseMMBFile, BrowseExportDirectory, LoadMMB, ImportLOD, ExportLOD, ImportAllLOD0s,
     ImportAllLOD1s, ImportAllLOD2s, ImportAllLOD3s, ExportAllLODs,
 )

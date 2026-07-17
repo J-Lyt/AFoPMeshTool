@@ -11,15 +11,89 @@ from .log import logger, set_debug
 from .mmb import SkeletalMeshAsset
 
 
+_sdf_search_generation = 0
+_SDF_SEARCH_DELAY = 0.35
+
+
 def _on_debug_logging_update(self, context):
     set_debug(self.debug_logging)
 
 
+def _on_sdf_search_update(self, context):
+    """Apply search text shortly after typing stops instead of on every keypress."""
+    global _sdf_search_generation
+    _sdf_search_generation += 1
+    generation = _sdf_search_generation
+    scene_pointer = context.scene.as_pointer() if context and context.scene else None
+
+    def apply_search():
+        if generation != _sdf_search_generation:
+            return None
+        try:
+            for scene in bpy.data.scenes:
+                if scene_pointer is not None and scene.as_pointer() != scene_pointer:
+                    continue
+                settings = getattr(scene, "SWOMT", None)
+                if settings is not None:
+                    settings.sdf_search_applied = settings.sdf_search
+                    from . import operators_sdf
+                    operators_sdf.populate_search_results(scene, settings.sdf_search)
+                break
+            for window in bpy.context.window_manager.windows:
+                for area in window.screen.areas:
+                    if area.type == "PROPERTIES":
+                        area.tag_redraw()
+        except (ReferenceError, RuntimeError):
+            pass
+        return None
+
+    bpy.app.timers.register(apply_search, first_interval=_SDF_SEARCH_DELAY)
+
+
+def _addon_preferences(context=None):
+    """Return this add-on's saved preferences when it is installed/enabled."""
+    preferences = (context or bpy.context).preferences
+    addon = preferences.addons.get(__package__)
+    return addon.preferences if addon is not None else None
+
+
+def get_default_game_directory(context=None):
+    """Return the game directory saved in the add-on preferences."""
+    preferences = _addon_preferences(context)
+    return preferences.default_game_directory if preferences is not None else ""
+
+
+def blender_extracted_files_directory():
+    """Return the existing Blender data-files location used for SDF extracts."""
+    path = bpy.utils.user_resource(
+        "DATAFILES", path=os.path.join("afop_mesh_tool", "sdf_cache"), create=False
+    )
+    if path:
+        return path
+    return os.path.join(bpy.app.tempdir, "afop_mesh_tool", "sdf_cache")
+
+
+def blender_sdf_index_cache_directory():
+    """Return the Blender data-files location for targeted SDF index caches."""
+    path = bpy.utils.user_resource(
+        "DATAFILES", path=os.path.join("afop_mesh_tool", "sdf_index_cache"), create=False
+    )
+    return path or os.path.join(bpy.app.tempdir, "afop_mesh_tool", "sdf_index_cache")
+
+
+def get_default_extracted_files_directory(context=None):
+    """Return the saved extraction folder, falling back to Blender data files."""
+    preferences = _addon_preferences(context)
+    if preferences is not None:
+        return preferences.default_extracted_files_directory or blender_extracted_files_directory()
+    return blender_extracted_files_directory()
+
+
 def apply_debug_logging_preference():
     """Restore the saved add-on logging preference after registration."""
-    addon = bpy.context.preferences.addons.get(__package__)
-    if addon is not None:
-        set_debug(addon.preferences.debug_logging)
+    preferences = _addon_preferences()
+    if preferences is not None:
+        set_debug(preferences.debug_logging)
 
 
 @bpy.app.handlers.persistent
@@ -51,6 +125,11 @@ def _on_load_post(filepath, *args, **kwargs):
             break
     except Exception as e:
         logger.exception("Load-post handler failed: %s", e)
+    try:
+        from . import operators_sdf
+        operators_sdf.schedule_cached_auto_load(reset=True)
+    except Exception as e:
+        logger.warning("Could not schedule cached SDF auto-load: %s", e)
 
 def _resolve_asset_name(new_path, old_asset):
     """
@@ -70,11 +149,18 @@ def _resolve_asset_name(new_path, old_asset):
 
 
 def _auto_load_mmb(self, context):
-    path = self.AssetPath
-    if not path or not os.path.isfile(path):
-        return
+    path = bpy.path.abspath(self.AssetPath) if self.AssetPath else ""
+    old_asset = addon_state.asset
+
+    # Clear the parsed asset immediately so editing the path cannot leave the
+    # import/export controls for the previously loaded MMB active.
+    addon_state.asset = None
+    if path:
+        self["ExportPath"] = os.path.dirname(os.path.abspath(path))
     try:
-        new_name = _resolve_asset_name(path, addon_state.asset)
+        if not path or not os.path.isfile(path):
+            return
+        new_name = _resolve_asset_name(path, old_asset)
         with open(path, 'rb') as file:
             sk_mesh = SkeletalMeshAsset()
             sk_mesh.parse(file)
@@ -83,6 +169,13 @@ def _auto_load_mmb(self, context):
         _check_vert_pos_mmb(sk_mesh, path)
     except Exception as e:
         logger.warning("MMB auto-load failed: %s", e)
+    finally:
+        if context and context.area:
+            context.area.tag_redraw()
+        for window in bpy.context.window_manager.windows:
+            for area in window.screen.areas:
+                if area.type == "PROPERTIES":
+                    area.tag_redraw()
 
 def _vert_count_changed():
     """Return True if any imported LOD Blender object has a different vert count than the MMB."""
@@ -192,6 +285,17 @@ def _set_export_uvs(self, value):
 class AFOPPreferences(bpy.types.AddonPreferences):
     bl_idname = __package__
 
+    default_game_directory: bpy.props.StringProperty(
+        name="Default Game Directory",
+        subtype='DIR_PATH',
+        description="Default AFOP folder containing the SDF archives for new and unsaved scenes",
+    )
+    default_extracted_files_directory: bpy.props.StringProperty(
+        name="Default Extracted Files",
+        subtype='DIR_PATH',
+        description="Default folder for MMB and mcloth files extracted from SDF archives",
+        default=blender_extracted_files_directory(),
+    )
     debug_logging: bpy.props.BoolProperty(
         name="Enable Debug Logging",
         default=False,
@@ -201,12 +305,105 @@ class AFOPPreferences(bpy.types.AddonPreferences):
 
     def draw(self, context):
         layout = self.layout
+        layout.prop(self, "default_game_directory")
+        layout.label(text="Used whenever the current scene has no game directory selected.")
+        layout.prop(self, "default_extracted_files_directory")
+        layout.label(text="Extracted assets are stored here unless the scene overrides it.")
+        cache_row = layout.row(align=True)
+        cache_button = cache_row.row(align=True)
+        cache_button.ui_units_x = 7.0
+        cache_button.operator(
+            "object.clear_sdf_index_cache",
+            text="Clear Cache",
+            icon="TRASH",
+        )
+        layout.separator()
         layout.prop(self, "debug_logging")
         layout.label(text="Diagnostic messages are written to Blender's system console.")
 
 
+class SDFAssetListItem(bpy.types.PropertyGroup):
+    """One searchable MMB result from the currently loaded SDF index."""
+
+    asset_path: bpy.props.StringProperty(options={'SKIP_SAVE'})
+    archive_label: bpy.props.StringProperty(options={'SKIP_SAVE'})
+    entry_id: bpy.props.IntProperty(default=-1, options={'SKIP_SAVE'})
+
+
+def _get_sdf_game_directory(self):
+    """Use the scene override when present, otherwise the saved add-on default."""
+    return self.get("sdf_game_directory", "") or get_default_game_directory()
+
+
+def _set_sdf_game_directory(self, value):
+    self["sdf_game_directory"] = value
+
+
+def _get_sdf_extracted_directory(self):
+    """Use the scene extraction folder when present, otherwise the saved default."""
+    return self.get("sdf_extracted_directory", "") or get_default_extracted_files_directory()
+
+
+def _set_sdf_extracted_directory(self, value):
+    self["sdf_extracted_directory"] = value
+
+
+def _get_export_path(self):
+    """Default exports to the directory containing the currently loaded asset."""
+    stored = self.get("ExportPath", "")
+    if stored:
+        return stored
+    asset_path = self.get("AssetPath", "")
+    return os.path.dirname(os.path.abspath(bpy.path.abspath(asset_path))) if asset_path else ""
+
+
+def _set_export_path(self, value):
+    self["ExportPath"] = value
+
+
 class SWOMTSettings(bpy.types.PropertyGroup):
     AssetPath: bpy.props.StringProperty(name="Asset Path", update=_auto_load_mmb)
+    ExportPath: bpy.props.StringProperty(
+        name="Export Path",
+        description="Folder where exported MMB and paired mcloth files are written",
+        get=_get_export_path,
+        set=_set_export_path,
+    )
+    sdf_browser_expanded: bpy.props.BoolProperty(
+        name="Load from Game Files",
+        default=False,
+    )
+    sdf_game_directory: bpy.props.StringProperty(
+        name="Game Directory",
+        description="AFOP game folder containing sdf.sdftoc and sdfdata files",
+        get=_get_sdf_game_directory,
+        set=_set_sdf_game_directory,
+    )
+    sdf_extracted_directory: bpy.props.StringProperty(
+        name="Extracted Files",
+        description="Folder for MMB and mcloth files extracted from SDF archives",
+        get=_get_sdf_extracted_directory,
+        set=_set_sdf_extracted_directory,
+    )
+    sdf_assets: bpy.props.CollectionProperty(
+        type=SDFAssetListItem,
+        options={'SKIP_SAVE'},
+    )
+    sdf_search: bpy.props.StringProperty(
+        name="Filter MMB Files",
+        description="Filter indexed MMB paths using one or more search terms",
+        options={'SKIP_SAVE', 'TEXTEDIT_UPDATE'},
+        update=_on_sdf_search_update,
+    )
+    sdf_search_applied: bpy.props.StringProperty(options={'HIDDEN', 'SKIP_SAVE'})
+    sdf_search_result_status: bpy.props.StringProperty(options={'HIDDEN', 'SKIP_SAVE'})
+    sdf_asset_index: bpy.props.IntProperty(default=-1, min=-1, options={'SKIP_SAVE'})
+    sdf_result_generation: bpy.props.IntProperty(default=-1, options={'HIDDEN', 'SKIP_SAVE'})
+    sdf_load_as_asset: bpy.props.BoolProperty(
+        name="Load as Asset",
+        description="Keep the selected game MMB loaded in Asset Path after importing it",
+        default=True,
+    )
     overwrite_existing: bpy.props.BoolProperty(
         name="Overwrite existing file",
         default=False,
@@ -258,4 +455,4 @@ class SWOMTSettings(bpy.types.PropertyGroup):
         default=True,
     )
 
-CLASSES = (AFOPPreferences, SWOMTSettings)
+CLASSES = (AFOPPreferences, SDFAssetListItem, SWOMTSettings)

@@ -7,7 +7,7 @@ import urllib.request
 
 import bpy
 
-RAW_BASE = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/master"
+RAW_BASE = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/master-refactor-dev"
 RAW_INIT_URL = f"{RAW_BASE}/__init__.py"
 
 CODE_FILES = (
@@ -23,10 +23,14 @@ CODE_FILES = (
     "meshlet.py",
     "mcloth.py",
     "mmb.py",
+    "oodle_helper.py",
     "operators_bones.py",
     "operators_files.py",
     "operators_io.py",
     "operators_mesh.py",
+    "operators_sdf.py",
+    "sdf_reader.py",
+    "sdf_toc.py",
     "settings.py",
     "ui.py",
     "updater.py",

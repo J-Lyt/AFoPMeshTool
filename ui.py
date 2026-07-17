@@ -2,7 +2,7 @@
 
 import bpy
 
-from . import addon_state, bl_info, updater
+from . import addon_state, bl_info, operators_sdf, updater
 from .settings import _vert_count_changed
 
 class SWOMTPanel(bpy.types.Panel):
@@ -43,7 +43,98 @@ class SWOMTPanel(bpy.types.Panel):
         row = layout.row(align=True)
         row.prop(SWOMT, "AssetPath", text="Asset Path")
         row.operator("object.browse_mmb_file", text="", icon="FILE_FOLDER")
+        export_path_row = layout.row(align=True)
+        export_path_row.prop(SWOMT, "ExportPath", text="Export Path")
+        export_path_row.operator("object.browse_export_directory", text="", icon="FILE_FOLDER")
         layout.prop(SWOMT, "overwrite_existing")
+
+        sdf_box = layout.box()
+        header = sdf_box.row()
+        header.prop(
+            SWOMT,
+            "sdf_browser_expanded",
+            text="",
+            icon='TRIA_DOWN' if SWOMT.sdf_browser_expanded else 'TRIA_RIGHT',
+            emboss=False,
+        )
+        header.label(text="Load from Game Files", icon="PACKAGE")
+        if SWOMT.sdf_browser_expanded:
+            folder_row = sdf_box.row(align=True)
+            status = operators_sdf.get_ui_status()
+            path_row = folder_row.row(align=True)
+            path_row.prop(SWOMT, "sdf_game_directory", text="Game Directory")
+            folder_row.operator(
+                "object.browse_sdf_directory",
+                text="",
+                icon="FILE_FOLDER",
+            )
+            reload_row = folder_row.row(align=True)
+            reload_row.enabled = status["phase"] != "loading"
+            reload_row.operator(
+                "object.index_sdf_archives",
+                text="",
+                icon="FILE_REFRESH",
+            )
+
+            extract_row = sdf_box.row(align=True)
+            extract_path_row = extract_row.row(align=True)
+            extract_path_row.prop(SWOMT, "sdf_extracted_directory", text="Extracted Files")
+            extract_row.operator(
+                "object.browse_sdf_extracted_directory",
+                text="",
+                icon="FILE_FOLDER",
+            )
+            reload_spacer = extract_row.row(align=True)
+            reload_spacer.enabled = False
+            reload_spacer.operator(
+                "object.index_sdf_archives",
+                text="",
+                icon="BLANK1",
+                emboss=False,
+            )
+
+            if status["phase"] == "loading":
+                sdf_box.label(
+                    text=f"{status['status']} ({status['progress']:.0%})",
+                    icon="TIME",
+                )
+            elif status["phase"] == "error":
+                sdf_box.label(text=status["status"], icon="ERROR")
+            elif status["phase"] == "ready":
+                if status["status"]:
+                    sdf_box.label(text=status["status"], icon="CHECKMARK")
+                if status["warning"]:
+                    sdf_box.label(text=status["warning"], icon="ERROR")
+                sdf_box.prop(SWOMT, "sdf_search", text="", icon="VIEWZOOM")
+                if SWOMT.sdf_search_applied.strip():
+                    if SWOMT.sdf_search_result_status:
+                        sdf_box.label(text=SWOMT.sdf_search_result_status, icon="INFO")
+                    sdf_box.template_list(
+                        "SWOMT_UL_sdf_assets",
+                        "",
+                        SWOMT,
+                        "sdf_assets",
+                        SWOMT,
+                        "sdf_asset_index",
+                        rows=8,
+                    )
+                    action_column = sdf_box.column(align=True)
+                    action_column.enabled = bool(SWOMT.sdf_assets)
+                    action_row = action_column.row(align=True)
+                    load_op = action_row.operator(
+                        "object.import_sdf_mmb", text="Load Selected"
+                    )
+                    load_op.import_lod0 = False
+                    import_op = action_row.operator(
+                        "object.import_sdf_mmb", text="Import Selected", icon="IMPORT"
+                    )
+                    import_op.import_lod0 = True
+                    option_split = action_column.split(factor=0.5)
+                    option_split.column()
+                    option_column = option_split.column()
+                    option_column.prop(SWOMT, "sdf_load_as_asset", text="Load as Asset")
+            else:
+                sdf_box.label(text=status["status"], icon="INFO")
 
         layout.separator()
         row = layout.row()

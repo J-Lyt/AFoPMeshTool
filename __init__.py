@@ -3,7 +3,7 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt, SaintBaron",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 92),
+    "version": (0, 1, 93),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 11-17.",
     "category": "Import-Export",
@@ -31,7 +31,7 @@ except OSError:
 # applying an update. This one-time bridge retrieves missing v0.1.71 modules
 # before importing them. Fresh zip installs and all later updates already carry
 # the complete manifest, so the network path is not used normally.
-_RAW_BASE = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/master"
+_RAW_BASE = "https://raw.githubusercontent.com/J-Lyt/AFoPMeshTool/master-refactor-dev"
 _REQUIRED_SPLIT_MODULES = (
     "addon_state.py",
     "binary_io.py",
@@ -43,10 +43,14 @@ _REQUIRED_SPLIT_MODULES = (
     "log.py",
     "meshlet.py",
     "mmb.py",
+    "oodle_helper.py",
     "operators_bones.py",
     "operators_files.py",
     "operators_io.py",
     "operators_mesh.py",
+    "operators_sdf.py",
+    "sdf_reader.py",
+    "sdf_toc.py",
     "settings.py",
     "ui.py",
     "updater.py",
@@ -114,6 +118,7 @@ from . import operators_bones
 from . import operators_files
 from . import operators_io
 from . import operators_mesh
+from . import operators_sdf
 from . import settings
 from . import ui
 from . import updater
@@ -123,8 +128,10 @@ from . import updater
 # operator availability behave exactly as before the module split.
 classes = (
     settings.AFOPPreferences,
+    settings.SDFAssetListItem,
     settings.SWOMTSettings,
     operators_io.BrowseMMBFile,
+    operators_io.BrowseExportDirectory,
     operators_mesh.ComputeNormals,
     operators_mesh.ClearNormals,
     operators_io.ImportAllLOD0s,
@@ -132,6 +139,12 @@ classes = (
     operators_io.ImportAllLOD2s,
     operators_io.ImportAllLOD3s,
     operators_io.ExportAllLODs,
+    operators_sdf.SDFAssetList,
+    operators_sdf.BrowseSDFDirectory,
+    operators_sdf.BrowseSDFExtractedDirectory,
+    operators_sdf.ClearSDFIndexCache,
+    operators_sdf.IndexSDFArchives,
+    operators_sdf.ImportSDFMMB,
     operators_bones.RemapMeshBone,
     operators_bones.AddMeshBone,
     operators_bones.MergeSkeletons,
@@ -162,10 +175,12 @@ def register():
     if settings._on_load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(settings._on_load_post)
     settings.apply_debug_logging_preference()
+    operators_sdf.schedule_cached_auto_load()
     updater.start_update_check()
 
 
 def unregister():
+    operators_sdf.shutdown()
     if settings._on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(settings._on_load_post)
     if hasattr(bpy.types.Scene, "SWOMT"):
