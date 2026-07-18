@@ -365,7 +365,8 @@ class Oodle:
 # Archive
 # ---------------------------------------------------------------------------
 # Full archive parsing remains cache-free here. The Blender integration owns the
-# separate targeted cache containing only MMB and mcloth index records.
+# separate targeted cache containing the MMB, mcloth, mgraphobject,
+# mcompoundnode, and texture records needed by Blender imports.
 # The TOC's texture-header table: `dds_slot_count` (TocHeader u32 @ 0x18) slots
 # of 152 bytes each, laid out as [u32 header_len <= 148][header bytes][pad].
 # An asset's dds_index indexes this table DIRECTLY (slot = dds_index * 152) --

@@ -30,8 +30,11 @@ extraction folder defaults to Blender's user data-files location.
 1. Expand **Load from Game Files** in the AFoP Mesh Tool panel.
 2. Select the AFOP game folder containing `sdf.sdftoc` and the `.sdfdata` files.
 3. The archives load automatically; use **Reload SDF Archives** if they need refreshing.
-4. Type in the search field to filter the indexed `.mmb` paths.
-5. Select an asset. Use **Load Selected** to extract and make it the current
+4. Enable **Import Materials and Textures** before **Import Selected** to read the
+   matching `.mgraphobject` or `.mcompoundnode`, extract its referenced textures,
+   and assign Blender materials to the imported LOD0 render mesh parts.
+5. Type in the search field to filter the indexed `.mmb` paths.
+6. Select an asset. Use **Load Selected** to extract and make it the current
    Asset Path without importing, or click **Import Selected** to import LOD0.
    The **Load as Asset** checkbox beneath Import Selected is enabled by default;
    uncheck it to import through a temporary file without replacing the current asset.
@@ -42,7 +45,7 @@ latest Windows x64 `oodle-data-shared.dll` from the
 [OodleUE release](https://github.com/WorkingRobot/OodleUE/releases/latest) and
 installs only that DLL beside the add-on.
 
-Extracted `.mmb` and `.mcloth` files are stored in the configured
+Extracted `.mmb`, `.mcloth`, and imported `.dds` texture files are stored in the configured
 **Extracted Files** directory. Archive indices are cached and reused
 automatically; use **Reload SDF Archives** after clearing the cache or when the
 game files change.

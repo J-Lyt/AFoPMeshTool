@@ -293,7 +293,7 @@ class AFOPPreferences(bpy.types.AddonPreferences):
     default_extracted_files_directory: bpy.props.StringProperty(
         name="Default Extracted Files",
         subtype='DIR_PATH',
-        description="Default folder for MMB and mcloth files extracted from SDF archives",
+        description="Default folder for MMB, mcloth, and texture files extracted from SDF archives",
         default=blender_extracted_files_directory(),
     )
     debug_logging: bpy.props.BoolProperty(
@@ -381,7 +381,7 @@ class SWOMTSettings(bpy.types.PropertyGroup):
     )
     sdf_extracted_directory: bpy.props.StringProperty(
         name="Extracted Files",
-        description="Folder for MMB and mcloth files extracted from SDF archives",
+        description="Folder for MMB, mcloth, and texture files extracted from SDF archives",
         get=_get_sdf_extracted_directory,
         set=_set_sdf_extracted_directory,
     )
@@ -403,6 +403,15 @@ class SWOMTSettings(bpy.types.PropertyGroup):
         name="Load as Asset",
         description="Keep the selected game MMB loaded in Asset Path after importing it",
         default=True,
+    )
+    sdf_import_materials: bpy.props.BoolProperty(
+        name="Import Materials and Textures",
+        description=(
+            "Read the selected MMB's mgraphobject or mcompoundnode, extract its "
+            "referenced textures, and assign Blender materials to imported LOD0 "
+            "render meshes; CLOTH_SIM meshes are excluded"
+        ),
+        default=False,
     )
     overwrite_existing: bpy.props.BoolProperty(
         name="Overwrite existing file",

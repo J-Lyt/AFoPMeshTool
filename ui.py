@@ -133,6 +133,11 @@ class SWOMTPanel(bpy.types.Panel):
                     option_split.column()
                     option_column = option_split.column()
                     option_column.prop(SWOMT, "sdf_load_as_asset", text="Load as Asset")
+                    action_column.prop(
+                        SWOMT,
+                        "sdf_import_materials",
+                        text="Import Materials and Textures",
+                    )
             else:
                 sdf_box.label(text=status["status"], icon="INFO")
 

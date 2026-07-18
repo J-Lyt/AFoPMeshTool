@@ -1,10 +1,9 @@
 """Browse AFOP SDF archives and import cached MMB assets directly into Blender."""
 
-from __future__ import annotations
-
 import hashlib
 import os
 import pickle
+import re
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -12,7 +11,7 @@ from pathlib import PurePosixPath
 
 import bpy
 
-from . import addon_state, oodle_helper
+from . import addon_state, material_import, mgraph, oodle_helper
 from .log import logger
 from .mmb import SkeletalMeshAsset
 from . import sdf_toc
@@ -27,7 +26,15 @@ _OODLE_NAMES = (
     "oo2core_win64.dll",
 )
 _MAX_SEARCH_RESULTS = 500
-_INDEX_CACHE_VERSION = 1
+_INDEX_CACHE_VERSION = 3
+_MATERIAL_GRAPH_AUTO = "__AUTO__"
+_material_graph_dialog_items = [
+    (_MATERIAL_GRAPH_AUTO, "Automatic", "Use the highest-ranked material graph", 0)
+]
+
+
+def _material_graph_enum_items(_self, _context):
+    return _material_graph_dialog_items
 
 
 class _PrimitiveUnpickler(pickle.Unpickler):
@@ -59,6 +66,9 @@ class _SdfState:
         self.progress = 0.0
         self.entries: list[_IndexedAsset] = []
         self.sidecars: dict[str, list[_IndexedAsset]] = {}
+        self.graphs: dict[str, list[_IndexedAsset]] = {}
+        self.compounds: dict[str, list[_IndexedAsset]] = {}
+        self.textures: dict[str, list[_IndexedAsset]] = {}
 
 
 _state = _SdfState()
@@ -171,12 +181,15 @@ def _read_targeted_index_cache(cache_dir, toc_path):
         records = payload.get("assets")
         if not isinstance(records, (tuple, list)):
             return None
-        return [_unpack_asset(record) for record in records]
+        dds_block = payload.get("dds_block", b"")
+        if not isinstance(dds_block, bytes):
+            return None
+        return [_unpack_asset(record) for record in records], dds_block
     except (OSError, EOFError, pickle.PickleError, TypeError, ValueError, AttributeError):
         return None
 
 
-def _write_targeted_index_cache(cache_dir, toc_path, assets):
+def _write_targeted_index_cache(cache_dir, toc_path, assets, dds_block):
     os.makedirs(cache_dir, exist_ok=True)
     cache_path = _index_cache_path(cache_dir, toc_path)
     temporary = cache_path + ".tmp"
@@ -187,6 +200,10 @@ def _write_targeted_index_cache(cache_dir, toc_path, assets):
         "toc_size": stat.st_size,
         "toc_mtime_ns": stat.st_mtime_ns,
         "assets": tuple(_pack_asset(asset) for asset in assets),
+        # Texture payloads live in sdfdata, but their STF/DDS descriptors live
+        # only in this TOC block. Retain it so cached startup imports can decode
+        # textures without decrypting and rebuilding the whole file table.
+        "dds_block": bytes(dds_block),
     }
     try:
         with open(temporary, "wb") as stream:
@@ -251,6 +268,9 @@ def _load_archives_worker(root, generation, index_cache_dir=None, allow_rebuild=
 
         entries = []
         sidecars = {}
+        graphs = {}
+        compounds = {}
+        textures = {}
         errors = []
         archive_count = len(toc_paths)
         loaded_count = 0
@@ -265,13 +285,13 @@ def _load_archives_worker(root, generation, index_cache_dir=None, allow_rebuild=
             span = 1.0 / archive_count
             try:
                 archive = SdfArchive(toc_path, oodle_path)
-                targeted_assets = (
+                cached_target = (
                     cached_assets[toc_path] if not allow_rebuild else
                     (_read_targeted_index_cache(index_cache_dir, toc_path)
                      if index_cache_dir else None)
                 )
 
-                if targeted_assets is None:
+                if cached_target is None:
                     def decrypt_progress(done, total, sample=None):
                         fraction = done / total if total else 0.0
                         _set_progress(
@@ -294,16 +314,28 @@ def _load_archives_worker(root, generation, index_cache_dir=None, allow_rebuild=
                     archive.load(progress=decrypt_progress, parse_progress=parse_progress)
                     targeted_assets = [
                         asset for asset in archive.assets
-                        if asset.name.casefold().endswith((".mmb", ".mcloth"))
+                        if asset.name.casefold().endswith(
+                            (
+                                ".mmb", ".mcloth", ".mgraphobject",
+                                ".mcompoundnode", ".dds",
+                            )
+                        )
                     ]
                     if index_cache_dir:
                         try:
-                            _write_targeted_index_cache(index_cache_dir, toc_path, targeted_assets)
+                            _write_targeted_index_cache(
+                                index_cache_dir,
+                                toc_path,
+                                targeted_assets,
+                                archive.dds_block,
+                            )
                         except OSError as error:
                             logger.warning("Could not write SDF index cache for %s: %s", toc_path, error)
                     archive.assets = []
                     rebuilt_count += 1
                 else:
+                    targeted_assets, cached_dds_block = cached_target
+                    archive.dds_block = cached_dds_block
                     _set_progress(
                         generation,
                         "loading",
@@ -320,6 +352,12 @@ def _load_archives_worker(root, generation, index_cache_dir=None, allow_rebuild=
                         entries.append(indexed)
                     elif lower_name.endswith(".mcloth"):
                         sidecars.setdefault(lower_name, []).append(indexed)
+                    elif lower_name.endswith(".mgraphobject"):
+                        graphs.setdefault(lower_name, []).append(indexed)
+                    elif lower_name.endswith(".mcompoundnode"):
+                        compounds.setdefault(lower_name, []).append(indexed)
+                    elif lower_name.endswith(".dds"):
+                        textures.setdefault(lower_name, []).append(indexed)
                 loaded_count += 1
             except _Cancelled:
                 raise
@@ -341,6 +379,9 @@ def _load_archives_worker(root, generation, index_cache_dir=None, allow_rebuild=
                 raise _Cancelled()
             _state.entries = entries
             _state.sidecars = sidecars
+            _state.graphs = graphs
+            _state.compounds = compounds
+            _state.textures = textures
             _state.phase = "ready"
             _state.progress = 1.0
             if rebuilt_count:
@@ -370,6 +411,9 @@ def _load_archives_worker(root, generation, index_cache_dir=None, allow_rebuild=
                 return
             _state.entries = []
             _state.sidecars = {}
+            _state.graphs = {}
+            _state.compounds = {}
+            _state.textures = {}
             _state.phase = "error"
             _state.progress = 0.0
             _state.status = str(error)
@@ -386,6 +430,9 @@ def _finish_cached_auto_load_unavailable(
             return
         _state.entries = []
         _state.sidecars = {}
+        _state.graphs = {}
+        _state.compounds = {}
+        _state.textures = {}
         _state.phase = "idle"
         _state.progress = 0.0
         _state.status = status
@@ -490,6 +537,9 @@ def _start_archive_load(root, allow_rebuild):
         _state.progress = 0.0
         _state.entries = []
         _state.sidecars = {}
+        _state.graphs = {}
+        _state.compounds = {}
+        _state.textures = {}
     for scene in bpy.data.scenes:
         settings = getattr(scene, "SWOMT", None)
         if settings is not None:
@@ -541,6 +591,9 @@ def schedule_cached_auto_load(reset=False):
             _state.progress = 0.0
             _state.entries = []
             _state.sidecars = {}
+            _state.graphs = {}
+            _state.compounds = {}
+            _state.textures = {}
         for scene in bpy.data.scenes:
             settings = getattr(scene, "SWOMT", None)
             if settings is not None:
@@ -558,6 +611,9 @@ def shutdown():
         _state.phase = "idle"
         _state.entries = []
         _state.sidecars = {}
+        _state.graphs = {}
+        _state.compounds = {}
+        _state.textures = {}
     if bpy.app.timers.is_registered(_index_timer):
         bpy.app.timers.unregister(_index_timer)
     if bpy.app.timers.is_registered(_cached_auto_load_timer):
@@ -621,6 +677,541 @@ def _matching_sidecar(entry):
     return candidates[0] if candidates else None
 
 
+def _prefer_archive(candidates, archive):
+    """Keep exact logical-name resolution deterministic across game packs."""
+    return sorted(
+        candidates,
+        key=lambda candidate: (
+            candidate.archive is not archive,
+            candidate.archive_label.casefold(),
+            candidate.asset.name.casefold(),
+        ),
+    )
+
+
+def _material_family_reference(mesh_path, graph_path, references):
+    """Accept the confirmed base_01 -> base graph -> base_bind rig pattern."""
+    mesh_stem = os.path.splitext(os.path.basename(mesh_path))[0].casefold()
+    graph_stem = os.path.splitext(os.path.basename(graph_path))[0].casefold()
+    match = re.fullmatch(r"(.+)_\d+", mesh_stem)
+    if match is None or graph_stem != match.group(1):
+        return False
+    bind_stem = graph_stem + "_bind"
+    return any(
+        os.path.splitext(os.path.basename(reference))[0].casefold() == bind_stem
+        for reference in references
+    )
+
+
+def _ranked_material_graph_candidates(entry):
+    """Name-ranked graph candidates; contents provide final authority."""
+    mesh_name = entry.asset.name.casefold()
+    mesh_stem = os.path.splitext(os.path.basename(mesh_name))[0]
+    mesh_tokens = {token for token in _source_name_tokens(mesh_stem) if len(token) >= 4}
+    with _state.lock:
+        all_graphs = [candidate for values in _state.graphs.values() for candidate in values]
+
+    candidates = []
+    for candidate in all_graphs:
+        graph_stem = os.path.splitext(os.path.basename(candidate.asset.name))[0].casefold()
+        if graph_stem == mesh_stem:
+            name_score = 3
+            token_affinity = 0
+        elif graph_stem.startswith(mesh_stem) or mesh_stem.startswith(graph_stem):
+            name_score = 2
+            token_affinity = 0
+        else:
+            graph_tokens = {
+                token for token in _source_name_tokens(graph_stem) if len(token) >= 4
+            }
+            exact_overlap = mesh_tokens & graph_tokens
+            partial_overlap = {
+                (mesh_token, graph_token)
+                for mesh_token in mesh_tokens
+                for graph_token in graph_tokens
+                if mesh_token not in exact_overlap
+                and graph_token not in exact_overlap
+                and min(len(mesh_token), len(graph_token)) >= 4
+                and (mesh_token in graph_token or graph_token in mesh_token)
+            }
+            token_affinity = len(exact_overlap) * 4 + len(partial_overlap)
+            if not token_affinity:
+                # A full graph-library content scan would make every import
+                # unexpectedly expensive. Filename token/substring affinity is
+                # only a candidate gate; an exact MMB reference is still
+                # required below for these alias-named placement graphs.
+                continue
+            name_score = 1
+        candidates.append((name_score, token_affinity, candidate))
+
+    candidates.sort(
+        key=lambda item: (
+            -item[0],
+            -item[1],
+            item[2].archive is not entry.archive,
+            item[2].asset.name.casefold(),
+        )
+    )
+    return candidates
+
+
+def _material_graph_options(entry):
+    """Return every graph with an exact or confirmed family MMB reference."""
+    mesh_name = entry.asset.name.casefold()
+    options = []
+    successful_paths = set()
+    for name_score, token_affinity, candidate in _ranked_material_graph_candidates(entry):
+        logical_key = candidate.asset.name.casefold()
+        if logical_key in successful_paths:
+            continue
+        try:
+            data = candidate.archive.extract(candidate.asset)
+            if data[:4] != mgraph.MAGIC:
+                continue
+            references = {path.casefold() for path in mgraph.referenced_meshes(data)}
+            if mesh_name not in references and not _material_family_reference(
+                mesh_name, candidate.asset.name, references
+            ):
+                continue
+            richness = len(mgraph.texture_pool(data))
+            if richness == 0:
+                continue
+            successful_paths.add(logical_key)
+            options.append((candidate, data, richness, name_score, token_affinity))
+        except Exception as error:
+            logger.debug("Could not inspect material graph %s: %s", candidate.asset.name, error)
+    options.sort(
+        key=lambda item: (
+            -item[3],
+            -item[4],
+            -item[2],
+            item[0].archive is not entry.archive,
+            item[0].asset.name.casefold(),
+        )
+    )
+    return options
+
+
+def _material_graph(entry, selected_path=None):
+    """Return the selected or highest-ranked plausible material graph."""
+    mesh_name = entry.asset.name.casefold()
+    if selected_path and selected_path != _MATERIAL_GRAPH_AUTO:
+        with _state.lock:
+            selected = list(_state.graphs.get(selected_path.casefold(), ()))
+        for candidate in _prefer_archive(selected, entry.archive):
+            try:
+                data = candidate.archive.extract(candidate.asset)
+                if data[:4] != mgraph.MAGIC:
+                    continue
+                references = {path.casefold() for path in mgraph.referenced_meshes(data)}
+                if (
+                    mesh_name not in references
+                    and not _material_family_reference(
+                        mesh_name, candidate.asset.name, references
+                    )
+                ) or not mgraph.texture_pool(data):
+                    continue
+                return candidate, data
+            except Exception as error:
+                logger.debug(
+                    "Could not inspect selected material graph %s: %s",
+                    candidate.asset.name,
+                    error,
+                )
+        return None, None
+
+    best = None
+    for name_score, token_affinity, candidate in _ranked_material_graph_candidates(entry):
+        if name_score == 1 and best is not None:
+            # A conventional exact/prefix-name graph already succeeded; do not
+            # spend time probing weaker placement-name aliases as well.
+            break
+        try:
+            data = candidate.archive.extract(candidate.asset)
+            if data[:4] != mgraph.MAGIC:
+                continue
+            references = {path.casefold() for path in mgraph.referenced_meshes(data)}
+            exact_reference = mesh_name in references
+            family_reference = _material_family_reference(
+                mesh_name, candidate.asset.name, references
+            )
+            if references and not (exact_reference or family_reference):
+                continue
+            if name_score == 1 and not exact_reference:
+                continue
+            richness = len(mgraph.texture_pool(data))
+            if richness == 0:
+                continue
+            if name_score == 1:
+                # Alias-name candidates are admitted only by an exact embedded
+                # MMB reference, so the first successful one is authoritative.
+                return candidate, data
+            score = (
+                name_score * 10000
+                + int(exact_reference) * 5000
+                + int(family_reference) * 2500
+                + token_affinity * 100
+                + richness
+            )
+            if best is None or score > best[0]:
+                best = (score, candidate, data)
+        except Exception as error:
+            logger.debug("Could not inspect material graph %s: %s", candidate.asset.name, error)
+    return (best[1], best[2]) if best else (None, None)
+
+
+def _source_name_tokens(path):
+    return {
+        token
+        for token in re.split(r"[^a-z0-9]+", path.casefold())
+        if len(token) >= 2
+    }
+
+
+def _ranked_material_compound_candidates(entry):
+    """Return filename-ranked compound candidates for the selected MMB."""
+    mesh_name = entry.asset.name.casefold()
+    mesh_tokens = _source_name_tokens(mesh_name)
+    with _state.lock:
+        all_compounds = [
+            candidate
+            for values in _state.compounds.values()
+            for candidate in values
+        ]
+
+    candidates = []
+    for candidate in all_compounds:
+        overlap = len(mesh_tokens & _source_name_tokens(candidate.asset.name))
+        if overlap:
+            candidates.append((overlap, candidate))
+    candidates.sort(
+        key=lambda item: (
+            -item[0],
+            item[1].archive is not entry.archive,
+            item[1].asset.name.casefold(),
+        )
+    )
+    return candidates
+
+
+def _material_compound_options(entry):
+    """Return every candidate compound that directly references this exact MMB."""
+    mesh_name = entry.asset.name.casefold()
+    options = []
+    successful_paths = set()
+    for overlap, candidate in _ranked_material_compound_candidates(entry):
+        logical_key = candidate.asset.name.casefold()
+        if logical_key in successful_paths:
+            continue
+        try:
+            data = candidate.archive.extract(candidate.asset)
+            if data[:4] != mgraph.MAGIC:
+                continue
+            references = {path.casefold() for path in mgraph.referenced_meshes(data)}
+            if mesh_name not in references:
+                continue
+            richness = len(mgraph.texture_pool(data))
+            if richness == 0:
+                continue
+            successful_paths.add(logical_key)
+            options.append((candidate, data, richness, overlap))
+        except Exception as error:
+            logger.debug(
+                "Could not inspect material compound %s: %s",
+                candidate.asset.name,
+                error,
+            )
+    options.sort(
+        key=lambda item: (
+            -item[3],
+            -item[2],
+            item[0].archive is not entry.archive,
+            item[0].asset.name.casefold(),
+        )
+    )
+    return options
+
+
+def _material_compound(entry, selected_path=None):
+    """Find a BV2 compound node that directly references the selected MMB."""
+    mesh_name = entry.asset.name.casefold()
+    if selected_path and selected_path != _MATERIAL_GRAPH_AUTO:
+        with _state.lock:
+            selected = list(_state.compounds.get(selected_path.casefold(), ()))
+        for candidate in _prefer_archive(selected, entry.archive):
+            try:
+                data = candidate.archive.extract(candidate.asset)
+                if data[:4] != mgraph.MAGIC:
+                    continue
+                references = {path.casefold() for path in mgraph.referenced_meshes(data)}
+                if mesh_name not in references or not mgraph.texture_pool(data):
+                    continue
+                return candidate, data
+            except Exception as error:
+                logger.debug(
+                    "Could not inspect selected material compound %s: %s",
+                    candidate.asset.name,
+                    error,
+                )
+        return None, None
+
+    best = None
+    best_overlap = None
+    for overlap, candidate in _ranked_material_compound_candidates(entry):
+        if best_overlap is not None and overlap < best_overlap:
+            break
+        try:
+            data = candidate.archive.extract(candidate.asset)
+            if data[:4] != mgraph.MAGIC:
+                continue
+            references = {path.casefold() for path in mgraph.referenced_meshes(data)}
+            if mesh_name not in references:
+                continue
+            richness = len(mgraph.texture_pool(data))
+            if richness == 0:
+                continue
+            score = overlap * 10000 + richness
+            if best is None or score > best[0]:
+                best = (score, candidate, data)
+                best_overlap = overlap
+        except Exception as error:
+            logger.debug(
+                "Could not inspect material compound %s: %s",
+                candidate.asset.name,
+                error,
+            )
+    return (best[1], best[2]) if best else (None, None)
+
+
+def _material_source_options(entry):
+    """Return graph and compound choices in automatic-priority order."""
+    options = []
+    for candidate, data, richness, name_score, affinity in _material_graph_options(entry):
+        options.append((
+            "Graph",
+            candidate,
+            data,
+            richness,
+            name_score,
+            affinity,
+        ))
+    for candidate, data, richness, overlap in _material_compound_options(entry):
+        options.append((
+            "Compound",
+            candidate,
+            data,
+            richness,
+            overlap,
+            0,
+        ))
+    return options
+
+
+def _texture_entry(logical_path, preferred_archive):
+    with _state.lock:
+        candidates = list(_state.textures.get(logical_path.casefold(), ()))
+    ordered = _prefer_archive(candidates, preferred_archive)
+    return ordered[0] if ordered else None
+
+
+def _referenced_compound_data(data, preferred_archive):
+    """Extract compound interfaces needed to resolve graph-forwarded values."""
+    result = {}
+    for logical_path in mgraph.referenced_compounds(data):
+        with _state.lock:
+            candidates = list(_state.compounds.get(logical_path.casefold(), ()))
+        for candidate in _prefer_archive(candidates, preferred_archive):
+            try:
+                compound_data = candidate.archive.extract(candidate.asset)
+                if compound_data[:4] == mgraph.MAGIC:
+                    result[logical_path] = compound_data
+                    break
+            except Exception as error:
+                logger.debug(
+                    "Could not inspect referenced compound %s: %s",
+                    candidate.asset.name,
+                    error,
+                )
+    return result
+
+
+def _supplemental_material_bindings(entry, primary_entry, material_names, bindings):
+    """Fill composite-placement gaps from a strongly related species graph."""
+    unresolved = {
+        name.casefold(): name
+        for name in material_names
+        if not bindings.get(name, {}).get("shader")
+    }
+    if not unresolved:
+        return bindings
+
+    for _name_score, _affinity, candidate in _ranked_material_graph_candidates(entry):
+        if candidate.asset.name.casefold() == primary_entry.asset.name.casefold():
+            continue
+        try:
+            data = candidate.archive.extract(candidate.asset)
+            if data[:4] != mgraph.MAGIC or not mgraph.texture_pool(data):
+                continue
+            source_materials = {
+                name.casefold(): name for name, _shader in mgraph._graph_materials(data)
+            }
+            exact = set(unresolved) & set(source_materials)
+
+            graph_stem = os.path.splitext(os.path.basename(candidate.asset.name))[0].casefold()
+            species_aliases = {
+                key for key in unresolved
+                if key in _source_name_tokens(graph_stem) and "body" in source_materials
+            }
+            if not exact and not species_aliases:
+                continue
+
+            compound_sources = _referenced_compound_data(data, candidate.archive)
+            supplemental = mgraph.material_bindings(
+                data,
+                material_names,
+                compound_sources=compound_sources,
+            )
+            for key in exact:
+                name = unresolved[key]
+                if supplemental.get(name, {}).get("shader"):
+                    bindings[name] = supplemental[name]
+                    unresolved.pop(key, None)
+            body_name = source_materials.get("body")
+            if body_name is not None:
+                body_binding = mgraph.material_bindings(
+                    data,
+                    [body_name],
+                    compound_sources=compound_sources,
+                ).get(body_name)
+                if body_binding and body_binding.get("shader"):
+                    for key in species_aliases:
+                        name = unresolved.get(key)
+                        if name is not None:
+                            bindings[name] = dict(body_binding)
+                            unresolved.pop(key, None)
+            if not unresolved:
+                break
+        except Exception as error:
+            logger.debug(
+                "Could not inspect supplemental material graph %s: %s",
+                candidate.asset.name,
+                error,
+            )
+    return bindings
+
+
+def _extract_texture_to_cache(entry, extracted_directory):
+    destination = os.path.join(
+        _cache_root(entry.cache_key, extracted_directory),
+        *_safe_asset_parts(entry.asset.name),
+    )
+    if os.path.isfile(destination):
+        try:
+            with open(destination, "rb") as stream:
+                if stream.read(4) == b"DDS ":
+                    return destination
+        except OSError:
+            pass
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    temporary = destination + ".extract_tmp"
+    try:
+        converted = material_import.texture_to_dds(
+            entry.archive.extract(entry.asset), entry.asset
+        )
+        with open(temporary, "wb") as stream:
+            stream.write(converted)
+        os.replace(temporary, destination)
+    finally:
+        try:
+            if os.path.exists(temporary):
+                os.remove(temporary)
+        except OSError:
+            pass
+    return destination
+
+
+def _import_materials_for_entry(
+    entry, skeletal_mesh, extracted_directory, material_source_path=None
+):
+    material_names = [
+        mesh.name
+        for mesh in skeletal_mesh.meshes
+        if not mesh.name.casefold().endswith("_cloth_sim")
+    ]
+    selected_key = (material_source_path or _MATERIAL_GRAPH_AUTO).casefold()
+    if selected_key.endswith(".mcompoundnode"):
+        source_entry, source_data = _material_compound(
+            entry, selected_path=material_source_path
+        )
+    else:
+        source_entry, source_data = _material_graph(
+            entry,
+            selected_path=(
+                material_source_path if selected_key.endswith(".mgraphobject") else None
+            ),
+        )
+    if source_entry is None and selected_key == _MATERIAL_GRAPH_AUTO.casefold():
+        source_entry, source_data = _material_compound(entry)
+    elif source_entry is None:
+        raise LookupError(
+            f"The selected material source no longer references this MMB: "
+            f"{material_source_path}"
+        )
+    if source_entry is None:
+        raise LookupError(
+            "No matching mgraphobject or mcompoundnode was found in the loaded SDF archives"
+        )
+    compound_sources = (
+        _referenced_compound_data(source_data, source_entry.archive)
+        if source_entry.asset.name.casefold().endswith(".mgraphobject")
+        else {}
+    )
+    bindings = mgraph.material_bindings(
+        source_data, material_names, compound_sources=compound_sources
+    )
+    if source_entry.asset.name.casefold().endswith(".mgraphobject"):
+        bindings = _supplemental_material_bindings(
+            entry, source_entry, material_names, bindings
+        )
+    if not bindings:
+        raise LookupError(f"{source_entry.asset.name} contains no usable material textures")
+
+    texture_files = {}
+    missing = []
+    failed = []
+    logical_paths = {
+        binding.get(role)
+        for binding in bindings.values()
+        for role in ("d", "n", "m", "a")
+        if binding.get(role)
+    }
+    for logical_path in sorted(logical_paths, key=str.casefold):
+        texture = _texture_entry(logical_path, source_entry.archive)
+        if texture is None:
+            missing.append(logical_path)
+            continue
+        try:
+            texture_files[logical_path.casefold()] = _extract_texture_to_cache(
+                texture, extracted_directory
+            )
+        except Exception as error:
+            logger.warning("Could not import texture %s: %s", logical_path, error)
+            failed.append(logical_path)
+
+    if logical_paths and not texture_files:
+        raise LookupError(
+            f"No referenced textures from {source_entry.asset.name} could be extracted"
+        )
+    assigned = material_import.assign_materials(
+        skeletal_mesh,
+        bindings,
+        texture_files,
+        source_entry.asset.name,
+        lod_index=0,
+    )
+    return assigned, len(texture_files), missing, failed, source_entry.asset.name
+
+
 class SDFAssetList(bpy.types.UIList):
     """Searchable list of MMB asset paths found in loaded SDF archives."""
 
@@ -682,7 +1273,10 @@ class ClearSDFIndexCache(bpy.types.Operator):
 
     bl_idname = "object.clear_sdf_index_cache"
     bl_label = "Clear SDF Index Cache"
-    bl_description = "Delete cached MMB/mcloth indexes; extracted asset files are preserved"
+    bl_description = (
+        "Delete cached MMB, mcloth, material-graph, compound-node, and texture indexes; "
+        "extracted asset files are preserved"
+    )
 
     def execute(self, context):
         from .settings import blender_sdf_index_cache_directory
@@ -738,12 +1332,22 @@ class IndexSDFArchives(bpy.types.Operator):
 
 
 class ImportSDFMMB(bpy.types.Operator):
-    """Import the selected MMB and optionally retain it as the current asset."""
+    """Import the selected MMB, with optional graph materials and textures."""
 
     bl_idname = "object.import_sdf_mmb"
     bl_label = "Import Selected MMB"
 
     import_lod0: bpy.props.BoolProperty(default=True, options={"HIDDEN"})
+    material_source: bpy.props.EnumProperty(
+        name="Material Source",
+        description=(
+            "Choose which matching mgraphobject or mcompoundnode "
+            "supplies the materials"
+        ),
+        items=_material_graph_enum_items,
+        default=0,
+        options={"SKIP_SAVE"},
+    )
 
     @classmethod
     def description(cls, context, properties):
@@ -755,6 +1359,49 @@ class ImportSDFMMB(bpy.types.Operator):
     def poll(cls, context):
         settings = getattr(context.scene, "SWOMT", None)
         return settings is not None and 0 <= settings.sdf_asset_index < len(settings.sdf_assets)
+
+    def invoke(self, context, _event):
+        global _material_graph_dialog_items
+        settings = context.scene.SWOMT
+        if not self.import_lod0 or not settings.sdf_import_materials:
+            return self.execute(context)
+        item = settings.sdf_assets[settings.sdf_asset_index]
+        entry = _entry_for_id(item.entry_id)
+        if entry is None:
+            return self.execute(context)
+        try:
+            options = _material_source_options(entry)
+        except Exception as error:
+            logger.debug("Could not enumerate material sources for %s: %s", item.asset_path, error)
+            return self.execute(context)
+        if len(options) <= 1:
+            return self.execute(context)
+
+        _material_graph_dialog_items = [
+            (
+                _MATERIAL_GRAPH_AUTO,
+                "Automatic (Recommended)",
+                "Use the highest-ranked graph, then the compound fallback",
+                0,
+            )
+        ]
+        for index, (kind, candidate, _data, richness, _rank, _affinity) in enumerate(
+            options, start=1
+        ):
+            _material_graph_dialog_items.append((
+                candidate.asset.name,
+                f"[{kind}] {candidate.asset.name}",
+                f"{richness} texture constant(s), archive: {candidate.archive_label}",
+                index,
+            ))
+        self.material_source = _MATERIAL_GRAPH_AUTO
+        return context.window_manager.invoke_props_dialog(self, width=900)
+
+    def draw(self, _context):
+        layout = self.layout
+        layout.label(text="Multiple material sources match this MMB.", icon="MATERIAL")
+        layout.label(text="Choose the texture/material variant to import:")
+        layout.prop(self, "material_source", text="")
 
     def execute(self, context):
         settings = context.scene.SWOMT
@@ -817,6 +1464,7 @@ class ImportSDFMMB(bpy.types.Operator):
             self.report({"INFO"}, f"{action} {item.asset_path}")
             return {"FINISHED"}
 
+        material_summary = None
         try:
             from .operators_io import _import_all_lods
             if load_as_asset:
@@ -824,14 +1472,31 @@ class ImportSDFMMB(bpy.types.Operator):
                 if addon_state.asset is None:
                     self.report({"ERROR"}, "The extracted MMB could not be parsed.")
                     return {"CANCELLED"}
+                imported_asset = addon_state.asset
                 result = _import_all_lods(context, 0)
             else:
+                imported_asset = probe
                 result = _import_all_lods(
                     context,
                     0,
                     skeletal_mesh=probe,
                     asset_path=mmb_path,
                 )
+            if settings.sdf_import_materials and "FINISHED" in result:
+                try:
+                    material_summary = _import_materials_for_entry(
+                        entry,
+                        imported_asset,
+                        settings.sdf_extracted_directory,
+                        material_source_path=self.material_source,
+                    )
+                except Exception as error:
+                    logger.warning(
+                        "MMB imported, but materials could not be imported for %s: %s",
+                        item.asset_path,
+                        error,
+                    )
+                    self.report({"WARNING"}, f"Mesh imported without materials: {error}")
         except Exception as error:
             logger.exception("Could not import extracted SDF MMB %s: %s", mmb_path, error)
             self.report({"ERROR"}, f"LOD0 import failed: {error}")
@@ -841,7 +1506,21 @@ class ImportSDFMMB(bpy.types.Operator):
                 temporary_directory.cleanup()
 
         action = "Imported and loaded" if load_as_asset else "Imported"
-        self.report({"INFO"}, f"{action} LOD0 from {item.asset_path}")
+        if material_summary is None:
+            self.report({"INFO"}, f"{action} LOD0 from {item.asset_path}")
+        else:
+            assigned, texture_count, missing, failed, source_name = material_summary
+            self.report(
+                {"INFO"},
+                f"{action} LOD0 with {assigned} material(s) and "
+                f"{texture_count} texture(s) from {source_name}",
+            )
+            if missing or failed:
+                self.report(
+                    {"WARNING"},
+                    f"{len(missing)} referenced texture(s) were not indexed and "
+                    f"{len(failed)} could not be converted.",
+                )
         return result
 
 
