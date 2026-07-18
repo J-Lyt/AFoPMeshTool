@@ -105,6 +105,13 @@ class SWOMTPanel(bpy.types.Panel):
                     sdf_box.label(text=status["status"], icon="CHECKMARK")
                 if status["warning"]:
                     sdf_box.label(text=status["warning"], icon="ERROR")
+                type_row = sdf_box.row(align=True)
+                type_row.alignment = "LEFT"
+                type_row.prop(SWOMT, "sdf_show_mmb", text="MMB")
+                type_row.prop(SWOMT, "sdf_show_mgraphobject", text="MGraph")
+                type_row.prop(
+                    SWOMT, "sdf_show_mcompoundnode", text="MCompoundNode"
+                )
                 sdf_box.prop(SWOMT, "sdf_search", text="", icon="VIEWZOOM")
                 if SWOMT.sdf_search_applied.strip():
                     if SWOMT.sdf_search_result_status:
@@ -121,12 +128,28 @@ class SWOMTPanel(bpy.types.Panel):
                     action_column = sdf_box.column(align=True)
                     action_column.enabled = bool(SWOMT.sdf_assets)
                     action_row = action_column.row(align=True)
-                    load_op = action_row.operator(
+                    selected_item = (
+                        SWOMT.sdf_assets[SWOMT.sdf_asset_index]
+                        if 0 <= SWOMT.sdf_asset_index < len(SWOMT.sdf_assets)
+                        else None
+                    )
+                    selected_is_mmb = (
+                        selected_item is not None
+                        and selected_item.asset_type == operators_sdf._ASSET_MMB
+                    )
+                    load_button = action_row.row(align=True)
+                    load_button.enabled = selected_is_mmb
+                    load_op = load_button.operator(
                         "object.import_sdf_mmb", text="Load Selected"
                     )
                     load_op.import_lod0 = False
+                    import_label = (
+                        "Import Selected"
+                        if selected_is_mmb
+                        else "Import Referenced MMBs"
+                    )
                     import_op = action_row.operator(
-                        "object.import_sdf_mmb", text="Import Selected", icon="IMPORT"
+                        "object.import_sdf_mmb", text=import_label, icon="IMPORT"
                     )
                     import_op.import_lod0 = True
                     option_split = action_column.split(factor=0.5)

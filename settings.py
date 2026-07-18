@@ -323,9 +323,10 @@ class AFOPPreferences(bpy.types.AddonPreferences):
 
 
 class SDFAssetListItem(bpy.types.PropertyGroup):
-    """One searchable MMB result from the currently loaded SDF index."""
+    """One searchable MMB, graph, or compound result from the SDF index."""
 
     asset_path: bpy.props.StringProperty(options={'SKIP_SAVE'})
+    asset_type: bpy.props.StringProperty(options={'SKIP_SAVE'})
     archive_label: bpy.props.StringProperty(options={'SKIP_SAVE'})
     entry_id: bpy.props.IntProperty(default=-1, options={'SKIP_SAVE'})
 
@@ -389,9 +390,30 @@ class SWOMTSettings(bpy.types.PropertyGroup):
         type=SDFAssetListItem,
         options={'SKIP_SAVE'},
     )
+    sdf_show_mmb: bpy.props.BoolProperty(
+        name="MMB",
+        description="Show MMB mesh assets in search results",
+        default=True,
+        options={'SKIP_SAVE'},
+        update=_on_sdf_search_update,
+    )
+    sdf_show_mgraphobject: bpy.props.BoolProperty(
+        name="MGraph",
+        description="Show mgraphobject material sources in search results",
+        default=False,
+        options={'SKIP_SAVE'},
+        update=_on_sdf_search_update,
+    )
+    sdf_show_mcompoundnode: bpy.props.BoolProperty(
+        name="MCompoundNode",
+        description="Show mcompoundnode material sources in search results",
+        default=False,
+        options={'SKIP_SAVE'},
+        update=_on_sdf_search_update,
+    )
     sdf_search: bpy.props.StringProperty(
-        name="Filter MMB Files",
-        description="Filter indexed MMB paths using one or more search terms",
+        name="Filter Game Assets",
+        description="Filter the enabled MMB, mgraphobject, and mcompoundnode paths",
         options={'SKIP_SAVE', 'TEXTEDIT_UPDATE'},
         update=_on_sdf_search_update,
     )
@@ -401,15 +423,18 @@ class SWOMTSettings(bpy.types.PropertyGroup):
     sdf_result_generation: bpy.props.IntProperty(default=-1, options={'HIDDEN', 'SKIP_SAVE'})
     sdf_load_as_asset: bpy.props.BoolProperty(
         name="Load as Asset",
-        description="Keep the selected game MMB loaded in Asset Path after importing it",
+        description=(
+            "Keep the selected MMB loaded in Asset Path after importing it; "
+            "for a graph or compound containing several MMBs, keep the last one loaded"
+        ),
         default=True,
     )
     sdf_import_materials: bpy.props.BoolProperty(
         name="Import Materials and Textures",
         description=(
-            "Read the selected MMB's mgraphobject or mcompoundnode, extract its "
-            "referenced textures, and assign Blender materials to imported LOD0 "
-            "render meshes; CLOTH_SIM meshes are excluded"
+            "Use the selected graph/compound or find a source for the selected "
+            "MMB, extract its referenced textures, and assign Blender materials "
+            "to imported LOD0 render meshes; CLOTH_SIM meshes are excluded"
         ),
         default=False,
     )

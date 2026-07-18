@@ -30,14 +30,14 @@ extraction folder defaults to Blender's user data-files location.
 1. Expand **Load from Game Files** in the AFoP Mesh Tool panel.
 2. Select the AFOP game folder containing `sdf.sdftoc` and the `.sdfdata` files.
 3. The archives load automatically; use **Reload SDF Archives** if they need refreshing.
-4. Enable **Import Materials and Textures** before **Import Selected** to read the
-   matching `.mgraphobject` or `.mcompoundnode`, extract its referenced textures,
-   and assign Blender materials to the imported LOD0 render mesh parts.
-5. Type in the search field to filter the indexed `.mmb` paths.
-6. Select an asset. Use **Load Selected** to extract and make it the current
-   Asset Path without importing, or click **Import Selected** to import LOD0.
-   The **Load as Asset** checkbox beneath Import Selected is enabled by default;
-   uncheck it to import through a temporary file without replacing the current asset.
+4. Choose which asset types appear in search results. **MMB** is enabled by
+   default; **MGraph** and **MCompoundNode** can be enabled independently.
+5. Search and select an asset. An MMB can be loaded or imported directly;
+   importing a graph or compound imports all its indexed MMB references,
+   including references provided by linked compound nodes.
+6. Enable **Import Materials and Textures** to extract referenced textures and
+   apply materials. A selected graph or compound is used as the material source.
+   **Load as Asset** keeps the selected MMB, or the last referenced MMB, loaded.
 
 The add-on first looks for an Oodle runtime (`oodle-data-shared.dll` or
 `oo2core_*.dll`) in its own folder. If one is not installed, it downloads the
