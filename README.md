@@ -1,51 +1,58 @@
+# AFoP Mesh Tool
+
+A Blender 5.0 add-on for importing and exporting meshes from
+*Avatar: Frontiers of Pandora*.
+
 Based on the work by [AlexP0](https://github.com/AlexP0) for [SWOutlawsMeshTool](https://github.com/AlexP0/SWOutlawsMeshTool)
 
-**Installation**
+## Installation
+
 1. Click the green '<> Code' button and then 'Download ZIP'
 2. In Blender, Go to 'Edit > Preferences'
-3. Go to Add-ons
-4. Click the little downward arrow top-right corner
+3. Go to 'Add-ons'
+4. Click the downward arrow in the top-right corner
 5. Install from Disk...
-6. Select the .zip file you downloaded.
+6. Select the downloaded .zip file.
 
-**Usage**
-1. Open the **AFoP Mesh Tool** panel in Blender's Scene Properties tab.
-2. Enter an `.mmb` file in **Asset Path**, or select one with the folder button.
-   The asset loads automatically when the path changes.
+## Importing and exporting
+
+1. Open **AFoP Mesh Tool** in Blender's Scene Properties tab.
+2. Select an `.mmb` file in **Asset Path**.
 3. Use the buttons under **Import** to import a LOD for every mesh, or expand an
    individual mesh and click **Import** beside the LOD you need.
-4. Make the required changes to the imported meshes.
-5. Set **Export Path** if needed. It defaults to the loaded asset's folder.
-6. Export an individual LOD from its mesh row, or use **Export All LODs**. By
-   default, exports are written as `*_MOD.mmb` with a paired `.mcloth` when one
-   exists; enable **Overwrite existing file** only when you intend to replace
-   the selected output.
+4. Edit the imported meshes.
+5. Set **Export Path** if required. It defaults to the source asset's folder.
+6. Export an individual LOD or use **Export All LODs**.
 
-**Loading directly from the game SDF archives**
+Exports are written as `*_MOD.mmb` by default, with a paired `.mcloth` when one
+exists. Enable **Overwrite existing file** only when you intend to replace the
+selected output.
 
-You can save the game folder and extraction destination under the add-on's
-**Default Game Directory** and **Default Extracted Files** preferences. The
-extraction folder defaults to Blender's user data-files location.
+## Loading assets from the game files
 
-1. Expand **Load from Game Files** in the AFoP Mesh Tool panel.
-2. Select the AFOP game folder containing `sdf.sdftoc` and the `.sdfdata` files.
-3. The archives load automatically; use **Reload SDF Archives** if they need refreshing.
-4. Choose which asset types appear in search results. **MMB** is enabled by
-   default; **MGraph** and **MCompoundNode** can be enabled independently.
-5. Search and select an asset. An MMB can be loaded or imported directly;
-   importing a graph or compound imports all its indexed MMB references,
-   including references provided by linked compound nodes.
-6. Enable **Import Materials and Textures** to extract referenced textures and
-   apply materials. A selected graph or compound is used as the material source.
-   **Load as Asset** keeps the selected MMB, or the last referenced MMB, loaded.
+The add-on can search and extract assets directly from the game's SDF archives.
+Default game and extraction folders can be saved in the add-on preferences.
 
-The add-on first looks for an Oodle runtime (`oodle-data-shared.dll` or
-`oo2core_*.dll`) in its own folder. If one is not installed, it downloads the
-latest Windows x64 `oodle-data-shared.dll` from the
-[OodleUE release](https://github.com/WorkingRobot/OodleUE/releases/latest) and
-installs only that DLL beside the add-on.
+1. Expand **Load from Game Files**.
+2. Select the AFoP game folder containing the `.sdftoc` and `.sdfdata` files.
+3. Wait for the archive index to load.
+4. Choose which asset types to search. **MMB** is enabled by default;
+   **MGraph** and **MCompoundNode** are optional.
+5. Search for and select an asset, then load or import it.
 
-Extracted `.mmb`, `.mcloth`, and imported `.dds` texture files are stored in the configured
-**Extracted Files** directory. Archive indices are cached and reused
-automatically; use **Reload SDF Archives** after clearing the cache or when the
-game files change.
+Selecting an MGraph or MCompoundNode imports its referenced MMB files. 
+
+Enable **Import Materials and Textures** to extract the associated textures and build
+Blender materials. When several material sources are available, the importer
+allows the source to be selected.
+
+## Extracted files and archive cache
+
+Extracted `.mmb`, `.mcloth`, and `.dds` files are stored under **Extracted
+Files**. Archive indices are cached and reused automatically. Reload the SDF
+archives after clearing the cache or changing the installed game data.
+
+Reading the archives requires an Oodle runtime. The add-on uses a compatible
+DLL installed beside it or downloads the latest Windows x64 `oodle-data-shared.dll` from the
+[OodleUE release](https://github.com/WorkingRobot/OodleUE/releases/latest)
+when one is not available.

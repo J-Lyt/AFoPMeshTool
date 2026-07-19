@@ -161,6 +161,52 @@ class SWOMTPanel(bpy.types.Panel):
                         "sdf_import_materials",
                         text="Import Materials and Textures",
                     )
+                audit_status = operators_sdf.get_material_audit_status()
+                developer_box = sdf_box.box()
+                developer_header = developer_box.row(align=True)
+                developer_header.prop(
+                    SWOMT,
+                    "sdf_developer_tools_expanded",
+                    text="",
+                    icon=(
+                        'TRIA_DOWN'
+                        if SWOMT.sdf_developer_tools_expanded
+                        else 'TRIA_RIGHT'
+                    ),
+                    emboss=False,
+                )
+                developer_header.label(
+                    text="Developer Tools",
+                    icon=("TIME" if audit_status["phase"] == "running" else "TOOL_SETTINGS"),
+                )
+                if SWOMT.sdf_developer_tools_expanded:
+                    audit_row = developer_box.row(align=True)
+                    audit_row.enabled = audit_status["phase"] != "running"
+                    audit_row.operator(
+                        "object.audit_sdf_materials",
+                        text="Audit Material Corpus",
+                        icon="NODETREE",
+                    )
+                    if audit_status["phase"] == "running":
+                        developer_box.label(
+                            text=(
+                                f"{audit_status['status']} "
+                                f"({audit_status['progress']:.0%})"
+                            ),
+                            icon="TIME",
+                        )
+                    elif audit_status["phase"] == "complete":
+                        developer_box.label(
+                            text=audit_status["status"], icon="CHECKMARK"
+                        )
+                        developer_box.label(
+                            text=f"Reports: {audit_status['output_directory']}",
+                            icon="FILE_FOLDER",
+                        )
+                    elif audit_status["phase"] == "error":
+                        developer_box.label(
+                            text=audit_status["status"], icon="ERROR"
+                        )
             else:
                 sdf_box.label(text=status["status"], icon="INFO")
 

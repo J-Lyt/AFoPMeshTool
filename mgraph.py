@@ -57,10 +57,10 @@ _SURFACE_ALPHA_PINS = {
     "px_wl_haircard_testhyb.mshader": {105: "color"},
 }
 
-# Canonical Color/Normal/Material pins are usually 101/102/103, but a few
-# shaders use entirely different IDs. Preserve their declared roles instead of
-# falling back to filename suffixes (fur Color textures are deliberately named
-# *_fur_masks.dds and would otherwise be mistaken for the Material sampler).
+# Fallback used when the indexed .mshader declaration is unavailable. Normal
+# imports supply authored pin roles dynamically; fur remains here because its
+# Color texture is deliberately named *_fur_masks.dds and filename inference
+# would otherwise mistake it for the Material sampler.
 _DIRECT_TEXTURE_ROLE_PINS = {
     "px_character_gear_fur.mshader": {120: "d", 262: "m", 272: "n"},
 }
@@ -489,8 +489,8 @@ def _connected_material_alpha_textures(data):
     return result
 
 
-def _connected_material_role_textures(data):
-    """Return exact D/N/M bindings for shaders with nonstandard sampler pins."""
+def _connected_material_role_textures(data, shader_role_pins=None):
+    """Return exact D/N/M bindings using authored shader sampler pins."""
     try:
         tree = _bv2_plain(_Bv2Decoder(data).root())
     except (IndexError, KeyError, TypeError, ValueError):
@@ -513,8 +513,15 @@ def _connected_material_role_textures(data):
                     shader = node.get("ShaderFile")
                     if not (isinstance(mesh_name, str) and isinstance(shader, str)):
                         continue
-                    role_pins = _DIRECT_TEXTURE_ROLE_PINS.get(
-                        os.path.basename(shader).casefold()
+                    shader_key = shader.replace("\\", "/").lstrip("/").casefold()
+                    shader_name = os.path.basename(shader_key)
+                    supplied_pins = (shader_role_pins or {}).get(shader_key)
+                    if supplied_pins is None:
+                        supplied_pins = (shader_role_pins or {}).get(shader_name)
+                    role_pins = (
+                        dict(supplied_pins)
+                        if supplied_pins is not None
+                        else dict(_DIRECT_TEXTURE_ROLE_PINS.get(shader_name, {}))
                     )
                     if not role_pins:
                         continue
@@ -538,6 +545,204 @@ def _connected_material_role_textures(data):
                         }
                         for key in keys:
                             result.setdefault(key, roles)
+            for item in value.values():
+                visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    visit(tree)
+    return result
+
+
+def _compound_instance_texture_inputs(data):
+    """Return texture values connected to exposed pins of compound instances."""
+    try:
+        tree = _bv2_plain(_Bv2Decoder(data).root())
+    except (IndexError, KeyError, TypeError, ValueError):
+        return {}
+    result = {}
+
+    def visit(value):
+        if isinstance(value, dict):
+            nodes = value.get("nodesById")
+            connections = value.get("connectionsById")
+            if isinstance(nodes, dict) and isinstance(connections, (dict, list)):
+                connection_values = (
+                    list(connections.values()) if isinstance(connections, dict)
+                    else connections
+                )
+                for node_id, node in nodes.items():
+                    if not isinstance(node, dict) or node.get("type") != "internal:Compound":
+                        continue
+                    filename = node.get("filename")
+                    if not isinstance(filename, str):
+                        continue
+                    key = filename.replace("\\", "/").lstrip("/").casefold()
+                    pins = result.setdefault(key, {})
+                    for connection in connection_values:
+                        if not (
+                            isinstance(connection, list)
+                            and len(connection) == 4
+                            and connection[2] == node_id
+                        ):
+                            continue
+                        source = nodes.get(connection[0])
+                        path = source.get("value") if isinstance(source, dict) else None
+                        if isinstance(path, str) and _DDS_RE.search(path):
+                            pins.setdefault(connection[3], path)
+            for item in value.values():
+                visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    visit(tree)
+    return result
+
+
+def _forwarded_compound_role_textures(
+    data, compound_sources, shader_role_pins=None,
+):
+    """Resolve parent graph texture inputs through a compound boundary.
+
+    A compound's ``internal:CompoundInputs`` output pin is the same pin used on
+    its parent graph's ``internal:Compound`` instance. Following both halves is
+    necessary for materials whose diffuse is deliberately supplied by the
+    placement graph rather than serialized inside the compound itself.
+    """
+    instance_inputs = _compound_instance_texture_inputs(data)
+    if not instance_inputs:
+        return {}
+    result = {}
+
+    for logical_path, compound_data in (compound_sources or {}).items():
+        key = logical_path.replace("\\", "/").lstrip("/").casefold()
+        forwarded = instance_inputs.get(key)
+        if not forwarded:
+            continue
+        try:
+            tree = _bv2_plain(_Bv2Decoder(compound_data).root())
+        except (IndexError, KeyError, TypeError, ValueError):
+            continue
+
+        def visit(value):
+            if isinstance(value, dict):
+                nodes = value.get("nodesById")
+                connections = value.get("connectionsById")
+                if isinstance(nodes, dict) and isinstance(connections, (dict, list)):
+                    connection_values = (
+                        list(connections.values())
+                        if isinstance(connections, dict) else connections
+                    )
+                    for node_id, node in nodes.items():
+                        if not isinstance(node, dict):
+                            continue
+                        mesh_name = node.get("MeshName")
+                        shader = node.get("ShaderFile")
+                        if not (isinstance(mesh_name, str) and isinstance(shader, str)):
+                            continue
+                        shader_key = shader.replace("\\", "/").lstrip("/").casefold()
+                        shader_name = os.path.basename(shader_key)
+                        role_pins = (shader_role_pins or {}).get(shader_key)
+                        if role_pins is None:
+                            role_pins = (shader_role_pins or {}).get(shader_name)
+                        if role_pins is None:
+                            role_pins = _DIRECT_TEXTURE_ROLE_PINS.get(shader_name, {})
+                        roles = {}
+                        for connection in connection_values:
+                            if not (
+                                isinstance(connection, list)
+                                and len(connection) == 4
+                                and connection[2] == node_id
+                            ):
+                                continue
+                            shader_pin = connection[3] - 9000
+                            role = role_pins.get(shader_pin)
+                            source = nodes.get(connection[0])
+                            if (
+                                role is None
+                                or not isinstance(source, dict)
+                                or source.get("type") != "internal:CompoundInputs"
+                            ):
+                                continue
+                            path = forwarded.get(connection[1])
+                            if path:
+                                roles[role] = path
+                        if roles:
+                            keys = {
+                                mesh_name.casefold(),
+                                mesh_name.rsplit("-", 1)[-1].casefold(),
+                            }
+                            for material_key in keys:
+                                result.setdefault(material_key, {}).update(roles)
+                for item in value.values():
+                    visit(item)
+            elif isinstance(value, list):
+                for item in value:
+                    visit(item)
+
+        visit(tree)
+    return result
+
+
+def _connected_material_parameters(data, shader_parameter_pins=None):
+    """Return authored native constants using dynamically parsed shader pins."""
+    if not shader_parameter_pins:
+        return {}
+    try:
+        tree = _bv2_plain(_Bv2Decoder(data).root())
+    except (IndexError, KeyError, TypeError, ValueError):
+        return {}
+    result = {}
+
+    def visit(value):
+        if isinstance(value, dict):
+            nodes = value.get("nodesById")
+            connections = value.get("connectionsById")
+            if isinstance(nodes, dict) and isinstance(connections, (dict, list)):
+                connection_values = (
+                    list(connections.values()) if isinstance(connections, dict)
+                    else connections
+                )
+                for node_id, node in nodes.items():
+                    if not isinstance(node, dict):
+                        continue
+                    mesh_name = node.get("MeshName")
+                    shader = node.get("ShaderFile")
+                    if not (isinstance(mesh_name, str) and isinstance(shader, str)):
+                        continue
+                    shader_key = shader.replace("\\", "/").lstrip("/").casefold()
+                    shader_name = os.path.basename(shader_key)
+                    pin_fields = shader_parameter_pins.get(shader_key)
+                    if pin_fields is None:
+                        pin_fields = shader_parameter_pins.get(shader_name)
+                    if not pin_fields:
+                        continue
+                    parameters = {}
+                    for connection in connection_values:
+                        if not (
+                            isinstance(connection, list)
+                            and len(connection) == 4
+                            and connection[2] == node_id
+                            and connection[3] - 10000 in pin_fields
+                        ):
+                            continue
+                        source = nodes.get(connection[0])
+                        if not (
+                            isinstance(source, dict)
+                            and source.get("type") == "native:Constant"
+                        ):
+                            continue
+                        field = pin_fields[connection[3] - 10000]
+                        parameters.setdefault(field, source.get("value"))
+                    if parameters:
+                        keys = {
+                            mesh_name.casefold(),
+                            mesh_name.rsplit("-", 1)[-1].casefold(),
+                        }
+                        for key in keys:
+                            result.setdefault(key, parameters)
             for item in value.values():
                 visit(item)
         elif isinstance(value, list):
@@ -996,6 +1201,60 @@ def _graph_materials(data):
     return list(unique.values())
 
 
+def material_shader_pairs(data):
+    """Return the material-name/ShaderFile pairs recovered from a BV2 source."""
+    return _graph_materials(data)
+
+
+def surface_alpha_channel(shader_path, pin_id):
+    """Return the authored surface-opacity channel for a shader sampler pin."""
+    shader_name = os.path.basename(shader_path).casefold()
+    return _SURFACE_ALPHA_PINS.get(shader_name, {}).get(pin_id, "")
+
+
+def diffuse_drives_surface_alpha(shader_path):
+    """Whether this shader treats the color texture alpha as surface opacity."""
+    name = os.path.basename(shader_path).casefold()
+    if name in {
+        "px_basic.mshader",
+        "px_basic_emissive.mshader",
+        "px_character_gear_simple.mshader",
+        "px_character_gear_pearl.mshader",
+        "px_constants.mshader",
+        "px_basic_mosspatch.mshader",
+        "px_dlc3_basic_mosspatch.mshader",
+    }:
+        return True
+    if name.startswith(("px_basic_transmission", "px_basic_transparent")):
+        return True
+    if name.startswith("px_basic_rustymetal"):
+        return True
+    if name.startswith((
+        "px_vegetation", "px_dlc1_vegetation", "px_dlc2_vegetation",
+        "px_dlc3_vegetation", "px_harvest_vegetation", "px_grass",
+        "px_dlc1_grass", "px_dlc3_grass", "px_mosscard",
+        "px_dlc2_mosscard", "px_dlc3_mosscard", "px_dlc3_mossycard",
+    )):
+        return True
+    if name.startswith((
+        "px_decal_", "px_character_weapon_decal", "px_fx_decal_",
+        "deferred-decal-",
+    )):
+        return True
+    if name.startswith((
+        "px_hair", "px_character_gear_fur", "px_wildlife_fur",
+    )) or name == "hair.mshader":
+        return True
+    if name.startswith((
+        "px_wildlife_dragonflywing", "px_wildlife_fanlizardwing",
+        "px_wildlife_gear", "px_wildlife_skin",
+    )):
+        return True
+    return any(fragment in name for fragment in (
+        "glass", "foliage", "transparent", "transmission alpha",
+    ))
+
+
 _SHADER_HINTS = {
     "rustymetal": ("metal", "mesh", "rust"),
     "croverlay": ("stripe", "decal", "paint", "warning", "orange"),
@@ -1063,7 +1322,10 @@ def _semantic_path(textures, role, material_tokens):
     return max(ranked)[2] if ranked else None
 
 
-def material_bindings(data, material_names, compound_sources=None):
+def material_bindings(
+    data, material_names, compound_sources=None, shader_role_pins=None,
+    shader_parameter_pins=None,
+):
     """Map each MMB mesh/material name to diffuse, normal, and mask paths."""
     if data[:4] != MAGIC:
         raise ValueError("material source does not have BV2 magic")
@@ -1088,14 +1350,37 @@ def material_bindings(data, material_names, compound_sources=None):
     material_shaders = list(shader_map.values())
     connected_textures = _connected_material_textures(data)
     connected_alpha_textures = _connected_material_alpha_textures(data)
-    connected_role_textures = _connected_material_role_textures(data)
+    connected_role_textures = _connected_material_role_textures(
+        data, shader_role_pins
+    )
+    connected_parameters = _connected_material_parameters(
+        data, shader_parameter_pins
+    )
     for compound_data in (compound_sources or {}).values():
         for name, paths in _connected_material_textures(compound_data).items():
             connected_textures.setdefault(name, paths)
         for name, alpha_info in _connected_material_alpha_textures(compound_data).items():
             connected_alpha_textures.setdefault(name, alpha_info)
-        for name, roles in _connected_material_role_textures(compound_data).items():
-            connected_role_textures.setdefault(name, roles)
+        for name, roles in _connected_material_role_textures(
+            compound_data, shader_role_pins
+        ).items():
+            combined_roles = connected_role_textures.setdefault(name, {})
+            for role, path in roles.items():
+                combined_roles.setdefault(role, path)
+        for name, parameters in _connected_material_parameters(
+            compound_data, shader_parameter_pins
+        ).items():
+            combined_parameters = connected_parameters.setdefault(name, {})
+            for field, value in parameters.items():
+                combined_parameters.setdefault(field, value)
+    # Parent graph inputs override an exposed compound pin. Without following
+    # this boundary a compound-local BIO texture can win the filename fallback
+    # when the real Color input lives on the graph instance (green moss is the
+    # common example).
+    for name, roles in _forwarded_compound_role_textures(
+        data, compound_sources, shader_role_pins
+    ).items():
+        connected_role_textures.setdefault(name, {}).update(roles)
     emissive_parameters = (
         _emissive_parameters(data)
         if any(
@@ -1359,6 +1644,14 @@ def material_bindings(data, material_names, compound_sources=None):
         material_tokens = _tokens(name) - common
         shader = resolved_shaders.get(material_index, "")
         shader_name = os.path.basename(shader).casefold()
+        shader_key = shader.replace("\\", "/").lstrip("/").casefold()
+        role_schema = None
+        if shader_role_pins is not None:
+            if shader_key in shader_role_pins:
+                role_schema = shader_role_pins[shader_key]
+            elif shader_name in shader_role_pins:
+                role_schema = shader_role_pins[shader_name]
+        declared_roles = set(role_schema.values()) if role_schema is not None else set()
         if shader_name == "px_emissive_color.mshader":
             parameters = emissive_parameters.get(name.casefold(), {})
             result[name] = {
@@ -1368,6 +1661,7 @@ def material_bindings(data, material_names, compound_sources=None):
                 "shader": shader,
                 "emissive_color": parameters.get("emissive_color", (0.0, 0.0, 0.0)),
                 "emissive_strength": parameters.get("emissive_strength", 1.0),
+                "parameters": dict(connected_parameters.get(name.casefold(), {})),
             }
             continue
         diffuse = (group["d"] if group else None) or _semantic_path(
@@ -1382,24 +1676,44 @@ def material_bindings(data, material_names, compound_sources=None):
         if alpha_info is None and name.casefold().endswith("_part"):
             alpha_info = connected_alpha_textures.get(name[:-5].casefold())
         alpha, alpha_channel = alpha_info or (None, None)
-        direct_roles = dict(connected_role_textures.get(name.casefold(), {}))
-        if not direct_roles and name.casefold().endswith("_part"):
+        direct_roles = {}
+        if name.casefold().endswith("_part"):
             direct_roles.update(
                 connected_role_textures.get(name[:-5].casefold(), {})
             )
-        for path in direct_paths:
-            if (
-                alpha is not None
-                and alpha_channel == "color"
-                and path.casefold() == alpha.casefold()
-            ):
-                continue
-            role = _classify_texture(path)
-            if role in {"d", "n", "m"}:
-                direct_roles.setdefault(role, path)
+        direct_roles.update(connected_role_textures.get(name.casefold(), {}))
+        if role_schema is None:
+            for path in direct_paths:
+                if (
+                    alpha is not None
+                    and alpha_channel == "color"
+                    and path.casefold() == alpha.casefold()
+                ):
+                    continue
+                role = _classify_texture(path)
+                if role in {"d", "n", "m"}:
+                    direct_roles.setdefault(role, path)
         diffuse = direct_roles.get("d", diffuse)
         normal = direct_roles.get("n", normal)
         mask = direct_roles.get("m", mask)
+        if role_schema is not None:
+            if "d" not in declared_roles:
+                diffuse = None
+            if "n" not in declared_roles:
+                normal = None
+            if "m" not in declared_roles:
+                mask = None
+        auxiliary = {
+            role[4:]: path
+            for role, path in direct_roles.items()
+            if role.startswith("aux:")
+        }
+        authored_parameters = {}
+        if name.casefold().endswith("_part"):
+            authored_parameters.update(
+                connected_parameters.get(name[:-5].casefold(), {})
+            )
+        authored_parameters.update(connected_parameters.get(name.casefold(), {}))
         if player_head_sex is not None and name.casefold() == "head":
             # Every p_head morph reuses the same authored base skin maps. The
             # female graph explicitly supplies RNF color plus the shared male
@@ -1416,23 +1730,42 @@ def material_bindings(data, material_names, compound_sources=None):
         if shader_name == "px_wildlife_eye.mshader":
             # Wildlife commonly shares the Banshee/Eddie eye set, whose path
             # has no species or mesh-name affinity. Shader identity is stronger
-            # evidence than assigning a nearby head/body texture group.
-            diffuse = next(
-                (
+            # evidence than assigning a nearby head/body texture group.  The
+            # Banshee source contains both ``smalleye`` and full-eye families;
+            # pool order is not meaningful and previously gave Banshee_Eyes
+            # the SmallEyes diffuse.
+            wants_small_eye = "small" in name.casefold()
+
+            def eye_texture(role, preferred_names):
+                candidates = [
                     texture["path"] for texture in textures
-                    if texture["kind"] == "d"
+                    if texture["kind"] == role
                     and "eye" in os.path.basename(texture["path"]).casefold()
-                ),
-                diffuse,
-            )
-            normal = next(
-                (
-                    texture["path"] for texture in textures
-                    if texture["kind"] == "n"
-                    and "eye" in os.path.basename(texture["path"]).casefold()
-                ),
-                normal,
-            )
+                ]
+                if wants_small_eye:
+                    candidates = [
+                        path for path in candidates
+                        if "smalleye" in os.path.basename(path).casefold()
+                    ]
+                else:
+                    candidates = [
+                        path for path in candidates
+                        if "smalleye" not in os.path.basename(path).casefold()
+                    ]
+                if not candidates:
+                    return None
+                for preferred in preferred_names:
+                    for path in candidates:
+                        if os.path.basename(path).casefold() == preferred:
+                            return path
+                return candidates[0]
+
+            diffuse = eye_texture(
+                "d", ("wl_banshee_eye_d.dds", "eddie_eye_d.dds")
+            ) or diffuse
+            normal = eye_texture(
+                "n", ("eddie_eye_n.dds", "wl_banshee_eye_n.dds")
+            ) or normal
         if is_direhorse and name.casefold() == "wildlife_dirhorse_weakpoint":
             # No texture constants are connected to this px_basic node. Use
             # that shader's serialized defaults instead of stealing the body.
@@ -1496,13 +1829,29 @@ def material_bindings(data, material_names, compound_sources=None):
                     ),
                     normal,
                 )
+        # A known shader schema is authoritative about the texture roles that
+        # can be authored on its graph node.  In particular dragonfly wings
+        # and wildlife eyes expose Color + Normal but no Material sampler; do
+        # not let texture-family proximity attach a body/skin packed mask.
+        if {"d", "n"}.issubset(declared_roles) and "m" not in declared_roles:
+            mask = None
         binding = {
-            "d": diffuse or default_diffuse,
-            "n": normal or _DEFAULT_NORMAL,
+            "d": (
+                diffuse
+                if role_schema is not None
+                else diffuse or default_diffuse
+            ),
+            "n": (
+                normal or _DEFAULT_NORMAL
+                if role_schema is None or "n" in declared_roles
+                else None
+            ),
             "m": mask,
             "a": alpha,
             "a_channel": alpha_channel,
             "shader": shader,
+            "aux": auxiliary,
+            "parameters": authored_parameters,
         }
         if _is_wildlife_bio_shader(shader):
             bio = wildlife_bio_parameters.get(name.casefold())

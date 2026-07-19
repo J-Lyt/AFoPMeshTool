@@ -20,6 +20,7 @@ CODE_FILES = (
     "file_utils.py",
     "importer.py",
     "log.py",
+    "material_audit.py",
     "material_import.py",
     "meshlet.py",
     "mgraph.py",
