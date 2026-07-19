@@ -11,7 +11,7 @@ from pathlib import PurePosixPath
 
 import bpy
 
-from . import addon_state, material_audit, material_import, mgraph, oodle_helper
+from . import addon_state, material_import, mgraph, oodle_helper, shader_schema
 from .log import logger
 from .mmb import SkeletalMeshAsset
 from . import sdf_toc
@@ -78,18 +78,6 @@ class _SdfState:
 
 _state = _SdfState()
 
-
-class _MaterialAuditState:
-    def __init__(self):
-        self.lock = threading.Lock()
-        self.generation = 0
-        self.phase = "idle"
-        self.status = ""
-        self.progress = 0.0
-        self.output_directory = ""
-
-
-_audit_state = _MaterialAuditState()
 _shader_schema_lock = threading.Lock()
 _shader_pin_cache = {}
 
@@ -113,130 +101,6 @@ def get_ui_status():
             "progress": _state.progress,
             "count": len(_state.entries),
         }
-
-
-def get_material_audit_status():
-    with _audit_state.lock:
-        return {
-            "phase": _audit_state.phase,
-            "status": _audit_state.status,
-            "progress": _audit_state.progress,
-            "output_directory": _audit_state.output_directory,
-        }
-
-
-def _set_audit_progress(generation, phase, status, progress, output_directory=None):
-    with _audit_state.lock:
-        if generation != _audit_state.generation:
-            raise _Cancelled()
-        _audit_state.phase = phase
-        _audit_state.status = status
-        _audit_state.progress = max(0.0, min(1.0, float(progress)))
-        if output_directory is not None:
-            _audit_state.output_directory = output_directory
-
-
-def _material_audit_worker(
-    generation, sdf_generation, source_entries, shader_entries, mmb_paths,
-    output_directory,
-):
-    try:
-        total = len(source_entries) + len(shader_entries)
-        extracted = 0
-        source_records = []
-        shader_records = []
-        extraction_issues = []
-
-        def extract_record(kind, entry):
-            nonlocal extracted
-            with _state.lock:
-                if sdf_generation != _state.generation:
-                    raise _Cancelled()
-            try:
-                return {
-                    "path": entry.asset.name,
-                    "kind": kind,
-                    "archive": entry.archive_label,
-                    "cache_key": entry.cache_key,
-                    "data": entry.archive.extract(entry.asset),
-                }
-            except Exception as error:
-                logger.warning(
-                    "Could not read %s during material audit: %s",
-                    entry.asset.name, error,
-                )
-                extraction_issues.append({
-                    "severity": "warning",
-                    "kind": "asset_extraction_error",
-                    "source": entry.asset.name,
-                    "detail": str(error),
-                })
-                return None
-            finally:
-                extracted += 1
-                progress = 0.05 + 0.65 * (extracted / total if total else 1.0)
-                _set_audit_progress(
-                    generation,
-                    "running",
-                    f"Reading material metadata ({extracted:,}/{total:,})...",
-                    progress,
-                )
-
-        for kind, entry in source_entries:
-            record = extract_record(kind, entry)
-            if record is not None:
-                source_records.append(record)
-        for entry in shader_entries:
-            record = extract_record("mshader", entry)
-            if record is not None:
-                shader_records.append(record)
-
-        _set_audit_progress(
-            generation, "running", "Resolving material relationships...", 0.75
-        )
-        signature = {
-            entry.cache_key
-            for _kind, entry in source_entries
-        } | {entry.cache_key for entry in shader_entries}
-        report = material_audit.build_report(
-            source_records,
-            shader_records,
-            mmb_paths,
-            input_signature=signature,
-        )
-        if extraction_issues:
-            report["issues"][0:0] = extraction_issues
-            report["summary"]["issues"] += len(extraction_issues)
-            report["summary"]["issues_by_severity"]["warning"] += len(
-                extraction_issues
-            )
-        _set_audit_progress(
-            generation, "running", "Writing material audit reports...", 0.95
-        )
-        material_audit.write_reports(report, output_directory)
-        summary = report["summary"]
-        _set_audit_progress(
-            generation,
-            "complete",
-            (
-                f"Audited {summary['sources']:,} sources, "
-                f"{summary['shaders']:,} shaders, and "
-                f"{summary['materials']:,} material bindings; "
-                f"found {summary['issues']:,} review item(s)."
-            ),
-            1.0,
-            output_directory,
-        )
-    except _Cancelled:
-        return
-    except Exception as error:
-        logger.exception("SDF material corpus audit failed: %s", error)
-        with _audit_state.lock:
-            if generation != _audit_state.generation:
-                return
-            _audit_state.phase = "error"
-            _audit_state.status = str(error)
-            _audit_state.progress = 0.0
 
 
 def _discover_archives(root):
@@ -690,20 +554,9 @@ def _index_timer():
     return 0.2 if snapshot["phase"] == "loading" else None
 
 
-def _material_audit_timer():
-    snapshot = get_material_audit_status()
-    _tag_properties_redraw()
-    return 0.25 if snapshot["phase"] == "running" else None
-
-
 def _ensure_timer():
     if not bpy.app.timers.is_registered(_index_timer):
         bpy.app.timers.register(_index_timer, first_interval=0.1)
-
-
-def _ensure_material_audit_timer():
-    if not bpy.app.timers.is_registered(_material_audit_timer):
-        bpy.app.timers.register(_material_audit_timer, first_interval=0.1)
 
 
 def _start_archive_load(root, allow_rebuild):
@@ -714,11 +567,6 @@ def _start_archive_load(root, allow_rebuild):
     if not root or not os.path.isdir(root):
         return False
 
-    with _audit_state.lock:
-        _audit_state.generation += 1
-        _audit_state.phase = "idle"
-        _audit_state.status = ""
-        _audit_state.progress = 0.0
     with _shader_schema_lock:
         _shader_pin_cache.clear()
 
@@ -779,11 +627,6 @@ def _cached_auto_load_timer():
 def schedule_cached_auto_load(reset=False):
     """Schedule a non-rebuilding cached load after registration or file load."""
     if reset:
-        with _audit_state.lock:
-            _audit_state.generation += 1
-            _audit_state.phase = "idle"
-            _audit_state.status = ""
-            _audit_state.progress = 0.0
         with _state.lock:
             _state.generation += 1
             _state.phase = "idle"
@@ -819,19 +662,12 @@ def shutdown():
         _state.compounds = {}
         _state.shaders = {}
         _state.textures = {}
-    with _audit_state.lock:
-        _audit_state.generation += 1
-        _audit_state.phase = "idle"
-        _audit_state.status = ""
-        _audit_state.progress = 0.0
     with _shader_schema_lock:
         _shader_pin_cache.clear()
     if bpy.app.timers.is_registered(_index_timer):
         bpy.app.timers.unregister(_index_timer)
     if bpy.app.timers.is_registered(_cached_auto_load_timer):
         bpy.app.timers.unregister(_cached_auto_load_timer)
-    if bpy.app.timers.is_registered(_material_audit_timer):
-        bpy.app.timers.unregister(_material_audit_timer)
 
 
 def _search_entry_for_id(entry_id):
@@ -1273,7 +1109,7 @@ def _shader_pins_for_sources(data, compound_sources, preferred_archive):
             cached = _shader_pin_cache.get(cache_key)
         if cached is None:
             try:
-                parsed = material_audit.parse_shader_source(
+                parsed = shader_schema.parse_shader_source(
                     candidate.archive.extract(candidate.asset)
                 )
                 role_pins = {
@@ -1851,82 +1687,6 @@ class IndexSDFArchives(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class AuditSDFMaterials(bpy.types.Operator):
-    """Inventory all indexed material sources and textual shader declarations."""
-
-    bl_idname = "object.audit_sdf_materials"
-    bl_label = "Audit Material Corpus"
-    bl_description = (
-        "Read indexed mgraphobject, mcompoundnode, and mshader metadata and write "
-        "JSON/CSV relationship reports without extracting the texture corpus"
-    )
-
-    @classmethod
-    def poll(cls, _context):
-        with _state.lock:
-            sdf_ready = _state.phase == "ready"
-        with _audit_state.lock:
-            audit_running = _audit_state.phase == "running"
-        return sdf_ready and not audit_running
-
-    def execute(self, context):
-        settings = context.scene.SWOMT
-        extracted_root = bpy.path.abspath(settings.sdf_extracted_directory)
-        if not extracted_root:
-            from .settings import get_default_extracted_files_directory
-            extracted_root = get_default_extracted_files_directory()
-        output_directory = os.path.join(extracted_root, "material_audit")
-
-        with _state.lock:
-            if _state.phase != "ready":
-                self.report({"ERROR"}, "Load the SDF archives before running the audit.")
-                return {"CANCELLED"}
-            sdf_generation = _state.generation
-            source_entries = [
-                ("mgraphobject", entry)
-                for entries in _state.graphs.values() for entry in entries
-            ] + [
-                ("mcompoundnode", entry)
-                for entries in _state.compounds.values() for entry in entries
-            ]
-            shader_entries = [
-                entry for entries in _state.shaders.values() for entry in entries
-            ]
-            mmb_paths = [entry.asset.name for entry in _state.entries]
-
-        if not source_entries:
-            self.report({"ERROR"}, "The current SDF index contains no material sources.")
-            return {"CANCELLED"}
-        source_entries.sort(
-            key=lambda item: (
-                item[1].asset.name.casefold(), item[1].archive_label.casefold()
-            )
-        )
-        shader_entries.sort(
-            key=lambda entry: (entry.asset.name.casefold(), entry.archive_label.casefold())
-        )
-        with _audit_state.lock:
-            _audit_state.generation += 1
-            generation = _audit_state.generation
-            _audit_state.phase = "running"
-            _audit_state.status = "Preparing material corpus audit..."
-            _audit_state.progress = 0.01
-            _audit_state.output_directory = output_directory
-
-        threading.Thread(
-            target=_material_audit_worker,
-            args=(
-                generation, sdf_generation, source_entries, shader_entries,
-                mmb_paths, output_directory,
-            ),
-            name="AFoP SDF material audit",
-            daemon=True,
-        ).start()
-        _ensure_material_audit_timer()
-        self.report({"INFO"}, "Material corpus audit started in the background.")
-        return {"FINISHED"}
-
-
 class ImportSDFMMB(bpy.types.Operator):
     """Import a selected MMB or the MMBs referenced by a material source."""
 
@@ -2147,6 +1907,5 @@ CLASSES = (
     BrowseSDFExtractedDirectory,
     ClearSDFIndexCache,
     IndexSDFArchives,
-    AuditSDFMaterials,
     ImportSDFMMB,
 )

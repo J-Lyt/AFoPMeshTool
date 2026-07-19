@@ -1614,6 +1614,8 @@ def material_bindings(
         # This MMB uses generic part names while its body texture family carries
         # only the asset name. The graph's decoded nodes confirm body uses the
         # Direhorse D/NR/M group and both eye meshes share the Eddie eye set.
+        # Blender verification also confirms the weakpoint is rendered as part
+        # of the body rather than with the graph's generic PX_Basic defaults.
         body_group = next(
             (
                 group for group in groups
@@ -1634,6 +1636,12 @@ def material_bindings(
                 assigned[material_index] = body_group
             elif key in {"eyes", "eyes_small"} and eye_group is not None:
                 assigned[material_index] = eye_group
+        body_index = index_by_name["body"]
+        weakpoint_index = index_by_name["wildlife_dirhorse_weakpoint"]
+        if body_index in assigned:
+            assigned[weakpoint_index] = assigned[body_index]
+        if body_index in resolved_shaders:
+            resolved_shaders[weakpoint_index] = resolved_shaders[body_index]
 
     default_diffuse = next(
         (texture["path"] for texture in textures if texture["kind"] == "d"), None
@@ -1766,33 +1774,6 @@ def material_bindings(
             normal = eye_texture(
                 "n", ("eddie_eye_n.dds", "wl_banshee_eye_n.dds")
             ) or normal
-        if is_direhorse and name.casefold() == "wildlife_dirhorse_weakpoint":
-            # No texture constants are connected to this px_basic node. Use
-            # that shader's serialized defaults instead of stealing the body.
-            diffuse = next(
-                (
-                    texture["path"] for texture in textures
-                    if os.path.basename(texture["path"]).casefold()
-                    == "sd_gn_default_grey_d.dds"
-                ),
-                diffuse,
-            )
-            normal = next(
-                (
-                    texture["path"] for texture in textures
-                    if os.path.basename(texture["path"]).casefold()
-                    == "sd_flat_normal_128_n.dds"
-                ),
-                normal,
-            )
-            mask = next(
-                (
-                    texture["path"] for texture in textures
-                    if os.path.basename(texture["path"]).casefold()
-                    == "sd_gn_default_rough_plastic_m.dds"
-                ),
-                mask,
-            )
         if shader_name.startswith("px_dlc3_medusa_skin") and "tail" in material_tokens:
             # The tentacle/tail texture set has no dedicated normal map; its
             # Medusa shader node explicitly binds Snowdrop's flat normal.
@@ -1868,5 +1849,12 @@ def material_bindings(
         body_name = names[banshee_body_index]
         weakpoint_name = names[banshee_weakpoint_index]
         if body_name in result:
+            result[weakpoint_name] = dict(result[body_name])
+    if is_direhorse:
+        body_name = names[index_by_name["body"]]
+        weakpoint_name = names[index_by_name["wildlife_dirhorse_weakpoint"]]
+        if body_name in result:
+            # Copy the complete binding, including shader, auxiliaries and bio
+            # palette, so weakpoint and body cannot drift independently.
             result[weakpoint_name] = dict(result[body_name])
     return result

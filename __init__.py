@@ -3,7 +3,7 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt, SaintBaron",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 96),
+    "version": (0, 1, 97),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 11-17.",
     "category": "Import-Export",
@@ -26,7 +26,6 @@ try:
 except OSError:
     pass
 
-
 # v0.1.70 and older only download __init__.py, mcloth.py, and data files when
 # applying an update. This one-time bridge retrieves missing v0.1.71 modules
 # before importing them. Fresh zip installs and all later updates already carry
@@ -41,7 +40,6 @@ _REQUIRED_SPLIT_MODULES = (
     "file_utils.py",
     "importer.py",
     "log.py",
-    "material_audit.py",
     "material_import.py",
     "meshlet.py",
     "mgraph.py",
@@ -55,6 +53,7 @@ _REQUIRED_SPLIT_MODULES = (
     "sdf_reader.py",
     "sdf_toc.py",
     "settings.py",
+    "shader_schema.py",
     "ui.py",
     "updater.py",
 )
@@ -147,7 +146,6 @@ classes = (
     operators_sdf.BrowseSDFExtractedDirectory,
     operators_sdf.ClearSDFIndexCache,
     operators_sdf.IndexSDFArchives,
-    operators_sdf.AuditSDFMaterials,
     operators_sdf.ImportSDFMMB,
     operators_bones.RemapMeshBone,
     operators_bones.AddMeshBone,

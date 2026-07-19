@@ -1,0 +1,7179 @@
+{
+  "materials": [
+    {
+      "afop_properties": {
+        "afop_material_source": "blue/graph objects/prop/(orange_moss)nat_temp_rock_small_01.mgraphobject",
+        "afop_mgraphobject": "blue/graph objects/prop/(orange_moss)nat_temp_rock_small_01.mgraphobject",
+        "afop_normal": "blue/baked/art/props/pr_msv_1053/pr_msv_1053_a_n.dds",
+        "afop_normal_strength": 1.0,
+        "afop_profile_limit": "Set normals and gradient use a static box-triplanar reconstruction; procedural moss, terrain and pollution remain engine-driven",
+        "afop_rock_gradient": "blue/baked/art/shader_textures/px_natural_rock/sets/px_natural_rock_temperate_setrockgradient_A_d.dds",
+        "afop_rock_mask": "blue/baked/art/props/pr_msv_1053/pr_msv_1053_a_Mask.dds",
+        "afop_shader": "blue/shaders/px_natural_rock_temperate_v2.mshader",
+        "afop_shader_profile": "natural_rock_static_lookup"
+      },
+      "blend_method": "HASHED",
+      "name": "AFOP_pr_msv_1053_a_PR_MSV_1053_A",
+      "node_tree": {
+        "links": [
+          {
+            "from_node": "Weighted SetRock B lookup channel",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Approximate SetRock normal overlay",
+            "to_socket": {
+              "index": 1,
+              "name": "Color1"
+            }
+          },
+          {
+            "from_node": "Weighted SetRock A lookup channel",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Approximate SetRock normal overlay",
+            "to_socket": {
+              "index": 2,
+              "name": "Color2"
+            }
+          },
+          {
+            "from_node": "Normal Z squared",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Clamp normal Z",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Reconstruct normal Z",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Encode normal Z",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Encode normal Z",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Encode normal Z + 0.5",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Principled BSDF",
+            "from_socket": {
+              "index": 0,
+              "name": "BSDF"
+            },
+            "to_node": "Material Output",
+            "to_socket": {
+              "index": 0,
+              "name": "Surface"
+            }
+          },
+          {
+            "from_node": "Natural rock unique-mask overlay",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Natural rock gradient lookup UV",
+            "to_socket": {
+              "index": 0,
+              "name": "X"
+            }
+          },
+          {
+            "from_node": "Natural rock normal-B channels",
+            "from_socket": {
+              "index": 0,
+              "name": "Red"
+            },
+            "to_node": "Natural rock gradient lookup UV",
+            "to_socket": {
+              "index": 1,
+              "name": "Y"
+            }
+          },
+          {
+            "from_node": "Natural rock gradient lookup UV",
+            "from_socket": {
+              "index": 0,
+              "name": "Vector"
+            },
+            "to_node": "Natural Rock Gradient LUT",
+            "to_socket": {
+              "index": 0,
+              "name": "Vector"
+            }
+          },
+          {
+            "from_node": "Natural Rock Gradient LUT",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Natural rock gradient x unique AO",
+            "to_socket": {
+              "index": 1,
+              "name": "Color1"
+            }
+          },
+          {
+            "from_node": "Snowdrop packed normal (A/G)",
+            "from_socket": {
+              "index": 2,
+              "name": "Blue"
+            },
+            "to_node": "Natural rock gradient x unique AO",
+            "to_socket": {
+              "index": 2,
+              "name": "Color2"
+            }
+          },
+          {
+            "from_node": "Natural Rock Unique Mask",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Natural rock mask channels",
+            "to_socket": {
+              "index": 0,
+              "name": "Color"
+            }
+          },
+          {
+            "from_node": "Natural Rock Set Normal A",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Natural rock normal-A channels",
+            "to_socket": {
+              "index": 0,
+              "name": "Color"
+            }
+          },
+          {
+            "from_node": "Natural Rock Set Normal B",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Natural rock normal-B channels",
+            "to_socket": {
+              "index": 0,
+              "name": "Color"
+            }
+          },
+          {
+            "from_node": "Natural rock model coordinates",
+            "from_socket": {
+              "index": 3,
+              "name": "Object"
+            },
+            "to_node": "Natural rock set A triplanar scale",
+            "to_socket": {
+              "index": 0,
+              "name": "Vector"
+            }
+          },
+          {
+            "from_node": "Natural rock model coordinates",
+            "from_socket": {
+              "index": 3,
+              "name": "Object"
+            },
+            "to_node": "Natural rock set B triplanar scale",
+            "to_socket": {
+              "index": 0,
+              "name": "Vector"
+            }
+          },
+          {
+            "from_node": "Natural rock set A triplanar scale",
+            "from_socket": {
+              "index": 0,
+              "name": "Vector"
+            },
+            "to_node": "Natural Rock Set Normal A",
+            "to_socket": {
+              "index": 0,
+              "name": "Vector"
+            }
+          },
+          {
+            "from_node": "Natural Rock Set Normal A UV (UVMap_0)",
+            "from_socket": {
+              "index": 0,
+              "name": "UV"
+            },
+            "to_node": "Natural Rock Set Normal A UV tiling",
+            "to_socket": {
+              "index": 0,
+              "name": "Vector"
+            }
+          },
+          {
+            "from_node": "Natural rock set B triplanar scale",
+            "from_socket": {
+              "index": 0,
+              "name": "Vector"
+            },
+            "to_node": "Natural Rock Set Normal B",
+            "to_socket": {
+              "index": 0,
+              "name": "Vector"
+            }
+          },
+          {
+            "from_node": "Natural Rock Set Normal B UV (UVMap_0)",
+            "from_socket": {
+              "index": 0,
+              "name": "UV"
+            },
+            "to_node": "Natural Rock Set Normal B UV tiling",
+            "to_socket": {
+              "index": 0,
+              "name": "Vector"
+            }
+          },
+          {
+            "from_node": "Approximate SetRock normal overlay",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Natural rock unique-mask overlay",
+            "to_socket": {
+              "index": 1,
+              "name": "Color1"
+            }
+          },
+          {
+            "from_node": "Natural rock mask channels",
+            "from_socket": {
+              "index": 0,
+              "name": "Red"
+            },
+            "to_node": "Natural rock unique-mask overlay",
+            "to_socket": {
+              "index": 2,
+              "name": "Color2"
+            }
+          },
+          {
+            "from_node": "Natural rock vertex masks",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Natural rock vertex-mask channels",
+            "to_socket": {
+              "index": 0,
+              "name": "Color"
+            }
+          },
+          {
+            "from_node": "Reconstructed tangent normal",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Normal Map",
+            "to_socket": {
+              "index": 1,
+              "name": "Color"
+            }
+          },
+          {
+            "from_node": "Normal X x2",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal X signed",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal X signed",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal X squared",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal X signed",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal X squared",
+            "to_socket": {
+              "index": 1,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal (packed)",
+            "from_socket": {
+              "index": 1,
+              "name": "Alpha"
+            },
+            "to_node": "Normal X x2",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal X squared",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal XY squared",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal Y squared",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal XY squared",
+            "to_socket": {
+              "index": 1,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal Y x2",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal Y signed",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal Y signed",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal Y squared",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal Y signed",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal Y squared",
+            "to_socket": {
+              "index": 1,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Snowdrop packed normal (A/G)",
+            "from_socket": {
+              "index": 1,
+              "name": "Green"
+            },
+            "to_node": "Normal Y x2",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal XY squared",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal Z squared",
+            "to_socket": {
+              "index": 1,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Natural rock gradient x unique AO",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Principled BSDF",
+            "to_socket": {
+              "index": 0,
+              "name": "Base Color"
+            }
+          },
+          {
+            "from_node": "Natural Rock Gradient LUT",
+            "from_socket": {
+              "index": 1,
+              "name": "Alpha"
+            },
+            "to_node": "Principled BSDF",
+            "to_socket": {
+              "index": 2,
+              "name": "Roughness"
+            }
+          },
+          {
+            "from_node": "Normal Map",
+            "from_socket": {
+              "index": 0,
+              "name": "Normal"
+            },
+            "to_node": "Principled BSDF",
+            "to_socket": {
+              "index": 5,
+              "name": "Normal"
+            }
+          },
+          {
+            "from_node": "Clamp normal Z",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Reconstruct normal Z",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal (packed)",
+            "from_socket": {
+              "index": 1,
+              "name": "Alpha"
+            },
+            "to_node": "Reconstructed tangent normal",
+            "to_socket": {
+              "index": 0,
+              "name": "Red"
+            }
+          },
+          {
+            "from_node": "Snowdrop packed normal (A/G)",
+            "from_socket": {
+              "index": 1,
+              "name": "Green"
+            },
+            "to_node": "Reconstructed tangent normal",
+            "to_socket": {
+              "index": 1,
+              "name": "Green"
+            }
+          },
+          {
+            "from_node": "Encode normal Z + 0.5",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Reconstructed tangent normal",
+            "to_socket": {
+              "index": 2,
+              "name": "Blue"
+            }
+          },
+          {
+            "from_node": "Normal (packed)",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Snowdrop packed normal (A/G)",
+            "to_socket": {
+              "index": 0,
+              "name": "Color"
+            }
+          },
+          {
+            "from_node": "Weighted SetRock A lookup channel vertex weight",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Weighted SetRock A lookup channel",
+            "to_socket": {
+              "index": 0,
+              "name": "Factor"
+            }
+          },
+          {
+            "from_node": "Natural rock normal-A channels",
+            "from_socket": {
+              "index": 0,
+              "name": "Red"
+            },
+            "to_node": "Weighted SetRock A lookup channel",
+            "to_socket": {
+              "index": 2,
+              "name": "Color2"
+            }
+          },
+          {
+            "from_node": "Natural rock vertex-mask channels",
+            "from_socket": {
+              "index": 0,
+              "name": "Red"
+            },
+            "to_node": "Weighted SetRock A lookup channel vertex weight",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Weighted SetRock A lookup channel authored weight",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Weighted SetRock A lookup channel vertex weight",
+            "to_socket": {
+              "index": 1,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Weighted SetRock B lookup channel vertex weight",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Weighted SetRock B lookup channel",
+            "to_socket": {
+              "index": 0,
+              "name": "Factor"
+            }
+          },
+          {
+            "from_node": "Natural rock normal-B channels",
+            "from_socket": {
+              "index": 0,
+              "name": "Red"
+            },
+            "to_node": "Weighted SetRock B lookup channel",
+            "to_socket": {
+              "index": 2,
+              "name": "Color2"
+            }
+          },
+          {
+            "from_node": "Natural rock vertex-mask channels",
+            "from_socket": {
+              "index": 1,
+              "name": "Green"
+            },
+            "to_node": "Weighted SetRock B lookup channel vertex weight",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Weighted SetRock B lookup channel authored weight",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Weighted SetRock B lookup channel vertex weight",
+            "to_socket": {
+              "index": 1,
+              "name": "Value"
+            }
+          }
+        ],
+        "nodes": [
+          {
+            "label": "Approximate SetRock normal overlay",
+            "name": "Approximate SetRock normal overlay",
+            "settings": {
+              "blend_type": "OVERLAY"
+            },
+            "type": "ShaderNodeMixRGB",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Factor",
+                "value": 1.0
+              }
+            ]
+          },
+          {
+            "label": "Clamp normal Z",
+            "name": "Clamp normal Z",
+            "settings": {
+              "operation": "MAXIMUM"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 0.0
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Encode normal Z",
+            "name": "Encode normal Z",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 0.5
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Encode normal Z + 0.5",
+            "name": "Encode normal Z + 0.5",
+            "settings": {
+              "operation": "ADD"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 0.5
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "name": "Material Output",
+            "type": "ShaderNodeOutputMaterial",
+            "unlinked_inputs": [
+              {
+                "index": 2,
+                "name": "Displacement",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "index": 3,
+                "name": "Thickness",
+                "value": 0.0
+              }
+            ]
+          },
+          {
+            "label": "Natural rock gradient lookup UV",
+            "name": "Natural rock gradient lookup UV",
+            "type": "ShaderNodeCombineXYZ",
+            "unlinked_inputs": [
+              {
+                "index": 2,
+                "name": "Z",
+                "value": 0.0
+              }
+            ]
+          },
+          {
+            "image": "blue/baked/art/shader_textures/px_natural_rock/sets/px_natural_rock_temperate_setrockgradient_A_d.dds",
+            "label": "Natural Rock Gradient LUT",
+            "name": "Natural Rock Gradient LUT",
+            "settings": {
+              "extension": "REPEAT",
+              "interpolation": "Linear",
+              "projection": "FLAT",
+              "projection_blend": 0.0
+            },
+            "type": "ShaderNodeTexImage"
+          },
+          {
+            "label": "Natural rock gradient x unique AO",
+            "name": "Natural rock gradient x unique AO",
+            "settings": {
+              "blend_type": "MULTIPLY"
+            },
+            "type": "ShaderNodeMixRGB",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Factor",
+                "value": 1.0
+              }
+            ]
+          },
+          {
+            "label": "Natural rock mask channels",
+            "name": "Natural rock mask channels",
+            "type": "ShaderNodeSeparateColor"
+          },
+          {
+            "label": "Natural rock model coordinates",
+            "name": "Natural rock model coordinates",
+            "type": "ShaderNodeTexCoord"
+          },
+          {
+            "label": "Natural rock normal-A channels",
+            "name": "Natural rock normal-A channels",
+            "type": "ShaderNodeSeparateColor"
+          },
+          {
+            "label": "Natural rock normal-B channels",
+            "name": "Natural rock normal-B channels",
+            "type": "ShaderNodeSeparateColor"
+          },
+          {
+            "label": "Natural rock set A triplanar scale",
+            "name": "Natural rock set A triplanar scale",
+            "settings": {
+              "operation": "SCALE"
+            },
+            "type": "ShaderNodeVectorMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Vector",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "index": 2,
+                "name": "Vector",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "index": 3,
+                "name": "Scale",
+                "value": 0.1
+              }
+            ]
+          },
+          {
+            "label": "Natural rock set B triplanar scale",
+            "name": "Natural rock set B triplanar scale",
+            "settings": {
+              "operation": "SCALE"
+            },
+            "type": "ShaderNodeVectorMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Vector",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "index": 2,
+                "name": "Vector",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "index": 3,
+                "name": "Scale",
+                "value": 0.13
+              }
+            ]
+          },
+          {
+            "image": "blue/baked/art/shader_textures/px_natural_rock/sets/px_natural_rock_temperate_A_setrocknormal.dds",
+            "label": "Natural Rock Set Normal A",
+            "name": "Natural Rock Set Normal A",
+            "settings": {
+              "extension": "REPEAT",
+              "interpolation": "Linear",
+              "projection": "BOX",
+              "projection_blend": 0.2
+            },
+            "type": "ShaderNodeTexImage"
+          },
+          {
+            "label": "Natural Rock Set Normal A UV (UVMap_0)",
+            "name": "Natural Rock Set Normal A UV (UVMap_0)",
+            "settings": {
+              "uv_map": "UVMap_0"
+            },
+            "type": "ShaderNodeUVMap"
+          },
+          {
+            "label": "Natural Rock Set Normal A UV tiling",
+            "name": "Natural Rock Set Normal A UV tiling",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeVectorMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Vector",
+                "value": [
+                  0.1,
+                  0.1,
+                  1.0
+                ]
+              },
+              {
+                "index": 2,
+                "name": "Vector",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "index": 3,
+                "name": "Scale",
+                "value": 1.0
+              }
+            ]
+          },
+          {
+            "image": "blue/baked/art/shader_textures/px_natural_rock/sets/px_natural_rock_temperate_B_setrocknormal.dds",
+            "label": "Natural Rock Set Normal B",
+            "name": "Natural Rock Set Normal B",
+            "settings": {
+              "extension": "REPEAT",
+              "interpolation": "Linear",
+              "projection": "BOX",
+              "projection_blend": 0.2
+            },
+            "type": "ShaderNodeTexImage"
+          },
+          {
+            "label": "Natural Rock Set Normal B UV (UVMap_0)",
+            "name": "Natural Rock Set Normal B UV (UVMap_0)",
+            "settings": {
+              "uv_map": "UVMap_0"
+            },
+            "type": "ShaderNodeUVMap"
+          },
+          {
+            "label": "Natural Rock Set Normal B UV tiling",
+            "name": "Natural Rock Set Normal B UV tiling",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeVectorMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Vector",
+                "value": [
+                  0.13,
+                  0.13,
+                  1.0
+                ]
+              },
+              {
+                "index": 2,
+                "name": "Vector",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "index": 3,
+                "name": "Scale",
+                "value": 1.0
+              }
+            ]
+          },
+          {
+            "image": "blue/baked/art/props/pr_msv_1053/pr_msv_1053_a_Mask.dds",
+            "label": "Natural Rock Unique Mask",
+            "name": "Natural Rock Unique Mask",
+            "settings": {
+              "extension": "REPEAT",
+              "interpolation": "Linear",
+              "projection": "FLAT",
+              "projection_blend": 0.0
+            },
+            "type": "ShaderNodeTexImage",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Vector",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            ]
+          },
+          {
+            "label": "Natural rock unique-mask overlay",
+            "name": "Natural rock unique-mask overlay",
+            "settings": {
+              "blend_type": "OVERLAY"
+            },
+            "type": "ShaderNodeMixRGB",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Factor",
+                "value": 1.0
+              }
+            ]
+          },
+          {
+            "label": "Natural rock vertex masks",
+            "name": "Natural rock vertex masks",
+            "settings": {
+              "layer_name": "Color_0"
+            },
+            "type": "ShaderNodeVertexColor"
+          },
+          {
+            "label": "Natural rock vertex-mask channels",
+            "name": "Natural rock vertex-mask channels",
+            "type": "ShaderNodeSeparateColor"
+          },
+          {
+            "image": "blue/baked/art/props/pr_msv_1053/pr_msv_1053_a_n.dds",
+            "label": "Normal (packed)",
+            "name": "Normal (packed)",
+            "settings": {
+              "extension": "REPEAT",
+              "interpolation": "Linear",
+              "projection": "FLAT",
+              "projection_blend": 0.0
+            },
+            "type": "ShaderNodeTexImage",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Vector",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Normal Map",
+            "settings": {
+              "space": "TANGENT",
+              "uv_map": ""
+            },
+            "type": "ShaderNodeNormalMap",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Strength",
+                "value": 1.0
+              }
+            ]
+          },
+          {
+            "label": "Normal X signed",
+            "name": "Normal X signed",
+            "settings": {
+              "operation": "SUBTRACT"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 1.00392163
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Normal X squared",
+            "name": "Normal X squared",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Normal X x2",
+            "name": "Normal X x2",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 2.0
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Normal XY squared",
+            "name": "Normal XY squared",
+            "settings": {
+              "operation": "ADD"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Normal Y signed",
+            "name": "Normal Y signed",
+            "settings": {
+              "operation": "SUBTRACT"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 1.00392163
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Normal Y squared",
+            "name": "Normal Y squared",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Normal Y x2",
+            "name": "Normal Y x2",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 2.0
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Normal Z squared",
+            "name": "Normal Z squared",
+            "settings": {
+              "operation": "SUBTRACT"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Value",
+                "value": 1.0
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "name": "Principled BSDF",
+            "settings": {
+              "distribution": "MULTI_GGX"
+            },
+            "type": "ShaderNodeBsdfPrincipled",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Metallic",
+                "value": 0.0
+              },
+              {
+                "index": 3,
+                "name": "IOR",
+                "value": 1.5
+              },
+              {
+                "index": 4,
+                "name": "Alpha",
+                "value": 1.0
+              },
+              {
+                "index": 6,
+                "name": "Weight",
+                "value": 0.0
+              },
+              {
+                "index": 7,
+                "name": "Diffuse Roughness",
+                "value": 0.0
+              },
+              {
+                "index": 8,
+                "name": "Subsurface Weight",
+                "value": 0.0
+              },
+              {
+                "index": 9,
+                "name": "Subsurface Radius",
+                "value": [
+                  1.0,
+                  0.2,
+                  0.1
+                ]
+              },
+              {
+                "index": 10,
+                "name": "Subsurface Scale",
+                "value": 0.05
+              },
+              {
+                "index": 11,
+                "name": "Subsurface IOR",
+                "value": 1.39999998
+              },
+              {
+                "index": 12,
+                "name": "Subsurface Anisotropy",
+                "value": 0.0
+              },
+              {
+                "index": 13,
+                "name": "Specular IOR Level",
+                "value": 0.5
+              },
+              {
+                "index": 14,
+                "name": "Specular Tint",
+                "value": [
+                  1.0,
+                  1.0,
+                  1.0,
+                  1.0
+                ]
+              },
+              {
+                "index": 15,
+                "name": "Anisotropic",
+                "value": 0.0
+              },
+              {
+                "index": 16,
+                "name": "Anisotropic Rotation",
+                "value": 0.0
+              },
+              {
+                "index": 17,
+                "name": "Tangent",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "index": 18,
+                "name": "Transmission Weight",
+                "value": 0.0
+              },
+              {
+                "index": 19,
+                "name": "Coat Weight",
+                "value": 0.0
+              },
+              {
+                "index": 20,
+                "name": "Coat Roughness",
+                "value": 0.03
+              },
+              {
+                "index": 21,
+                "name": "Coat IOR",
+                "value": 1.5
+              },
+              {
+                "index": 22,
+                "name": "Coat Tint",
+                "value": [
+                  1.0,
+                  1.0,
+                  1.0,
+                  1.0
+                ]
+              },
+              {
+                "index": 23,
+                "name": "Coat Normal",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "index": 24,
+                "name": "Sheen Weight",
+                "value": 0.0
+              },
+              {
+                "index": 25,
+                "name": "Sheen Roughness",
+                "value": 0.5
+              },
+              {
+                "index": 26,
+                "name": "Sheen Tint",
+                "value": [
+                  1.0,
+                  1.0,
+                  1.0,
+                  1.0
+                ]
+              },
+              {
+                "index": 27,
+                "name": "Emission Color",
+                "value": [
+                  1.0,
+                  1.0,
+                  1.0,
+                  1.0
+                ]
+              },
+              {
+                "index": 28,
+                "name": "Emission Strength",
+                "value": 0.0
+              },
+              {
+                "index": 29,
+                "name": "Thin Film Thickness",
+                "value": 0.0
+              },
+              {
+                "index": 30,
+                "name": "Thin Film IOR",
+                "value": 1.33000004
+              }
+            ]
+          },
+          {
+            "label": "Reconstruct normal Z",
+            "name": "Reconstruct normal Z",
+            "settings": {
+              "operation": "SQRT"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 0.5
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Reconstructed tangent normal",
+            "name": "Reconstructed tangent normal",
+            "type": "ShaderNodeCombineColor"
+          },
+          {
+            "label": "Snowdrop packed normal (A/G)",
+            "name": "Snowdrop packed normal (A/G)",
+            "type": "ShaderNodeSeparateColor"
+          },
+          {
+            "label": "Weighted SetRock A lookup channel",
+            "name": "Weighted SetRock A lookup channel",
+            "settings": {
+              "blend_type": "MIX"
+            },
+            "type": "ShaderNodeMixRGB",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Color1",
+                "value": [
+                  0.5,
+                  0.5,
+                  0.5,
+                  1.0
+                ]
+              }
+            ]
+          },
+          {
+            "label": "Weighted SetRock A lookup channel authored weight",
+            "name": "Weighted SetRock A lookup channel authored weight",
+            "type": "ShaderNodeValue"
+          },
+          {
+            "label": "Weighted SetRock A lookup channel vertex weight",
+            "name": "Weighted SetRock A lookup channel vertex weight",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Weighted SetRock B lookup channel",
+            "name": "Weighted SetRock B lookup channel",
+            "settings": {
+              "blend_type": "MIX"
+            },
+            "type": "ShaderNodeMixRGB",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Color1",
+                "value": [
+                  0.5,
+                  0.5,
+                  0.5,
+                  1.0
+                ]
+              }
+            ]
+          },
+          {
+            "label": "Weighted SetRock B lookup channel authored weight",
+            "name": "Weighted SetRock B lookup channel authored weight",
+            "type": "ShaderNodeValue"
+          },
+          {
+            "label": "Weighted SetRock B lookup channel vertex weight",
+            "name": "Weighted SetRock B lookup channel vertex weight",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          }
+        ]
+      },
+      "surface_render_method": "DITHERED",
+      "use_nodes": true
+    },
+    {
+      "afop_properties": {
+        "afop_alpha_source": "diffuse",
+        "afop_bio_preview": "night",
+        "afop_bioluminescence": "blue/baked/art/vegetation/vg_msv_0159/VG_MSV_0159_B_BIO.dds",
+        "afop_detail_normal": "blue/baked/art/[assets]/[darkwinter]/dw1417/dn_bark_01_n.dds|blue/baked/art/[assets]/[generictexture]/detailnormals/dn_paper_01_n.dds",
+        "afop_diffuse": "blue/baked/art/vegetation/vg_msv_0159/VG_MSV_0159_B_D.dds",
+        "afop_mask": "blue/baked/art/vegetation/vg_msv_0159/VG_MSV_0159_B_M.dds",
+        "afop_material_source": "blue/graph objects/prop/(orange_moss)nat_temp_rock_small_01.mgraphobject",
+        "afop_mgraphobject": "blue/graph objects/prop/(orange_moss)nat_temp_rock_small_01.mgraphobject",
+        "afop_normal": "blue/baked/art/vegetation/vg_msv_0159/VG_MSV_0159_B_N.dds",
+        "afop_normal_strength": 1.0,
+        "afop_profile_limit": "Wind, pollution, weather and time-of-day branches are engine-driven",
+        "afop_shader": "blue/shaders/px_vegetation.mshader",
+        "afop_shader_profile": "vegetation_static_night"
+      },
+      "blend_method": "HASHED",
+      "name": "AFOP_pr_msv_1053_a_PR_MSV_1053_A_Fungi",
+      "node_tree": {
+        "links": [
+          {
+            "from_node": "Normal Z squared",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Clamp normal Z",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Reconstruct normal Z",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Encode normal Z",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Encode normal Z",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Encode normal Z + 0.5",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Snowdrop material channels",
+            "from_socket": {
+              "index": 2,
+              "name": "Blue"
+            },
+            "to_node": "Material B selects vegetation detail",
+            "to_socket": {
+              "index": 0,
+              "name": "Factor"
+            }
+          },
+          {
+            "from_node": "Vegetation Detail A (packed)",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Material B selects vegetation detail",
+            "to_socket": {
+              "index": 1,
+              "name": "Color1"
+            }
+          },
+          {
+            "from_node": "Vegetation Detail B (packed)",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Material B selects vegetation detail",
+            "to_socket": {
+              "index": 2,
+              "name": "Color2"
+            }
+          },
+          {
+            "from_node": "Principled BSDF",
+            "from_socket": {
+              "index": 0,
+              "name": "BSDF"
+            },
+            "to_node": "Material Output",
+            "to_socket": {
+              "index": 0,
+              "name": "Surface"
+            }
+          },
+          {
+            "from_node": "Snowdrop material channels",
+            "from_socket": {
+              "index": 2,
+              "name": "Blue"
+            },
+            "to_node": "Mix (Legacy)",
+            "to_socket": {
+              "index": 0,
+              "name": "Factor"
+            }
+          },
+          {
+            "from_node": "Vegetation Detail A (packed)",
+            "from_socket": {
+              "index": 1,
+              "name": "Alpha"
+            },
+            "to_node": "Mix (Legacy)",
+            "to_socket": {
+              "index": 1,
+              "name": "Color1"
+            }
+          },
+          {
+            "from_node": "Vegetation Detail B (packed)",
+            "from_socket": {
+              "index": 1,
+              "name": "Alpha"
+            },
+            "to_node": "Mix (Legacy)",
+            "to_socket": {
+              "index": 2,
+              "name": "Color2"
+            }
+          },
+          {
+            "from_node": "Vegetation detail normal (RNM)",
+            "from_socket": {
+              "index": 0,
+              "name": "Normal Color"
+            },
+            "to_node": "Normal Map",
+            "to_socket": {
+              "index": 1,
+              "name": "Color"
+            }
+          },
+          {
+            "from_node": "Normal X x2",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal X signed",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal X signed",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal X squared",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal X signed",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal X squared",
+            "to_socket": {
+              "index": 1,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal (packed)",
+            "from_socket": {
+              "index": 1,
+              "name": "Alpha"
+            },
+            "to_node": "Normal X x2",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal X squared",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal XY squared",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal Y squared",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal XY squared",
+            "to_socket": {
+              "index": 1,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal Y x2",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal Y signed",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal Y signed",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal Y squared",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal Y signed",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal Y squared",
+            "to_socket": {
+              "index": 1,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Snowdrop packed normal (A/G)",
+            "from_socket": {
+              "index": 1,
+              "name": "Green"
+            },
+            "to_node": "Normal Y x2",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal XY squared",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal Z squared",
+            "to_socket": {
+              "index": 1,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Snowdrop vegetation OverlayNoMask",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Principled BSDF",
+            "to_socket": {
+              "index": 0,
+              "name": "Base Color"
+            }
+          },
+          {
+            "from_node": "Vegetation roughness + 0.35",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Principled BSDF",
+            "to_socket": {
+              "index": 2,
+              "name": "Roughness"
+            }
+          },
+          {
+            "from_node": "Diffuse / Albedo",
+            "from_socket": {
+              "index": 1,
+              "name": "Alpha"
+            },
+            "to_node": "Principled BSDF",
+            "to_socket": {
+              "index": 4,
+              "name": "Alpha"
+            }
+          },
+          {
+            "from_node": "Normal Map",
+            "from_socket": {
+              "index": 0,
+              "name": "Normal"
+            },
+            "to_node": "Principled BSDF",
+            "to_socket": {
+              "index": 5,
+              "name": "Normal"
+            }
+          },
+          {
+            "from_node": "Vegetation bio hue/scale preview",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Principled BSDF",
+            "to_socket": {
+              "index": 27,
+              "name": "Emission Color"
+            }
+          },
+          {
+            "from_node": "Clamp normal Z",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Reconstruct normal Z",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal (packed)",
+            "from_socket": {
+              "index": 1,
+              "name": "Alpha"
+            },
+            "to_node": "Reconstructed tangent normal",
+            "to_socket": {
+              "index": 0,
+              "name": "Red"
+            }
+          },
+          {
+            "from_node": "Snowdrop packed normal (A/G)",
+            "from_socket": {
+              "index": 1,
+              "name": "Green"
+            },
+            "to_node": "Reconstructed tangent normal",
+            "to_socket": {
+              "index": 1,
+              "name": "Green"
+            }
+          },
+          {
+            "from_node": "Encode normal Z + 0.5",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Reconstructed tangent normal",
+            "to_socket": {
+              "index": 2,
+              "name": "Blue"
+            }
+          },
+          {
+            "from_node": "Material / Mask (packed)",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Snowdrop material channels",
+            "to_socket": {
+              "index": 0,
+              "name": "Color"
+            }
+          },
+          {
+            "from_node": "Normal (packed)",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Snowdrop packed normal (A/G)",
+            "to_socket": {
+              "index": 0,
+              "name": "Color"
+            }
+          },
+          {
+            "from_node": "Diffuse / Albedo",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Snowdrop vegetation OverlayNoMask",
+            "to_socket": {
+              "index": 1,
+              "name": "Color1"
+            }
+          },
+          {
+            "from_node": "Color",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Snowdrop vegetation OverlayNoMask",
+            "to_socket": {
+              "index": 2,
+              "name": "Color2"
+            }
+          },
+          {
+            "from_node": "Vegetation Bioluminescence",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Vegetation bio hue/scale preview",
+            "to_socket": {
+              "index": 4,
+              "name": "Color"
+            }
+          },
+          {
+            "from_node": "Vegetation Detail A (packed) UV tiling",
+            "from_socket": {
+              "index": 0,
+              "name": "Vector"
+            },
+            "to_node": "Vegetation Detail A (packed)",
+            "to_socket": {
+              "index": 0,
+              "name": "Vector"
+            }
+          },
+          {
+            "from_node": "Vegetation Detail A (packed) UV (UVMap_1)",
+            "from_socket": {
+              "index": 0,
+              "name": "UV"
+            },
+            "to_node": "Vegetation Detail A (packed) UV tiling",
+            "to_socket": {
+              "index": 0,
+              "name": "Vector"
+            }
+          },
+          {
+            "from_node": "Vegetation Detail B (packed) UV tiling",
+            "from_socket": {
+              "index": 0,
+              "name": "Vector"
+            },
+            "to_node": "Vegetation Detail B (packed)",
+            "to_socket": {
+              "index": 0,
+              "name": "Vector"
+            }
+          },
+          {
+            "from_node": "Vegetation Detail B (packed) UV (UVMap_1)",
+            "from_socket": {
+              "index": 0,
+              "name": "UV"
+            },
+            "to_node": "Vegetation Detail B (packed) UV tiling",
+            "to_socket": {
+              "index": 0,
+              "name": "Vector"
+            }
+          },
+          {
+            "from_node": "Normal (packed)",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Vegetation detail normal (RNM)",
+            "to_socket": {
+              "index": 0,
+              "name": "Base Color"
+            }
+          },
+          {
+            "from_node": "Normal (packed)",
+            "from_socket": {
+              "index": 1,
+              "name": "Alpha"
+            },
+            "to_node": "Vegetation detail normal (RNM)",
+            "to_socket": {
+              "index": 1,
+              "name": "Base Alpha"
+            }
+          },
+          {
+            "from_node": "Material B selects vegetation detail",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Vegetation detail normal (RNM)",
+            "to_socket": {
+              "index": 2,
+              "name": "Detail Color"
+            }
+          },
+          {
+            "from_node": "Mix (Legacy)",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Vegetation detail normal (RNM)",
+            "to_socket": {
+              "index": 3,
+              "name": "Detail Alpha"
+            }
+          },
+          {
+            "from_node": "Value",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Vegetation detail normal (RNM)",
+            "to_socket": {
+              "index": 4,
+              "name": "Mask"
+            }
+          },
+          {
+            "from_node": "Vegetation roughness x 0.65",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Vegetation roughness + 0.35",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Snowdrop material channels",
+            "from_socket": {
+              "index": 0,
+              "name": "Red"
+            },
+            "to_node": "Vegetation roughness x 0.65",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          }
+        ],
+        "nodes": [
+          {
+            "label": "Clamp normal Z",
+            "name": "Clamp normal Z",
+            "settings": {
+              "operation": "MAXIMUM"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 0.0
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Authored vegetation tint",
+            "name": "Color",
+            "type": "ShaderNodeRGB"
+          },
+          {
+            "image": "blue/baked/art/vegetation/vg_msv_0159/VG_MSV_0159_B_D.dds",
+            "label": "Diffuse / Albedo",
+            "name": "Diffuse / Albedo",
+            "settings": {
+              "extension": "REPEAT",
+              "interpolation": "Linear",
+              "projection": "FLAT",
+              "projection_blend": 0.0
+            },
+            "type": "ShaderNodeTexImage",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Vector",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            ]
+          },
+          {
+            "label": "Encode normal Z",
+            "name": "Encode normal Z",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 0.5
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Encode normal Z + 0.5",
+            "name": "Encode normal Z + 0.5",
+            "settings": {
+              "operation": "ADD"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 0.5
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "image": "blue/baked/art/vegetation/vg_msv_0159/VG_MSV_0159_B_M.dds",
+            "label": "Material / Mask (packed)",
+            "name": "Material / Mask (packed)",
+            "settings": {
+              "extension": "REPEAT",
+              "interpolation": "Linear",
+              "projection": "FLAT",
+              "projection_blend": 0.0
+            },
+            "type": "ShaderNodeTexImage",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Vector",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            ]
+          },
+          {
+            "label": "Material B selects vegetation detail",
+            "name": "Material B selects vegetation detail",
+            "settings": {
+              "blend_type": "MIX"
+            },
+            "type": "ShaderNodeMixRGB"
+          },
+          {
+            "name": "Material Output",
+            "type": "ShaderNodeOutputMaterial",
+            "unlinked_inputs": [
+              {
+                "index": 2,
+                "name": "Displacement",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "index": 3,
+                "name": "Thickness",
+                "value": 0.0
+              }
+            ]
+          },
+          {
+            "label": "Vegetation detail X selection",
+            "name": "Mix (Legacy)",
+            "settings": {
+              "blend_type": "MIX"
+            },
+            "type": "ShaderNodeMixRGB"
+          },
+          {
+            "image": "blue/baked/art/vegetation/vg_msv_0159/VG_MSV_0159_B_N.dds",
+            "label": "Normal (packed)",
+            "name": "Normal (packed)",
+            "settings": {
+              "extension": "REPEAT",
+              "interpolation": "Linear",
+              "projection": "FLAT",
+              "projection_blend": 0.0
+            },
+            "type": "ShaderNodeTexImage",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Vector",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Normal Map",
+            "settings": {
+              "space": "TANGENT",
+              "uv_map": ""
+            },
+            "type": "ShaderNodeNormalMap",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Strength",
+                "value": 1.0
+              }
+            ]
+          },
+          {
+            "label": "Normal X signed",
+            "name": "Normal X signed",
+            "settings": {
+              "operation": "SUBTRACT"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 1.00392163
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Normal X squared",
+            "name": "Normal X squared",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Normal X x2",
+            "name": "Normal X x2",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 2.0
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Normal XY squared",
+            "name": "Normal XY squared",
+            "settings": {
+              "operation": "ADD"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Normal Y signed",
+            "name": "Normal Y signed",
+            "settings": {
+              "operation": "SUBTRACT"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 1.00392163
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Normal Y squared",
+            "name": "Normal Y squared",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Normal Y x2",
+            "name": "Normal Y x2",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 2.0
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Normal Z squared",
+            "name": "Normal Z squared",
+            "settings": {
+              "operation": "SUBTRACT"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Value",
+                "value": 1.0
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "name": "Principled BSDF",
+            "settings": {
+              "distribution": "MULTI_GGX"
+            },
+            "type": "ShaderNodeBsdfPrincipled",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Metallic",
+                "value": 0.0
+              },
+              {
+                "index": 3,
+                "name": "IOR",
+                "value": 1.5
+              },
+              {
+                "index": 6,
+                "name": "Weight",
+                "value": 0.0
+              },
+              {
+                "index": 7,
+                "name": "Diffuse Roughness",
+                "value": 0.0
+              },
+              {
+                "index": 8,
+                "name": "Subsurface Weight",
+                "value": 0.0
+              },
+              {
+                "index": 9,
+                "name": "Subsurface Radius",
+                "value": [
+                  1.0,
+                  0.2,
+                  0.1
+                ]
+              },
+              {
+                "index": 10,
+                "name": "Subsurface Scale",
+                "value": 0.05
+              },
+              {
+                "index": 11,
+                "name": "Subsurface IOR",
+                "value": 1.39999998
+              },
+              {
+                "index": 12,
+                "name": "Subsurface Anisotropy",
+                "value": 0.0
+              },
+              {
+                "index": 13,
+                "name": "Specular IOR Level",
+                "value": 0.5
+              },
+              {
+                "index": 14,
+                "name": "Specular Tint",
+                "value": [
+                  1.0,
+                  1.0,
+                  1.0,
+                  1.0
+                ]
+              },
+              {
+                "index": 15,
+                "name": "Anisotropic",
+                "value": 0.0
+              },
+              {
+                "index": 16,
+                "name": "Anisotropic Rotation",
+                "value": 0.0
+              },
+              {
+                "index": 17,
+                "name": "Tangent",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "index": 18,
+                "name": "Transmission Weight",
+                "value": 0.0
+              },
+              {
+                "index": 19,
+                "name": "Coat Weight",
+                "value": 0.0
+              },
+              {
+                "index": 20,
+                "name": "Coat Roughness",
+                "value": 0.03
+              },
+              {
+                "index": 21,
+                "name": "Coat IOR",
+                "value": 1.5
+              },
+              {
+                "index": 22,
+                "name": "Coat Tint",
+                "value": [
+                  1.0,
+                  1.0,
+                  1.0,
+                  1.0
+                ]
+              },
+              {
+                "index": 23,
+                "name": "Coat Normal",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "index": 24,
+                "name": "Sheen Weight",
+                "value": 0.0
+              },
+              {
+                "index": 25,
+                "name": "Sheen Roughness",
+                "value": 0.5
+              },
+              {
+                "index": 26,
+                "name": "Sheen Tint",
+                "value": [
+                  1.0,
+                  1.0,
+                  1.0,
+                  1.0
+                ]
+              },
+              {
+                "index": 28,
+                "name": "Emission Strength",
+                "value": 1.0
+              },
+              {
+                "index": 29,
+                "name": "Thin Film Thickness",
+                "value": 0.0
+              },
+              {
+                "index": 30,
+                "name": "Thin Film IOR",
+                "value": 1.33000004
+              }
+            ]
+          },
+          {
+            "label": "Reconstruct normal Z",
+            "name": "Reconstruct normal Z",
+            "settings": {
+              "operation": "SQRT"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 0.5
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Reconstructed tangent normal",
+            "name": "Reconstructed tangent normal",
+            "type": "ShaderNodeCombineColor"
+          },
+          {
+            "label": "R: Metal/SSS  G: Roughness  B: Detail  A: Opacity/Coat",
+            "name": "Snowdrop material channels",
+            "type": "ShaderNodeSeparateColor"
+          },
+          {
+            "label": "Snowdrop packed normal (A/G)",
+            "name": "Snowdrop packed normal (A/G)",
+            "type": "ShaderNodeSeparateColor"
+          },
+          {
+            "label": "Snowdrop vegetation OverlayNoMask",
+            "name": "Snowdrop vegetation OverlayNoMask",
+            "settings": {
+              "blend_type": "OVERLAY"
+            },
+            "type": "ShaderNodeMixRGB",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Factor",
+                "value": 1.0
+              }
+            ]
+          },
+          {
+            "label": "Vegetation detail enabled",
+            "name": "Value",
+            "type": "ShaderNodeValue"
+          },
+          {
+            "label": "Vegetation bio hue/scale preview",
+            "name": "Vegetation bio hue/scale preview",
+            "type": "ShaderNodeHueSaturation",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Hue",
+                "value": 0.5
+              },
+              {
+                "index": 1,
+                "name": "Saturation",
+                "value": 1.0
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 1.0
+              },
+              {
+                "index": 3,
+                "name": "Factor",
+                "value": 1.0
+              }
+            ]
+          },
+          {
+            "image": "blue/baked/art/vegetation/vg_msv_0159/VG_MSV_0159_B_BIO.dds",
+            "label": "Vegetation Bioluminescence",
+            "name": "Vegetation Bioluminescence",
+            "settings": {
+              "extension": "REPEAT",
+              "interpolation": "Linear",
+              "projection": "FLAT",
+              "projection_blend": 0.0
+            },
+            "type": "ShaderNodeTexImage",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Vector",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            ]
+          },
+          {
+            "image": "blue/baked/art/[assets]/[darkwinter]/dw1417/dn_bark_01_n.dds",
+            "label": "Vegetation Detail A (packed)",
+            "name": "Vegetation Detail A (packed)",
+            "settings": {
+              "extension": "REPEAT",
+              "interpolation": "Linear",
+              "projection": "FLAT",
+              "projection_blend": 0.0
+            },
+            "type": "ShaderNodeTexImage"
+          },
+          {
+            "label": "Vegetation Detail A (packed) UV (UVMap_1)",
+            "name": "Vegetation Detail A (packed) UV (UVMap_1)",
+            "settings": {
+              "uv_map": "UVMap_1"
+            },
+            "type": "ShaderNodeUVMap"
+          },
+          {
+            "label": "Vegetation Detail A (packed) UV tiling",
+            "name": "Vegetation Detail A (packed) UV tiling",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeVectorMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Vector",
+                "value": [
+                  12.0,
+                  12.0,
+                  1.0
+                ]
+              },
+              {
+                "index": 2,
+                "name": "Vector",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "index": 3,
+                "name": "Scale",
+                "value": 1.0
+              }
+            ]
+          },
+          {
+            "image": "blue/baked/art/[assets]/[generictexture]/detailnormals/dn_paper_01_n.dds",
+            "label": "Vegetation Detail B (packed)",
+            "name": "Vegetation Detail B (packed)",
+            "settings": {
+              "extension": "REPEAT",
+              "interpolation": "Linear",
+              "projection": "FLAT",
+              "projection_blend": 0.0
+            },
+            "type": "ShaderNodeTexImage"
+          },
+          {
+            "label": "Vegetation Detail B (packed) UV (UVMap_1)",
+            "name": "Vegetation Detail B (packed) UV (UVMap_1)",
+            "settings": {
+              "uv_map": "UVMap_1"
+            },
+            "type": "ShaderNodeUVMap"
+          },
+          {
+            "label": "Vegetation Detail B (packed) UV tiling",
+            "name": "Vegetation Detail B (packed) UV tiling",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeVectorMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Vector",
+                "value": [
+                  12.0,
+                  12.0,
+                  1.0
+                ]
+              },
+              {
+                "index": 2,
+                "name": "Vector",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "index": 3,
+                "name": "Scale",
+                "value": 1.0
+              }
+            ]
+          },
+          {
+            "label": "Vegetation detail normal (RNM)",
+            "name": "Vegetation detail normal (RNM)",
+            "node_group": "AFOP Packed Detail Normal RNM v2",
+            "type": "ShaderNodeGroup",
+            "unlinked_inputs": [
+              {
+                "index": 5,
+                "name": "Strength",
+                "value": 0.7619403
+              }
+            ]
+          },
+          {
+            "label": "Vegetation roughness + 0.35",
+            "name": "Vegetation roughness + 0.35",
+            "settings": {
+              "operation": "ADD"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 0.34999999
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Vegetation roughness x 0.65",
+            "name": "Vegetation roughness x 0.65",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 0.64999998
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          }
+        ]
+      },
+      "surface_render_method": "DITHERED",
+      "use_nodes": true
+    },
+    {
+      "afop_properties": {
+        "afop_alpha_source": "diffuse+material-opacity",
+        "afop_bio_preview": "night",
+        "afop_bioluminescence": "blue/baked/art/vegetation/vg_msv_0215/vg_msv_0215_a_Orange_bio.dds",
+        "afop_diffuse": "blue/baked/art/vegetation/vg_msv_0215/vg_msv_0215_a_Orange_d.dds",
+        "afop_mask": "blue/baked/art/vegetation/vg_msv_0215/VG_MSV_0215_A_M.dds",
+        "afop_material_source": "blue/graph objects/prop/(orange_moss)nat_temp_rock_small_01.mgraphobject",
+        "afop_mgraphobject": "blue/graph objects/prop/(orange_moss)nat_temp_rock_small_01.mgraphobject",
+        "afop_normal": "blue/baked/art/vegetation/vg_msv_0215/VG_MSV_0215_A_N.dds",
+        "afop_normal_strength": 1.0,
+        "afop_profile_limit": "World projection is static; Fresnel, pollution and time-of-day are engine-driven",
+        "afop_projected_overlay": "blue/baked/art/props/pr_msv_0210/pr_msv_0210_a_coloroverlay_d.dds",
+        "afop_shader": "blue/shaders/px_mosscard.mshader",
+        "afop_shader_profile": "moss_card_static_night"
+      },
+      "blend_method": "HASHED",
+      "name": "AFOP_pr_msv_1053_a_PR_MSV_1053_A_MossCards_Bottom",
+      "node_tree": {
+        "links": [
+          {
+            "from_node": "Normal Z squared",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Clamp normal Z",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Reconstruct normal Z",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Encode normal Z",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Encode normal Z",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Encode normal Z + 0.5",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Principled BSDF",
+            "from_socket": {
+              "index": 0,
+              "name": "BSDF"
+            },
+            "to_node": "Material Output",
+            "to_socket": {
+              "index": 0,
+              "name": "Surface"
+            }
+          },
+          {
+            "from_node": "Moss Card Bioluminescence",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Moss bio OverlayNoMask",
+            "to_socket": {
+              "index": 1,
+              "name": "Color1"
+            }
+          },
+          {
+            "from_node": "Authored moss-card overlay",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Moss bio OverlayNoMask",
+            "to_socket": {
+              "index": 2,
+              "name": "Color2"
+            }
+          },
+          {
+            "from_node": "Moss projected tiling",
+            "from_socket": {
+              "index": 0,
+              "name": "Vector"
+            },
+            "to_node": "Moss Card Projected Overlay",
+            "to_socket": {
+              "index": 0,
+              "name": "Vector"
+            }
+          },
+          {
+            "from_node": "Moss projected OverlayNoMask",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Moss color OverlayNoMask",
+            "to_socket": {
+              "index": 1,
+              "name": "Color1"
+            }
+          },
+          {
+            "from_node": "Authored moss-card overlay",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Moss color OverlayNoMask",
+            "to_socket": {
+              "index": 2,
+              "name": "Color2"
+            }
+          },
+          {
+            "from_node": "Diffuse / Albedo",
+            "from_socket": {
+              "index": 1,
+              "name": "Alpha"
+            },
+            "to_node": "Moss cutout x material opacity",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Moss material opacity + 0.35",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Moss cutout x material opacity",
+            "to_socket": {
+              "index": 1,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Moss material opacity x 0.65",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Moss material opacity + 0.35",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Snowdrop material channels",
+            "from_socket": {
+              "index": 0,
+              "name": "Red"
+            },
+            "to_node": "Moss material opacity x 0.65",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Moss Card Projected Overlay",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Moss projected OverlayNoMask",
+            "to_socket": {
+              "index": 1,
+              "name": "Color1"
+            }
+          },
+          {
+            "from_node": "Diffuse / Albedo",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Moss projected OverlayNoMask",
+            "to_socket": {
+              "index": 2,
+              "name": "Color2"
+            }
+          },
+          {
+            "from_node": "Moss projected X/Z UV",
+            "from_socket": {
+              "index": 0,
+              "name": "Vector"
+            },
+            "to_node": "Moss projected tiling",
+            "to_socket": {
+              "index": 0,
+              "name": "Vector"
+            }
+          },
+          {
+            "from_node": "Moss world X/Z",
+            "from_socket": {
+              "index": 0,
+              "name": "Red"
+            },
+            "to_node": "Moss projected X/Z UV",
+            "to_socket": {
+              "index": 0,
+              "name": "X"
+            }
+          },
+          {
+            "from_node": "Moss world X/Z",
+            "from_socket": {
+              "index": 2,
+              "name": "Blue"
+            },
+            "to_node": "Moss projected X/Z UV",
+            "to_socket": {
+              "index": 1,
+              "name": "Y"
+            }
+          },
+          {
+            "from_node": "Moss projected world position",
+            "from_socket": {
+              "index": 0,
+              "name": "Position"
+            },
+            "to_node": "Moss world X/Z",
+            "to_socket": {
+              "index": 0,
+              "name": "Color"
+            }
+          },
+          {
+            "from_node": "Reconstructed tangent normal",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Normal Map",
+            "to_socket": {
+              "index": 1,
+              "name": "Color"
+            }
+          },
+          {
+            "from_node": "Normal X x2",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal X signed",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal X signed",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal X squared",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal X signed",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal X squared",
+            "to_socket": {
+              "index": 1,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal (packed)",
+            "from_socket": {
+              "index": 1,
+              "name": "Alpha"
+            },
+            "to_node": "Normal X x2",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal X squared",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal XY squared",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal Y squared",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal XY squared",
+            "to_socket": {
+              "index": 1,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal Y x2",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal Y signed",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal Y signed",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal Y squared",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal Y signed",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal Y squared",
+            "to_socket": {
+              "index": 1,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Snowdrop packed normal (A/G)",
+            "from_socket": {
+              "index": 1,
+              "name": "Green"
+            },
+            "to_node": "Normal Y x2",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal XY squared",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal Z squared",
+            "to_socket": {
+              "index": 1,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Moss color OverlayNoMask",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Principled BSDF",
+            "to_socket": {
+              "index": 0,
+              "name": "Base Color"
+            }
+          },
+          {
+            "from_node": "Snowdrop material channels",
+            "from_socket": {
+              "index": 1,
+              "name": "Green"
+            },
+            "to_node": "Principled BSDF",
+            "to_socket": {
+              "index": 2,
+              "name": "Roughness"
+            }
+          },
+          {
+            "from_node": "Moss cutout x material opacity",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Principled BSDF",
+            "to_socket": {
+              "index": 4,
+              "name": "Alpha"
+            }
+          },
+          {
+            "from_node": "Normal Map",
+            "from_socket": {
+              "index": 0,
+              "name": "Normal"
+            },
+            "to_node": "Principled BSDF",
+            "to_socket": {
+              "index": 5,
+              "name": "Normal"
+            }
+          },
+          {
+            "from_node": "Moss bio OverlayNoMask",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Principled BSDF",
+            "to_socket": {
+              "index": 27,
+              "name": "Emission Color"
+            }
+          },
+          {
+            "from_node": "Clamp normal Z",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Reconstruct normal Z",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal (packed)",
+            "from_socket": {
+              "index": 1,
+              "name": "Alpha"
+            },
+            "to_node": "Reconstructed tangent normal",
+            "to_socket": {
+              "index": 0,
+              "name": "Red"
+            }
+          },
+          {
+            "from_node": "Snowdrop packed normal (A/G)",
+            "from_socket": {
+              "index": 1,
+              "name": "Green"
+            },
+            "to_node": "Reconstructed tangent normal",
+            "to_socket": {
+              "index": 1,
+              "name": "Green"
+            }
+          },
+          {
+            "from_node": "Encode normal Z + 0.5",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Reconstructed tangent normal",
+            "to_socket": {
+              "index": 2,
+              "name": "Blue"
+            }
+          },
+          {
+            "from_node": "Material / Mask (packed)",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Snowdrop material channels",
+            "to_socket": {
+              "index": 0,
+              "name": "Color"
+            }
+          },
+          {
+            "from_node": "Normal (packed)",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Snowdrop packed normal (A/G)",
+            "to_socket": {
+              "index": 0,
+              "name": "Color"
+            }
+          }
+        ],
+        "nodes": [
+          {
+            "label": "Authored moss-card overlay",
+            "name": "Authored moss-card overlay",
+            "type": "ShaderNodeRGB"
+          },
+          {
+            "label": "Clamp normal Z",
+            "name": "Clamp normal Z",
+            "settings": {
+              "operation": "MAXIMUM"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 0.0
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "image": "blue/baked/art/vegetation/vg_msv_0215/vg_msv_0215_a_Orange_d.dds",
+            "label": "Diffuse / Albedo",
+            "name": "Diffuse / Albedo",
+            "settings": {
+              "extension": "REPEAT",
+              "interpolation": "Linear",
+              "projection": "FLAT",
+              "projection_blend": 0.0
+            },
+            "type": "ShaderNodeTexImage",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Vector",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            ]
+          },
+          {
+            "label": "Encode normal Z",
+            "name": "Encode normal Z",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 0.5
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Encode normal Z + 0.5",
+            "name": "Encode normal Z + 0.5",
+            "settings": {
+              "operation": "ADD"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 0.5
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "image": "blue/baked/art/vegetation/vg_msv_0215/VG_MSV_0215_A_M.dds",
+            "label": "Material / Mask (packed)",
+            "name": "Material / Mask (packed)",
+            "settings": {
+              "extension": "REPEAT",
+              "interpolation": "Linear",
+              "projection": "FLAT",
+              "projection_blend": 0.0
+            },
+            "type": "ShaderNodeTexImage",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Vector",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Material Output",
+            "type": "ShaderNodeOutputMaterial",
+            "unlinked_inputs": [
+              {
+                "index": 2,
+                "name": "Displacement",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "index": 3,
+                "name": "Thickness",
+                "value": 0.0
+              }
+            ]
+          },
+          {
+            "label": "Moss bio OverlayNoMask",
+            "name": "Moss bio OverlayNoMask",
+            "settings": {
+              "blend_type": "OVERLAY"
+            },
+            "type": "ShaderNodeMixRGB",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Factor",
+                "value": 1.0
+              }
+            ]
+          },
+          {
+            "image": "blue/baked/art/vegetation/vg_msv_0215/vg_msv_0215_a_Orange_bio.dds",
+            "label": "Moss Card Bioluminescence",
+            "name": "Moss Card Bioluminescence",
+            "settings": {
+              "extension": "REPEAT",
+              "interpolation": "Linear",
+              "projection": "FLAT",
+              "projection_blend": 0.0
+            },
+            "type": "ShaderNodeTexImage",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Vector",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            ]
+          },
+          {
+            "image": "blue/baked/art/props/pr_msv_0210/pr_msv_0210_a_coloroverlay_d.dds",
+            "label": "Moss Card Projected Overlay",
+            "name": "Moss Card Projected Overlay",
+            "settings": {
+              "extension": "REPEAT",
+              "interpolation": "Linear",
+              "projection": "FLAT",
+              "projection_blend": 0.0
+            },
+            "type": "ShaderNodeTexImage"
+          },
+          {
+            "label": "Moss color OverlayNoMask",
+            "name": "Moss color OverlayNoMask",
+            "settings": {
+              "blend_type": "OVERLAY"
+            },
+            "type": "ShaderNodeMixRGB",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Factor",
+                "value": 1.0
+              }
+            ]
+          },
+          {
+            "label": "Moss cutout x material opacity",
+            "name": "Moss cutout x material opacity",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Moss material opacity + 0.35",
+            "name": "Moss material opacity + 0.35",
+            "settings": {
+              "operation": "ADD"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 0.34999999
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Moss material opacity x 0.65",
+            "name": "Moss material opacity x 0.65",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 0.64999998
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Moss projected OverlayNoMask",
+            "name": "Moss projected OverlayNoMask",
+            "settings": {
+              "blend_type": "OVERLAY"
+            },
+            "type": "ShaderNodeMixRGB",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Factor",
+                "value": 1.0
+              }
+            ]
+          },
+          {
+            "label": "Moss projected tiling",
+            "name": "Moss projected tiling",
+            "settings": {
+              "operation": "SCALE"
+            },
+            "type": "ShaderNodeVectorMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Vector",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "index": 2,
+                "name": "Vector",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "index": 3,
+                "name": "Scale",
+                "value": 0.40000001
+              }
+            ]
+          },
+          {
+            "label": "Moss projected world position",
+            "name": "Moss projected world position",
+            "type": "ShaderNodeNewGeometry"
+          },
+          {
+            "label": "Moss projected X/Z UV",
+            "name": "Moss projected X/Z UV",
+            "type": "ShaderNodeCombineXYZ",
+            "unlinked_inputs": [
+              {
+                "index": 2,
+                "name": "Z",
+                "value": 0.0
+              }
+            ]
+          },
+          {
+            "label": "Moss world X/Z",
+            "name": "Moss world X/Z",
+            "type": "ShaderNodeSeparateColor"
+          },
+          {
+            "image": "blue/baked/art/vegetation/vg_msv_0215/VG_MSV_0215_A_N.dds",
+            "label": "Normal (packed)",
+            "name": "Normal (packed)",
+            "settings": {
+              "extension": "REPEAT",
+              "interpolation": "Linear",
+              "projection": "FLAT",
+              "projection_blend": 0.0
+            },
+            "type": "ShaderNodeTexImage",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Vector",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Normal Map",
+            "settings": {
+              "space": "TANGENT",
+              "uv_map": ""
+            },
+            "type": "ShaderNodeNormalMap",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Strength",
+                "value": 1.0
+              }
+            ]
+          },
+          {
+            "label": "Normal X signed",
+            "name": "Normal X signed",
+            "settings": {
+              "operation": "SUBTRACT"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 1.00392163
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Normal X squared",
+            "name": "Normal X squared",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Normal X x2",
+            "name": "Normal X x2",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 2.0
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Normal XY squared",
+            "name": "Normal XY squared",
+            "settings": {
+              "operation": "ADD"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Normal Y signed",
+            "name": "Normal Y signed",
+            "settings": {
+              "operation": "SUBTRACT"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 1.00392163
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Normal Y squared",
+            "name": "Normal Y squared",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Normal Y x2",
+            "name": "Normal Y x2",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 2.0
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Normal Z squared",
+            "name": "Normal Z squared",
+            "settings": {
+              "operation": "SUBTRACT"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Value",
+                "value": 1.0
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "name": "Principled BSDF",
+            "settings": {
+              "distribution": "MULTI_GGX"
+            },
+            "type": "ShaderNodeBsdfPrincipled",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Metallic",
+                "value": 0.0
+              },
+              {
+                "index": 3,
+                "name": "IOR",
+                "value": 1.5
+              },
+              {
+                "index": 6,
+                "name": "Weight",
+                "value": 0.0
+              },
+              {
+                "index": 7,
+                "name": "Diffuse Roughness",
+                "value": 0.0
+              },
+              {
+                "index": 8,
+                "name": "Subsurface Weight",
+                "value": 0.0
+              },
+              {
+                "index": 9,
+                "name": "Subsurface Radius",
+                "value": [
+                  1.0,
+                  0.2,
+                  0.1
+                ]
+              },
+              {
+                "index": 10,
+                "name": "Subsurface Scale",
+                "value": 0.05
+              },
+              {
+                "index": 11,
+                "name": "Subsurface IOR",
+                "value": 1.39999998
+              },
+              {
+                "index": 12,
+                "name": "Subsurface Anisotropy",
+                "value": 0.0
+              },
+              {
+                "index": 13,
+                "name": "Specular IOR Level",
+                "value": 0.5
+              },
+              {
+                "index": 14,
+                "name": "Specular Tint",
+                "value": [
+                  1.0,
+                  1.0,
+                  1.0,
+                  1.0
+                ]
+              },
+              {
+                "index": 15,
+                "name": "Anisotropic",
+                "value": 0.0
+              },
+              {
+                "index": 16,
+                "name": "Anisotropic Rotation",
+                "value": 0.0
+              },
+              {
+                "index": 17,
+                "name": "Tangent",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "index": 18,
+                "name": "Transmission Weight",
+                "value": 0.0
+              },
+              {
+                "index": 19,
+                "name": "Coat Weight",
+                "value": 0.0
+              },
+              {
+                "index": 20,
+                "name": "Coat Roughness",
+                "value": 0.03
+              },
+              {
+                "index": 21,
+                "name": "Coat IOR",
+                "value": 1.5
+              },
+              {
+                "index": 22,
+                "name": "Coat Tint",
+                "value": [
+                  1.0,
+                  1.0,
+                  1.0,
+                  1.0
+                ]
+              },
+              {
+                "index": 23,
+                "name": "Coat Normal",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "index": 24,
+                "name": "Sheen Weight",
+                "value": 0.0
+              },
+              {
+                "index": 25,
+                "name": "Sheen Roughness",
+                "value": 0.5
+              },
+              {
+                "index": 26,
+                "name": "Sheen Tint",
+                "value": [
+                  1.0,
+                  1.0,
+                  1.0,
+                  1.0
+                ]
+              },
+              {
+                "index": 28,
+                "name": "Emission Strength",
+                "value": 1.0
+              },
+              {
+                "index": 29,
+                "name": "Thin Film Thickness",
+                "value": 0.0
+              },
+              {
+                "index": 30,
+                "name": "Thin Film IOR",
+                "value": 1.33000004
+              }
+            ]
+          },
+          {
+            "label": "Reconstruct normal Z",
+            "name": "Reconstruct normal Z",
+            "settings": {
+              "operation": "SQRT"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 0.5
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Reconstructed tangent normal",
+            "name": "Reconstructed tangent normal",
+            "type": "ShaderNodeCombineColor"
+          },
+          {
+            "label": "R: Metal/SSS  G: Roughness  B: Detail  A: Opacity/Coat",
+            "name": "Snowdrop material channels",
+            "type": "ShaderNodeSeparateColor"
+          },
+          {
+            "label": "Snowdrop packed normal (A/G)",
+            "name": "Snowdrop packed normal (A/G)",
+            "type": "ShaderNodeSeparateColor"
+          }
+        ]
+      },
+      "surface_render_method": "DITHERED",
+      "use_nodes": true
+    },
+    {
+      "afop_properties": {
+        "afop_alpha_source": "diffuse+material-opacity",
+        "afop_bio_preview": "night",
+        "afop_bioluminescence": "blue/baked/art/vegetation/vg_msv_0215/vg_msv_0215_a_Orange_bio.dds",
+        "afop_diffuse": "blue/baked/art/vegetation/vg_msv_0215/vg_msv_0215_a_Orange_d.dds",
+        "afop_mask": "blue/baked/art/vegetation/vg_msv_0215/VG_MSV_0215_A_M.dds",
+        "afop_material_source": "blue/graph objects/prop/(orange_moss)nat_temp_rock_small_01.mgraphobject",
+        "afop_mgraphobject": "blue/graph objects/prop/(orange_moss)nat_temp_rock_small_01.mgraphobject",
+        "afop_normal": "blue/baked/art/vegetation/vg_msv_0215/VG_MSV_0215_A_N.dds",
+        "afop_normal_strength": 1.0,
+        "afop_profile_limit": "World projection is static; Fresnel, pollution and time-of-day are engine-driven",
+        "afop_projected_overlay": "blue/baked/art/props/pr_msv_0210/pr_msv_0210_a_coloroverlay_d.dds",
+        "afop_shader": "blue/shaders/px_mosscard.mshader",
+        "afop_shader_profile": "moss_card_static_night"
+      },
+      "blend_method": "HASHED",
+      "name": "AFOP_pr_msv_1053_a_PR_MSV_1053_A_MossCards_Top",
+      "node_tree": {
+        "links": [
+          {
+            "from_node": "Normal Z squared",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Clamp normal Z",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Reconstruct normal Z",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Encode normal Z",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Encode normal Z",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Encode normal Z + 0.5",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Principled BSDF",
+            "from_socket": {
+              "index": 0,
+              "name": "BSDF"
+            },
+            "to_node": "Material Output",
+            "to_socket": {
+              "index": 0,
+              "name": "Surface"
+            }
+          },
+          {
+            "from_node": "Moss Card Bioluminescence",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Moss bio OverlayNoMask",
+            "to_socket": {
+              "index": 1,
+              "name": "Color1"
+            }
+          },
+          {
+            "from_node": "Authored moss-card overlay",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Moss bio OverlayNoMask",
+            "to_socket": {
+              "index": 2,
+              "name": "Color2"
+            }
+          },
+          {
+            "from_node": "Moss projected tiling",
+            "from_socket": {
+              "index": 0,
+              "name": "Vector"
+            },
+            "to_node": "Moss Card Projected Overlay",
+            "to_socket": {
+              "index": 0,
+              "name": "Vector"
+            }
+          },
+          {
+            "from_node": "Moss projected OverlayNoMask",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Moss color OverlayNoMask",
+            "to_socket": {
+              "index": 1,
+              "name": "Color1"
+            }
+          },
+          {
+            "from_node": "Authored moss-card overlay",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Moss color OverlayNoMask",
+            "to_socket": {
+              "index": 2,
+              "name": "Color2"
+            }
+          },
+          {
+            "from_node": "Diffuse / Albedo",
+            "from_socket": {
+              "index": 1,
+              "name": "Alpha"
+            },
+            "to_node": "Moss cutout x material opacity",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Moss material opacity + 0.35",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Moss cutout x material opacity",
+            "to_socket": {
+              "index": 1,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Moss material opacity x 0.65",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Moss material opacity + 0.35",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Snowdrop material channels",
+            "from_socket": {
+              "index": 0,
+              "name": "Red"
+            },
+            "to_node": "Moss material opacity x 0.65",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Moss Card Projected Overlay",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Moss projected OverlayNoMask",
+            "to_socket": {
+              "index": 1,
+              "name": "Color1"
+            }
+          },
+          {
+            "from_node": "Diffuse / Albedo",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Moss projected OverlayNoMask",
+            "to_socket": {
+              "index": 2,
+              "name": "Color2"
+            }
+          },
+          {
+            "from_node": "Moss projected X/Z UV",
+            "from_socket": {
+              "index": 0,
+              "name": "Vector"
+            },
+            "to_node": "Moss projected tiling",
+            "to_socket": {
+              "index": 0,
+              "name": "Vector"
+            }
+          },
+          {
+            "from_node": "Moss world X/Z",
+            "from_socket": {
+              "index": 0,
+              "name": "Red"
+            },
+            "to_node": "Moss projected X/Z UV",
+            "to_socket": {
+              "index": 0,
+              "name": "X"
+            }
+          },
+          {
+            "from_node": "Moss world X/Z",
+            "from_socket": {
+              "index": 2,
+              "name": "Blue"
+            },
+            "to_node": "Moss projected X/Z UV",
+            "to_socket": {
+              "index": 1,
+              "name": "Y"
+            }
+          },
+          {
+            "from_node": "Moss projected world position",
+            "from_socket": {
+              "index": 0,
+              "name": "Position"
+            },
+            "to_node": "Moss world X/Z",
+            "to_socket": {
+              "index": 0,
+              "name": "Color"
+            }
+          },
+          {
+            "from_node": "Reconstructed tangent normal",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Normal Map",
+            "to_socket": {
+              "index": 1,
+              "name": "Color"
+            }
+          },
+          {
+            "from_node": "Normal X x2",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal X signed",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal X signed",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal X squared",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal X signed",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal X squared",
+            "to_socket": {
+              "index": 1,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal (packed)",
+            "from_socket": {
+              "index": 1,
+              "name": "Alpha"
+            },
+            "to_node": "Normal X x2",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal X squared",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal XY squared",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal Y squared",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal XY squared",
+            "to_socket": {
+              "index": 1,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal Y x2",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal Y signed",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal Y signed",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal Y squared",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal Y signed",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal Y squared",
+            "to_socket": {
+              "index": 1,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Snowdrop packed normal (A/G)",
+            "from_socket": {
+              "index": 1,
+              "name": "Green"
+            },
+            "to_node": "Normal Y x2",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal XY squared",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Normal Z squared",
+            "to_socket": {
+              "index": 1,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Moss color OverlayNoMask",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Principled BSDF",
+            "to_socket": {
+              "index": 0,
+              "name": "Base Color"
+            }
+          },
+          {
+            "from_node": "Snowdrop material channels",
+            "from_socket": {
+              "index": 1,
+              "name": "Green"
+            },
+            "to_node": "Principled BSDF",
+            "to_socket": {
+              "index": 2,
+              "name": "Roughness"
+            }
+          },
+          {
+            "from_node": "Moss cutout x material opacity",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Principled BSDF",
+            "to_socket": {
+              "index": 4,
+              "name": "Alpha"
+            }
+          },
+          {
+            "from_node": "Normal Map",
+            "from_socket": {
+              "index": 0,
+              "name": "Normal"
+            },
+            "to_node": "Principled BSDF",
+            "to_socket": {
+              "index": 5,
+              "name": "Normal"
+            }
+          },
+          {
+            "from_node": "Moss bio OverlayNoMask",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Principled BSDF",
+            "to_socket": {
+              "index": 27,
+              "name": "Emission Color"
+            }
+          },
+          {
+            "from_node": "Clamp normal Z",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Reconstruct normal Z",
+            "to_socket": {
+              "index": 0,
+              "name": "Value"
+            }
+          },
+          {
+            "from_node": "Normal (packed)",
+            "from_socket": {
+              "index": 1,
+              "name": "Alpha"
+            },
+            "to_node": "Reconstructed tangent normal",
+            "to_socket": {
+              "index": 0,
+              "name": "Red"
+            }
+          },
+          {
+            "from_node": "Snowdrop packed normal (A/G)",
+            "from_socket": {
+              "index": 1,
+              "name": "Green"
+            },
+            "to_node": "Reconstructed tangent normal",
+            "to_socket": {
+              "index": 1,
+              "name": "Green"
+            }
+          },
+          {
+            "from_node": "Encode normal Z + 0.5",
+            "from_socket": {
+              "index": 0,
+              "name": "Value"
+            },
+            "to_node": "Reconstructed tangent normal",
+            "to_socket": {
+              "index": 2,
+              "name": "Blue"
+            }
+          },
+          {
+            "from_node": "Material / Mask (packed)",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Snowdrop material channels",
+            "to_socket": {
+              "index": 0,
+              "name": "Color"
+            }
+          },
+          {
+            "from_node": "Normal (packed)",
+            "from_socket": {
+              "index": 0,
+              "name": "Color"
+            },
+            "to_node": "Snowdrop packed normal (A/G)",
+            "to_socket": {
+              "index": 0,
+              "name": "Color"
+            }
+          }
+        ],
+        "nodes": [
+          {
+            "label": "Authored moss-card overlay",
+            "name": "Authored moss-card overlay",
+            "type": "ShaderNodeRGB"
+          },
+          {
+            "label": "Clamp normal Z",
+            "name": "Clamp normal Z",
+            "settings": {
+              "operation": "MAXIMUM"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 0.0
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "image": "blue/baked/art/vegetation/vg_msv_0215/vg_msv_0215_a_Orange_d.dds",
+            "label": "Diffuse / Albedo",
+            "name": "Diffuse / Albedo",
+            "settings": {
+              "extension": "REPEAT",
+              "interpolation": "Linear",
+              "projection": "FLAT",
+              "projection_blend": 0.0
+            },
+            "type": "ShaderNodeTexImage",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Vector",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            ]
+          },
+          {
+            "label": "Encode normal Z",
+            "name": "Encode normal Z",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 0.5
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Encode normal Z + 0.5",
+            "name": "Encode normal Z + 0.5",
+            "settings": {
+              "operation": "ADD"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 0.5
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "image": "blue/baked/art/vegetation/vg_msv_0215/VG_MSV_0215_A_M.dds",
+            "label": "Material / Mask (packed)",
+            "name": "Material / Mask (packed)",
+            "settings": {
+              "extension": "REPEAT",
+              "interpolation": "Linear",
+              "projection": "FLAT",
+              "projection_blend": 0.0
+            },
+            "type": "ShaderNodeTexImage",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Vector",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Material Output",
+            "type": "ShaderNodeOutputMaterial",
+            "unlinked_inputs": [
+              {
+                "index": 2,
+                "name": "Displacement",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "index": 3,
+                "name": "Thickness",
+                "value": 0.0
+              }
+            ]
+          },
+          {
+            "label": "Moss bio OverlayNoMask",
+            "name": "Moss bio OverlayNoMask",
+            "settings": {
+              "blend_type": "OVERLAY"
+            },
+            "type": "ShaderNodeMixRGB",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Factor",
+                "value": 1.0
+              }
+            ]
+          },
+          {
+            "image": "blue/baked/art/vegetation/vg_msv_0215/vg_msv_0215_a_Orange_bio.dds",
+            "label": "Moss Card Bioluminescence",
+            "name": "Moss Card Bioluminescence",
+            "settings": {
+              "extension": "REPEAT",
+              "interpolation": "Linear",
+              "projection": "FLAT",
+              "projection_blend": 0.0
+            },
+            "type": "ShaderNodeTexImage",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Vector",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            ]
+          },
+          {
+            "image": "blue/baked/art/props/pr_msv_0210/pr_msv_0210_a_coloroverlay_d.dds",
+            "label": "Moss Card Projected Overlay",
+            "name": "Moss Card Projected Overlay",
+            "settings": {
+              "extension": "REPEAT",
+              "interpolation": "Linear",
+              "projection": "FLAT",
+              "projection_blend": 0.0
+            },
+            "type": "ShaderNodeTexImage"
+          },
+          {
+            "label": "Moss color OverlayNoMask",
+            "name": "Moss color OverlayNoMask",
+            "settings": {
+              "blend_type": "OVERLAY"
+            },
+            "type": "ShaderNodeMixRGB",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Factor",
+                "value": 1.0
+              }
+            ]
+          },
+          {
+            "label": "Moss cutout x material opacity",
+            "name": "Moss cutout x material opacity",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Moss material opacity + 0.35",
+            "name": "Moss material opacity + 0.35",
+            "settings": {
+              "operation": "ADD"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 0.34999999
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Moss material opacity x 0.65",
+            "name": "Moss material opacity x 0.65",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 0.64999998
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Moss projected OverlayNoMask",
+            "name": "Moss projected OverlayNoMask",
+            "settings": {
+              "blend_type": "OVERLAY"
+            },
+            "type": "ShaderNodeMixRGB",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Factor",
+                "value": 1.0
+              }
+            ]
+          },
+          {
+            "label": "Moss projected tiling",
+            "name": "Moss projected tiling",
+            "settings": {
+              "operation": "SCALE"
+            },
+            "type": "ShaderNodeVectorMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Vector",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "index": 2,
+                "name": "Vector",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "index": 3,
+                "name": "Scale",
+                "value": 0.40000001
+              }
+            ]
+          },
+          {
+            "label": "Moss projected world position",
+            "name": "Moss projected world position",
+            "type": "ShaderNodeNewGeometry"
+          },
+          {
+            "label": "Moss projected X/Z UV",
+            "name": "Moss projected X/Z UV",
+            "type": "ShaderNodeCombineXYZ",
+            "unlinked_inputs": [
+              {
+                "index": 2,
+                "name": "Z",
+                "value": 0.0
+              }
+            ]
+          },
+          {
+            "label": "Moss world X/Z",
+            "name": "Moss world X/Z",
+            "type": "ShaderNodeSeparateColor"
+          },
+          {
+            "image": "blue/baked/art/vegetation/vg_msv_0215/VG_MSV_0215_A_N.dds",
+            "label": "Normal (packed)",
+            "name": "Normal (packed)",
+            "settings": {
+              "extension": "REPEAT",
+              "interpolation": "Linear",
+              "projection": "FLAT",
+              "projection_blend": 0.0
+            },
+            "type": "ShaderNodeTexImage",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Vector",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Normal Map",
+            "settings": {
+              "space": "TANGENT",
+              "uv_map": ""
+            },
+            "type": "ShaderNodeNormalMap",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Strength",
+                "value": 1.0
+              }
+            ]
+          },
+          {
+            "label": "Normal X signed",
+            "name": "Normal X signed",
+            "settings": {
+              "operation": "SUBTRACT"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 1.00392163
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Normal X squared",
+            "name": "Normal X squared",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Normal X x2",
+            "name": "Normal X x2",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 2.0
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Normal XY squared",
+            "name": "Normal XY squared",
+            "settings": {
+              "operation": "ADD"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Normal Y signed",
+            "name": "Normal Y signed",
+            "settings": {
+              "operation": "SUBTRACT"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 1.00392163
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Normal Y squared",
+            "name": "Normal Y squared",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Normal Y x2",
+            "name": "Normal Y x2",
+            "settings": {
+              "operation": "MULTIPLY"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 2.0
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Normal Z squared",
+            "name": "Normal Z squared",
+            "settings": {
+              "operation": "SUBTRACT"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 0,
+                "name": "Value",
+                "value": 1.0
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "name": "Principled BSDF",
+            "settings": {
+              "distribution": "MULTI_GGX"
+            },
+            "type": "ShaderNodeBsdfPrincipled",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Metallic",
+                "value": 0.0
+              },
+              {
+                "index": 3,
+                "name": "IOR",
+                "value": 1.5
+              },
+              {
+                "index": 6,
+                "name": "Weight",
+                "value": 0.0
+              },
+              {
+                "index": 7,
+                "name": "Diffuse Roughness",
+                "value": 0.0
+              },
+              {
+                "index": 8,
+                "name": "Subsurface Weight",
+                "value": 0.0
+              },
+              {
+                "index": 9,
+                "name": "Subsurface Radius",
+                "value": [
+                  1.0,
+                  0.2,
+                  0.1
+                ]
+              },
+              {
+                "index": 10,
+                "name": "Subsurface Scale",
+                "value": 0.05
+              },
+              {
+                "index": 11,
+                "name": "Subsurface IOR",
+                "value": 1.39999998
+              },
+              {
+                "index": 12,
+                "name": "Subsurface Anisotropy",
+                "value": 0.0
+              },
+              {
+                "index": 13,
+                "name": "Specular IOR Level",
+                "value": 0.5
+              },
+              {
+                "index": 14,
+                "name": "Specular Tint",
+                "value": [
+                  1.0,
+                  1.0,
+                  1.0,
+                  1.0
+                ]
+              },
+              {
+                "index": 15,
+                "name": "Anisotropic",
+                "value": 0.0
+              },
+              {
+                "index": 16,
+                "name": "Anisotropic Rotation",
+                "value": 0.0
+              },
+              {
+                "index": 17,
+                "name": "Tangent",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "index": 18,
+                "name": "Transmission Weight",
+                "value": 0.0
+              },
+              {
+                "index": 19,
+                "name": "Coat Weight",
+                "value": 0.0
+              },
+              {
+                "index": 20,
+                "name": "Coat Roughness",
+                "value": 0.03
+              },
+              {
+                "index": 21,
+                "name": "Coat IOR",
+                "value": 1.5
+              },
+              {
+                "index": 22,
+                "name": "Coat Tint",
+                "value": [
+                  1.0,
+                  1.0,
+                  1.0,
+                  1.0
+                ]
+              },
+              {
+                "index": 23,
+                "name": "Coat Normal",
+                "value": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "index": 24,
+                "name": "Sheen Weight",
+                "value": 0.0
+              },
+              {
+                "index": 25,
+                "name": "Sheen Roughness",
+                "value": 0.5
+              },
+              {
+                "index": 26,
+                "name": "Sheen Tint",
+                "value": [
+                  1.0,
+                  1.0,
+                  1.0,
+                  1.0
+                ]
+              },
+              {
+                "index": 28,
+                "name": "Emission Strength",
+                "value": 1.0
+              },
+              {
+                "index": 29,
+                "name": "Thin Film Thickness",
+                "value": 0.0
+              },
+              {
+                "index": 30,
+                "name": "Thin Film IOR",
+                "value": 1.33000004
+              }
+            ]
+          },
+          {
+            "label": "Reconstruct normal Z",
+            "name": "Reconstruct normal Z",
+            "settings": {
+              "operation": "SQRT"
+            },
+            "type": "ShaderNodeMath",
+            "unlinked_inputs": [
+              {
+                "index": 1,
+                "name": "Value",
+                "value": 0.5
+              },
+              {
+                "index": 2,
+                "name": "Value",
+                "value": 0.5
+              }
+            ]
+          },
+          {
+            "label": "Reconstructed tangent normal",
+            "name": "Reconstructed tangent normal",
+            "type": "ShaderNodeCombineColor"
+          },
+          {
+            "label": "R: Metal/SSS  G: Roughness  B: Detail  A: Opacity/Coat",
+            "name": "Snowdrop material channels",
+            "type": "ShaderNodeSeparateColor"
+          },
+          {
+            "label": "Snowdrop packed normal (A/G)",
+            "name": "Snowdrop packed normal (A/G)",
+            "type": "ShaderNodeSeparateColor"
+          }
+        ]
+      },
+      "surface_render_method": "DITHERED",
+      "use_nodes": true
+    }
+  ],
+  "node_groups": {
+    "AFOP Packed Detail Normal RNM v2": {
+      "links": [
+        {
+          "from_node": "Base Z squared",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Base clamp Z",
+          "to_socket": {
+            "index": 0,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Base reconstruct Z",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Base encode Z",
+          "to_socket": {
+            "index": 0,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Base encode Z",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Base encode Z + 0.5",
+          "to_socket": {
+            "index": 0,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Base clamp Z",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Base reconstruct Z",
+          "to_socket": {
+            "index": 0,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Base X x2",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Base X signed",
+          "to_socket": {
+            "index": 0,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Base X signed",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Base X squared",
+          "to_socket": {
+            "index": 0,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Base X signed",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Base X squared",
+          "to_socket": {
+            "index": 1,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Group Input",
+          "from_socket": {
+            "index": 1,
+            "name": "Base Alpha"
+          },
+          "to_node": "Base X x2",
+          "to_socket": {
+            "index": 0,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Base X squared",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Base XY squared",
+          "to_socket": {
+            "index": 0,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Base Y squared",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Base XY squared",
+          "to_socket": {
+            "index": 1,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Base Y x2",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Base Y signed",
+          "to_socket": {
+            "index": 0,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Base Y signed",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Base Y squared",
+          "to_socket": {
+            "index": 0,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Base Y signed",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Base Y squared",
+          "to_socket": {
+            "index": 1,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Separate Color",
+          "from_socket": {
+            "index": 1,
+            "name": "Green"
+          },
+          "to_node": "Base Y x2",
+          "to_socket": {
+            "index": 0,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Base XY squared",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Base Z squared",
+          "to_socket": {
+            "index": 1,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Clamp detail strength low",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Clamp detail strength high",
+          "to_socket": {
+            "index": 0,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Detail strength x mask",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Clamp detail strength low",
+          "to_socket": {
+            "index": 0,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Group Input",
+          "from_socket": {
+            "index": 1,
+            "name": "Base Alpha"
+          },
+          "to_node": "Combine Color",
+          "to_socket": {
+            "index": 0,
+            "name": "Red"
+          }
+        },
+        {
+          "from_node": "Separate Color",
+          "from_socket": {
+            "index": 1,
+            "name": "Green"
+          },
+          "to_node": "Combine Color",
+          "to_socket": {
+            "index": 1,
+            "name": "Green"
+          }
+        },
+        {
+          "from_node": "Base encode Z + 0.5",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Combine Color",
+          "to_socket": {
+            "index": 2,
+            "name": "Blue"
+          }
+        },
+        {
+          "from_node": "Group Input",
+          "from_socket": {
+            "index": 3,
+            "name": "Detail Alpha"
+          },
+          "to_node": "Combine Color.001",
+          "to_socket": {
+            "index": 0,
+            "name": "Red"
+          }
+        },
+        {
+          "from_node": "Separate Color.001",
+          "from_socket": {
+            "index": 1,
+            "name": "Green"
+          },
+          "to_node": "Combine Color.001",
+          "to_socket": {
+            "index": 1,
+            "name": "Green"
+          }
+        },
+        {
+          "from_node": "Detail encode Z + 0.5",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Combine Color.001",
+          "to_socket": {
+            "index": 2,
+            "name": "Blue"
+          }
+        },
+        {
+          "from_node": "Separate Color",
+          "from_socket": {
+            "index": 2,
+            "name": "Blue"
+          },
+          "to_node": "Combined packed AO",
+          "to_socket": {
+            "index": 0,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Detail AO strength",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Combined packed AO",
+          "to_socket": {
+            "index": 1,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Minimum packed AO",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Detail AO difference",
+          "to_socket": {
+            "index": 0,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Separate Color",
+          "from_socket": {
+            "index": 2,
+            "name": "Blue"
+          },
+          "to_node": "Detail AO difference",
+          "to_socket": {
+            "index": 1,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Detail AO difference",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Detail AO strength",
+          "to_socket": {
+            "index": 0,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Clamp detail strength high",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Detail AO strength",
+          "to_socket": {
+            "index": 1,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Detail Z squared",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Detail clamp Z",
+          "to_socket": {
+            "index": 0,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Detail reconstruct Z",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Detail encode Z",
+          "to_socket": {
+            "index": 0,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Detail encode Z",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Detail encode Z + 0.5",
+          "to_socket": {
+            "index": 0,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Detail clamp Z",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Detail reconstruct Z",
+          "to_socket": {
+            "index": 0,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Group Input",
+          "from_socket": {
+            "index": 4,
+            "name": "Mask"
+          },
+          "to_node": "Detail strength x mask",
+          "to_socket": {
+            "index": 0,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Group Input",
+          "from_socket": {
+            "index": 5,
+            "name": "Strength"
+          },
+          "to_node": "Detail strength x mask",
+          "to_socket": {
+            "index": 1,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Detail X x2",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Detail X signed",
+          "to_socket": {
+            "index": 0,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Detail X signed",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Detail X squared",
+          "to_socket": {
+            "index": 0,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Detail X signed",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Detail X squared",
+          "to_socket": {
+            "index": 1,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Group Input",
+          "from_socket": {
+            "index": 3,
+            "name": "Detail Alpha"
+          },
+          "to_node": "Detail X x2",
+          "to_socket": {
+            "index": 0,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Detail X squared",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Detail XY squared",
+          "to_socket": {
+            "index": 0,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Detail Y squared",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Detail XY squared",
+          "to_socket": {
+            "index": 1,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Detail Y x2",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Detail Y signed",
+          "to_socket": {
+            "index": 0,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Detail Y signed",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Detail Y squared",
+          "to_socket": {
+            "index": 0,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Detail Y signed",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Detail Y squared",
+          "to_socket": {
+            "index": 1,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Separate Color.001",
+          "from_socket": {
+            "index": 1,
+            "name": "Green"
+          },
+          "to_node": "Detail Y x2",
+          "to_socket": {
+            "index": 0,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Detail XY squared",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Detail Z squared",
+          "to_socket": {
+            "index": 1,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "RNM normalize",
+          "from_socket": {
+            "index": 0,
+            "name": "Vector"
+          },
+          "to_node": "Encode RNM",
+          "to_socket": {
+            "index": 0,
+            "name": "Vector"
+          }
+        },
+        {
+          "from_node": "Encode RNM",
+          "from_socket": {
+            "index": 0,
+            "name": "Vector"
+          },
+          "to_node": "Encode RNM + 0.5",
+          "to_socket": {
+            "index": 0,
+            "name": "Vector"
+          }
+        },
+        {
+          "from_node": "Encode RNM + 0.5",
+          "from_socket": {
+            "index": 0,
+            "name": "Vector"
+          },
+          "to_node": "Group Output",
+          "to_socket": {
+            "index": 0,
+            "name": "Normal Color"
+          }
+        },
+        {
+          "from_node": "Combined packed AO",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Group Output",
+          "to_socket": {
+            "index": 1,
+            "name": "AO"
+          }
+        },
+        {
+          "from_node": "Separate Color",
+          "from_socket": {
+            "index": 2,
+            "name": "Blue"
+          },
+          "to_node": "Minimum packed AO",
+          "to_socket": {
+            "index": 0,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Separate Color.001",
+          "from_socket": {
+            "index": 2,
+            "name": "Blue"
+          },
+          "to_node": "Minimum packed AO",
+          "to_socket": {
+            "index": 1,
+            "name": "Value"
+          }
+        },
+        {
+          "from_node": "Clamp detail strength high",
+          "from_socket": {
+            "index": 0,
+            "name": "Value"
+          },
+          "to_node": "Mix (Legacy)",
+          "to_socket": {
+            "index": 0,
+            "name": "Factor"
+          }
+        },
+        {
+          "from_node": "Color",
+          "from_socket": {
+            "index": 0,
+            "name": "Color"
+          },
+          "to_node": "Mix (Legacy)",
+          "to_socket": {
+            "index": 1,
+            "name": "Color1"
+          }
+        },
+        {
+          "from_node": "Combine Color.001",
+          "from_socket": {
+            "index": 0,
+            "name": "Color"
+          },
+          "to_node": "Mix (Legacy)",
+          "to_socket": {
+            "index": 2,
+            "name": "Color2"
+          }
+        },
+        {
+          "from_node": "RNM base x2",
+          "from_socket": {
+            "index": 0,
+            "name": "Vector"
+          },
+          "to_node": "RNM base offset",
+          "to_socket": {
+            "index": 0,
+            "name": "Vector"
+          }
+        },
+        {
+          "from_node": "RNM base offset",
+          "from_socket": {
+            "index": 0,
+            "name": "Vector"
+          },
+          "to_node": "RNM base weighted",
+          "to_socket": {
+            "index": 0,
+            "name": "Vector"
+          }
+        },
+        {
+          "from_node": "RNM dot",
+          "from_socket": {
+            "index": 1,
+            "name": "Value"
+          },
+          "to_node": "RNM base weighted",
+          "to_socket": {
+            "index": 3,
+            "name": "Scale"
+          }
+        },
+        {
+          "from_node": "Combine Color",
+          "from_socket": {
+            "index": 0,
+            "name": "Color"
+          },
+          "to_node": "RNM base x2",
+          "to_socket": {
+            "index": 0,
+            "name": "Vector"
+          }
+        },
+        {
+          "from_node": "RNM base weighted",
+          "from_socket": {
+            "index": 0,
+            "name": "Vector"
+          },
+          "to_node": "RNM combine",
+          "to_socket": {
+            "index": 0,
+            "name": "Vector"
+          }
+        },
+        {
+          "from_node": "RNM detail weighted",
+          "from_socket": {
+            "index": 0,
+            "name": "Vector"
+          },
+          "to_node": "RNM combine",
+          "to_socket": {
+            "index": 1,
+            "name": "Vector"
+          }
+        },
+        {
+          "from_node": "RNM detail signed",
+          "from_socket": {
+            "index": 0,
+            "name": "Vector"
+          },
+          "to_node": "RNM detail offset",
+          "to_socket": {
+            "index": 0,
+            "name": "Vector"
+          }
+        },
+        {
+          "from_node": "Mix (Legacy)",
+          "from_socket": {
+            "index": 0,
+            "name": "Color"
+          },
+          "to_node": "RNM detail signed",
+          "to_socket": {
+            "index": 0,
+            "name": "Vector"
+          }
+        },
+        {
+          "from_node": "RNM detail offset",
+          "from_socket": {
+            "index": 0,
+            "name": "Vector"
+          },
+          "to_node": "RNM detail weighted",
+          "to_socket": {
+            "index": 0,
+            "name": "Vector"
+          }
+        },
+        {
+          "from_node": "Separate XYZ",
+          "from_socket": {
+            "index": 2,
+            "name": "Z"
+          },
+          "to_node": "RNM detail weighted",
+          "to_socket": {
+            "index": 3,
+            "name": "Scale"
+          }
+        },
+        {
+          "from_node": "RNM base offset",
+          "from_socket": {
+            "index": 0,
+            "name": "Vector"
+          },
+          "to_node": "RNM dot",
+          "to_socket": {
+            "index": 0,
+            "name": "Vector"
+          }
+        },
+        {
+          "from_node": "RNM detail offset",
+          "from_socket": {
+            "index": 0,
+            "name": "Vector"
+          },
+          "to_node": "RNM dot",
+          "to_socket": {
+            "index": 1,
+            "name": "Vector"
+          }
+        },
+        {
+          "from_node": "RNM combine",
+          "from_socket": {
+            "index": 0,
+            "name": "Vector"
+          },
+          "to_node": "RNM normalize",
+          "to_socket": {
+            "index": 0,
+            "name": "Vector"
+          }
+        },
+        {
+          "from_node": "Group Input",
+          "from_socket": {
+            "index": 0,
+            "name": "Base Color"
+          },
+          "to_node": "Separate Color",
+          "to_socket": {
+            "index": 0,
+            "name": "Color"
+          }
+        },
+        {
+          "from_node": "Group Input",
+          "from_socket": {
+            "index": 2,
+            "name": "Detail Color"
+          },
+          "to_node": "Separate Color.001",
+          "to_socket": {
+            "index": 0,
+            "name": "Color"
+          }
+        },
+        {
+          "from_node": "RNM base offset",
+          "from_socket": {
+            "index": 0,
+            "name": "Vector"
+          },
+          "to_node": "Separate XYZ",
+          "to_socket": {
+            "index": 0,
+            "name": "Vector"
+          }
+        }
+      ],
+      "nodes": [
+        {
+          "label": "Base clamp Z",
+          "name": "Base clamp Z",
+          "settings": {
+            "operation": "MAXIMUM"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 1,
+              "name": "Value",
+              "value": 0.0
+            },
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Base encode Z",
+          "name": "Base encode Z",
+          "settings": {
+            "operation": "MULTIPLY"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 1,
+              "name": "Value",
+              "value": 0.5
+            },
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Base encode Z + 0.5",
+          "name": "Base encode Z + 0.5",
+          "settings": {
+            "operation": "ADD"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 1,
+              "name": "Value",
+              "value": 0.5
+            },
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Base reconstruct Z",
+          "name": "Base reconstruct Z",
+          "settings": {
+            "operation": "SQRT"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 1,
+              "name": "Value",
+              "value": 0.5
+            },
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Base X signed",
+          "name": "Base X signed",
+          "settings": {
+            "operation": "SUBTRACT"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 1,
+              "name": "Value",
+              "value": 1.00392163
+            },
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Base X squared",
+          "name": "Base X squared",
+          "settings": {
+            "operation": "MULTIPLY"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Base X x2",
+          "name": "Base X x2",
+          "settings": {
+            "operation": "MULTIPLY"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 1,
+              "name": "Value",
+              "value": 2.0
+            },
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Base XY squared",
+          "name": "Base XY squared",
+          "settings": {
+            "operation": "ADD"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Base Y signed",
+          "name": "Base Y signed",
+          "settings": {
+            "operation": "SUBTRACT"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 1,
+              "name": "Value",
+              "value": 1.00392163
+            },
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Base Y squared",
+          "name": "Base Y squared",
+          "settings": {
+            "operation": "MULTIPLY"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Base Y x2",
+          "name": "Base Y x2",
+          "settings": {
+            "operation": "MULTIPLY"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 1,
+              "name": "Value",
+              "value": 2.0
+            },
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Base Z squared",
+          "name": "Base Z squared",
+          "settings": {
+            "operation": "SUBTRACT"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 0,
+              "name": "Value",
+              "value": 1.0
+            },
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Clamp detail strength high",
+          "name": "Clamp detail strength high",
+          "settings": {
+            "operation": "MINIMUM"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 1,
+              "name": "Value",
+              "value": 1.0
+            },
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Clamp detail strength low",
+          "name": "Clamp detail strength low",
+          "settings": {
+            "operation": "MAXIMUM"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 1,
+              "name": "Value",
+              "value": 0.0
+            },
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Flat tangent normal",
+          "name": "Color",
+          "type": "ShaderNodeRGB"
+        },
+        {
+          "label": "Base tangent normal",
+          "name": "Combine Color",
+          "type": "ShaderNodeCombineColor"
+        },
+        {
+          "label": "Detail tangent normal",
+          "name": "Combine Color.001",
+          "type": "ShaderNodeCombineColor"
+        },
+        {
+          "label": "Combined packed AO",
+          "name": "Combined packed AO",
+          "settings": {
+            "operation": "ADD"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Detail AO difference",
+          "name": "Detail AO difference",
+          "settings": {
+            "operation": "SUBTRACT"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Detail AO strength",
+          "name": "Detail AO strength",
+          "settings": {
+            "operation": "MULTIPLY"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Detail clamp Z",
+          "name": "Detail clamp Z",
+          "settings": {
+            "operation": "MAXIMUM"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 1,
+              "name": "Value",
+              "value": 0.0
+            },
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Detail encode Z",
+          "name": "Detail encode Z",
+          "settings": {
+            "operation": "MULTIPLY"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 1,
+              "name": "Value",
+              "value": 0.5
+            },
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Detail encode Z + 0.5",
+          "name": "Detail encode Z + 0.5",
+          "settings": {
+            "operation": "ADD"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 1,
+              "name": "Value",
+              "value": 0.5
+            },
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Detail reconstruct Z",
+          "name": "Detail reconstruct Z",
+          "settings": {
+            "operation": "SQRT"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 1,
+              "name": "Value",
+              "value": 0.5
+            },
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Detail strength x mask",
+          "name": "Detail strength x mask",
+          "settings": {
+            "operation": "MULTIPLY"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Detail X signed",
+          "name": "Detail X signed",
+          "settings": {
+            "operation": "SUBTRACT"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 1,
+              "name": "Value",
+              "value": 1.00392163
+            },
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Detail X squared",
+          "name": "Detail X squared",
+          "settings": {
+            "operation": "MULTIPLY"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Detail X x2",
+          "name": "Detail X x2",
+          "settings": {
+            "operation": "MULTIPLY"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 1,
+              "name": "Value",
+              "value": 2.0
+            },
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Detail XY squared",
+          "name": "Detail XY squared",
+          "settings": {
+            "operation": "ADD"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Detail Y signed",
+          "name": "Detail Y signed",
+          "settings": {
+            "operation": "SUBTRACT"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 1,
+              "name": "Value",
+              "value": 1.00392163
+            },
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Detail Y squared",
+          "name": "Detail Y squared",
+          "settings": {
+            "operation": "MULTIPLY"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Detail Y x2",
+          "name": "Detail Y x2",
+          "settings": {
+            "operation": "MULTIPLY"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 1,
+              "name": "Value",
+              "value": 2.0
+            },
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Detail Z squared",
+          "name": "Detail Z squared",
+          "settings": {
+            "operation": "SUBTRACT"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 0,
+              "name": "Value",
+              "value": 1.0
+            },
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Encode RNM",
+          "name": "Encode RNM",
+          "settings": {
+            "operation": "SCALE"
+          },
+          "type": "ShaderNodeVectorMath",
+          "unlinked_inputs": [
+            {
+              "index": 1,
+              "name": "Vector",
+              "value": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            {
+              "index": 2,
+              "name": "Vector",
+              "value": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            {
+              "index": 3,
+              "name": "Scale",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Encode RNM + 0.5",
+          "name": "Encode RNM + 0.5",
+          "settings": {
+            "operation": "ADD"
+          },
+          "type": "ShaderNodeVectorMath",
+          "unlinked_inputs": [
+            {
+              "index": 1,
+              "name": "Vector",
+              "value": [
+                0.5,
+                0.5,
+                0.5
+              ]
+            },
+            {
+              "index": 2,
+              "name": "Vector",
+              "value": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            {
+              "index": 3,
+              "name": "Scale",
+              "value": 1.0
+            }
+          ]
+        },
+        {
+          "name": "Group Input",
+          "type": "NodeGroupInput"
+        },
+        {
+          "name": "Group Output",
+          "type": "NodeGroupOutput"
+        },
+        {
+          "label": "Minimum packed AO",
+          "name": "Minimum packed AO",
+          "settings": {
+            "operation": "MINIMUM"
+          },
+          "type": "ShaderNodeMath",
+          "unlinked_inputs": [
+            {
+              "index": 2,
+              "name": "Value",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "label": "Apply authored detail strength",
+          "name": "Mix (Legacy)",
+          "settings": {
+            "blend_type": "MIX"
+          },
+          "type": "ShaderNodeMixRGB"
+        },
+        {
+          "label": "RNM base offset",
+          "name": "RNM base offset",
+          "settings": {
+            "operation": "ADD"
+          },
+          "type": "ShaderNodeVectorMath",
+          "unlinked_inputs": [
+            {
+              "index": 1,
+              "name": "Vector",
+              "value": [
+                -1.00392163,
+                -1.00392163,
+                0.0
+              ]
+            },
+            {
+              "index": 2,
+              "name": "Vector",
+              "value": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            {
+              "index": 3,
+              "name": "Scale",
+              "value": 1.0
+            }
+          ]
+        },
+        {
+          "label": "RNM base weighted",
+          "name": "RNM base weighted",
+          "settings": {
+            "operation": "SCALE"
+          },
+          "type": "ShaderNodeVectorMath",
+          "unlinked_inputs": [
+            {
+              "index": 1,
+              "name": "Vector",
+              "value": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            {
+              "index": 2,
+              "name": "Vector",
+              "value": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            }
+          ]
+        },
+        {
+          "label": "RNM base x2",
+          "name": "RNM base x2",
+          "settings": {
+            "operation": "MULTIPLY"
+          },
+          "type": "ShaderNodeVectorMath",
+          "unlinked_inputs": [
+            {
+              "index": 1,
+              "name": "Vector",
+              "value": [
+                2.0,
+                2.0,
+                2.0
+              ]
+            },
+            {
+              "index": 2,
+              "name": "Vector",
+              "value": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            {
+              "index": 3,
+              "name": "Scale",
+              "value": 1.0
+            }
+          ]
+        },
+        {
+          "label": "RNM combine",
+          "name": "RNM combine",
+          "settings": {
+            "operation": "SUBTRACT"
+          },
+          "type": "ShaderNodeVectorMath",
+          "unlinked_inputs": [
+            {
+              "index": 2,
+              "name": "Vector",
+              "value": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            {
+              "index": 3,
+              "name": "Scale",
+              "value": 1.0
+            }
+          ]
+        },
+        {
+          "label": "RNM detail offset",
+          "name": "RNM detail offset",
+          "settings": {
+            "operation": "ADD"
+          },
+          "type": "ShaderNodeVectorMath",
+          "unlinked_inputs": [
+            {
+              "index": 1,
+              "name": "Vector",
+              "value": [
+                1.00392163,
+                1.00392163,
+                -1.0
+              ]
+            },
+            {
+              "index": 2,
+              "name": "Vector",
+              "value": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            {
+              "index": 3,
+              "name": "Scale",
+              "value": 1.0
+            }
+          ]
+        },
+        {
+          "label": "RNM detail signed",
+          "name": "RNM detail signed",
+          "settings": {
+            "operation": "MULTIPLY"
+          },
+          "type": "ShaderNodeVectorMath",
+          "unlinked_inputs": [
+            {
+              "index": 1,
+              "name": "Vector",
+              "value": [
+                -2.0,
+                -2.0,
+                2.0
+              ]
+            },
+            {
+              "index": 2,
+              "name": "Vector",
+              "value": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            {
+              "index": 3,
+              "name": "Scale",
+              "value": 1.0
+            }
+          ]
+        },
+        {
+          "label": "RNM detail weighted",
+          "name": "RNM detail weighted",
+          "settings": {
+            "operation": "SCALE"
+          },
+          "type": "ShaderNodeVectorMath",
+          "unlinked_inputs": [
+            {
+              "index": 1,
+              "name": "Vector",
+              "value": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            {
+              "index": 2,
+              "name": "Vector",
+              "value": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            }
+          ]
+        },
+        {
+          "label": "RNM dot",
+          "name": "RNM dot",
+          "settings": {
+            "operation": "DOT_PRODUCT"
+          },
+          "type": "ShaderNodeVectorMath",
+          "unlinked_inputs": [
+            {
+              "index": 2,
+              "name": "Vector",
+              "value": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            {
+              "index": 3,
+              "name": "Scale",
+              "value": 1.0
+            }
+          ]
+        },
+        {
+          "label": "RNM normalize",
+          "name": "RNM normalize",
+          "settings": {
+            "operation": "NORMALIZE"
+          },
+          "type": "ShaderNodeVectorMath",
+          "unlinked_inputs": [
+            {
+              "index": 1,
+              "name": "Vector",
+              "value": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            {
+              "index": 2,
+              "name": "Vector",
+              "value": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            {
+              "index": 3,
+              "name": "Scale",
+              "value": 1.0
+            }
+          ]
+        },
+        {
+          "label": "Base packed channels",
+          "name": "Separate Color",
+          "type": "ShaderNodeSeparateColor"
+        },
+        {
+          "label": "Detail packed channels",
+          "name": "Separate Color.001",
+          "type": "ShaderNodeSeparateColor"
+        },
+        {
+          "name": "Separate XYZ",
+          "type": "ShaderNodeSeparateXYZ"
+        }
+      ]
+    }
+  },
+  "objects": [
+    {
+      "color_attributes": [],
+      "materials": [
+        "AFOP_pr_msv_1053_a_PR_MSV_1053_A_Fungi"
+      ],
+      "name": "PR_MSV_1053_A_Fungi_LOD0",
+      "polygon_material_indices": [
+        0
+      ],
+      "uv_layers": [
+        "UVMap_0",
+        "UVMap_1",
+        "UVMap_2"
+      ]
+    },
+    {
+      "color_attributes": [
+        "Color_0"
+      ],
+      "materials": [
+        "AFOP_pr_msv_1053_a_PR_MSV_1053_A"
+      ],
+      "name": "PR_MSV_1053_A_LOD0",
+      "polygon_material_indices": [
+        0
+      ],
+      "uv_layers": [
+        "UVMap_0",
+        "UVMap_1"
+      ]
+    },
+    {
+      "color_attributes": [],
+      "materials": [
+        "AFOP_pr_msv_1053_a_PR_MSV_1053_A_MossCards_Bottom"
+      ],
+      "name": "PR_MSV_1053_A_MossCards_Bottom_LOD0",
+      "polygon_material_indices": [
+        0
+      ],
+      "uv_layers": [
+        "UVMap_0"
+      ]
+    },
+    {
+      "color_attributes": [],
+      "materials": [
+        "AFOP_pr_msv_1053_a_PR_MSV_1053_A_MossCards_Top"
+      ],
+      "name": "PR_MSV_1053_A_MossCards_Top_LOD0",
+      "polygon_material_indices": [
+        0
+      ],
+      "uv_layers": [
+        "UVMap_0"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "source": "(orange_moss)nat_temp_rock_small_01.blend"
+}

@@ -374,11 +374,6 @@ class SWOMTSettings(bpy.types.PropertyGroup):
         name="Load from Game Files",
         default=False,
     )
-    sdf_developer_tools_expanded: bpy.props.BoolProperty(
-        name="Developer Tools",
-        description="Show corpus-auditing and other developer diagnostics",
-        default=False,
-    )
     sdf_game_directory: bpy.props.StringProperty(
         name="Game Directory",
         description="AFOP game folder containing sdf.sdftoc and sdfdata files",

@@ -20,7 +20,6 @@ CODE_FILES = (
     "file_utils.py",
     "importer.py",
     "log.py",
-    "material_audit.py",
     "material_import.py",
     "meshlet.py",
     "mgraph.py",
@@ -35,6 +34,7 @@ CODE_FILES = (
     "sdf_reader.py",
     "sdf_toc.py",
     "settings.py",
+    "shader_schema.py",
     "ui.py",
     "updater.py",
 )
