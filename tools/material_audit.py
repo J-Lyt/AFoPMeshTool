@@ -82,6 +82,8 @@ def _runtime_profile(shader_path):
         return "wildlife_wing", "specialized"
     if name.startswith("px_basic_rustymetal"):
         return "rusty_metal", "specialized"
+    if name == "px_character_gear_vhq.mshader":
+        return "character_gear_vhq", "specialized"
     if name.startswith("px_rustymetal_vcoverlay"):
         return "rusty_metal_vcoverlay", "specialized"
     if name == "px_basic_blendmaterial.mshader":
@@ -174,6 +176,10 @@ def _sampler_blender_mapping(sampler, profile, support):
         "albedotexture", "detail_normal", "rustymetalmask", "painttexture",
     }:
         return "DLC3 rusty-metal vertex-overlay profile", "connected_preview"
+    if profile == "character_gear_vhq" and role in {
+        "masks", "detail_normal",
+    }:
+        return "Character gear regions and surface detail", "connected_preview"
     if profile == "vegetation" and role in {
         "detaila", "detailb", "bioluminescence",
     }:

@@ -60,6 +60,7 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
         is_terrain_runtime = "terrain_runtime" in traits
         is_moss_patch = "moss_patch" in traits
         is_wildlife_gear = "wildlife_gear" in traits
+        is_character_gear_vhq = "character_gear_vhq" in traits
         is_constants = "constants" in traits
         is_emissive_color = "emissive_color" in traits
         is_basic_emissive = "basic_emissive" in traits
@@ -179,7 +180,12 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
         diffuse_node = None
         if diffuse_path and diffuse_path.casefold() in texture_files:
             disk_path = texture_files[diffuse_path.casefold()]
-            image = _load_image(disk_path, diffuse_path, non_color=False)
+            image = _load_image(
+                disk_path,
+                diffuse_path,
+                non_color=False,
+                alpha_mode="NONE" if is_character_gear_vhq else None,
+            )
             node = _new_image_node(nodes, image, "Diffuse / Albedo", -440, 180)
             if surface_uv_output is not None:
                 links.new(surface_uv_output, node.inputs["Vector"])
@@ -3039,6 +3045,68 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
                 if "afop_shader_profile" not in material:
                     material["afop_shader_profile"] = "generic_detail_rnm"
 
+        if is_character_gear_vhq and mask_separate is not None:
+            regions_path = profile_auxiliary.get("Masks")
+            regions = _aux_image_node(
+                nodes, links, texture_files, regions_path,
+                "Character Gear VHQ Regions (packed)", -520, -1080,
+            )
+            if regions is not None:
+                region_channels = _separate_node(
+                    nodes, links, regions.outputs["Color"],
+                    "Character Gear VHQ region channels", -270, -1080,
+                )
+                region_product = _math_node(
+                    nodes, "MULTIPLY", "Character Gear VHQ R x G", 20, -1040,
+                )
+                links.new(region_channels.outputs["Red"], region_product.inputs[0])
+                links.new(region_channels.outputs["Green"], region_product.inputs[1])
+
+                boosted_roughness = mask_separate.outputs["Green"]
+                if ao_output is not None:
+                    ao_scale = _math_node(
+                        nodes, "MULTIPLY", "Character Gear VHQ AO roughness", 20, -900,
+                        0.05,
+                    )
+                    links.new(ao_output, ao_scale.inputs[0])
+                    roughness_add = _math_node(
+                        nodes, "ADD", "Character Gear VHQ roughness + AO", 200, -900,
+                    )
+                    links.new(mask_separate.outputs["Green"], roughness_add.inputs[0])
+                    links.new(ao_scale.outputs[0], roughness_add.inputs[1])
+                    roughness_clamp = _clamp_node(
+                        nodes, "Character Gear VHQ boosted roughness", 380, -900,
+                    )
+                    links.new(roughness_add.outputs[0], roughness_clamp.inputs["Value"])
+                    boosted_roughness = roughness_clamp.outputs["Result"]
+
+                roughness_mix = nodes.new("ShaderNodeMix")
+                roughness_mix.data_type = "FLOAT"
+                roughness_mix.label = "Character Gear VHQ roughness"
+                roughness_mix.name = roughness_mix.label
+                roughness_mix.location = (570, -900)
+                links.new(region_product.outputs[0], roughness_mix.inputs[0])
+                links.new(mask_separate.outputs["Green"], roughness_mix.inputs[2])
+                links.new(boosted_roughness, roughness_mix.inputs[3])
+
+                metalness = _math_node(
+                    nodes, "MULTIPLY", "Character Gear VHQ metalness", 570, -1060,
+                )
+                links.new(region_channels.outputs["Green"], metalness.inputs[0])
+                links.new(mask_separate.outputs["Red"], metalness.inputs[1])
+
+                for link in list(shader.inputs["Roughness"].links):
+                    links.remove(link)
+                for link in list(shader.inputs["Metallic"].links):
+                    links.remove(link)
+                links.new(roughness_mix.outputs["Result"], shader.inputs["Roughness"])
+                links.new(metalness.outputs[0], shader.inputs["Metallic"])
+                material["afop_character_gear_regions"] = regions_path
+            material["afop_shader_profile"] = "character_gear_vhq_static"
+            material["afop_profile_limit"] = (
+                "View-dependent region Fresnel is represented by Blender's metal shader"
+            )
+
         generic_emission_path = (
             binding.get("aux", {}).get("Emission")
             or binding.get("aux", {}).get("Emissive")
@@ -3193,7 +3261,15 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
             links.new(roughness_output, shader.inputs["Roughness"])
 
         if diffuse_node is not None:
-            base_ao_output = diffuse_node.outputs["Alpha"] if is_navi_skin else ao_output
+            # PX_Character_Gear_VHQ writes albedo and AO to separate deferred
+            # outputs. Baking its roughly 0.5 AO into the Blender base color
+            # makes neutral metal regions such as cus_115 Rings/Spikes too dark.
+            if is_navi_skin:
+                base_ao_output = diffuse_node.outputs["Alpha"]
+            elif is_character_gear_vhq:
+                base_ao_output = None
+            else:
+                base_ao_output = ao_output
             if base_color_override is not None:
                 links.new(base_color_override, shader.inputs["Base Color"])
             elif base_ao_output is not None:

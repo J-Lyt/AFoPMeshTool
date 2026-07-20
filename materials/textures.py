@@ -96,13 +96,33 @@ def texture_to_dds(data, asset):
     return _build_dds(mip_width, mip_height, dxgi, resident_data[:needed])
 
 
-def _load_image(path, logical_path, non_color=False):
+def _load_image(path, logical_path, non_color=False, alpha_mode=None):
+    """Load one game texture, isolating material-specific alpha handling."""
+    alpha_override = alpha_mode or ""
     existing = next(
-        (image for image in bpy.data.images if image.get("afop_asset_path") == logical_path),
+        (
+            image for image in bpy.data.images
+            if image.get("afop_asset_path") == logical_path
+            and image.get("afop_alpha_mode_override", "") == alpha_override
+        ),
         None,
     )
-    image = existing or bpy.data.images.load(path, check_existing=True)
+    if existing is not None:
+        image = existing
+    else:
+        # Preserve Blender's normal path-based reuse unless this material needs
+        # its own alpha mode. If path reuse finds an overridden copy, isolate
+        # the ordinary image as well so Body can remain Straight.
+        image = bpy.data.images.load(path, check_existing=alpha_mode is None)
+        if alpha_mode is None and image.get("afop_alpha_mode_override", ""):
+            image = bpy.data.images.load(path, check_existing=False)
     image["afop_asset_path"] = logical_path
+    if alpha_mode is not None:
+        image["afop_alpha_mode_override"] = alpha_mode
+        try:
+            image.alpha_mode = alpha_mode
+        except (AttributeError, TypeError, ValueError):
+            logger.warning("Could not set alpha mode %s for %s", alpha_mode, logical_path)
     if non_color:
         try:
             image.colorspace_settings.name = "Non-Color"

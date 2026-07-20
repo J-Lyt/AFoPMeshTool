@@ -37,6 +37,7 @@ MOSS_PATCH_SHADERS = frozenset({
     "px_dlc3_basic_mosspatch.mshader",
 })
 WILDLIFE_GEAR_SHADERS = frozenset({"px_wildlife_gear.mshader"})
+CHARACTER_GEAR_VHQ_SHADERS = frozenset({"px_character_gear_vhq.mshader"})
 CONSTANT_SHADERS = frozenset({"px_constants.mshader"})
 RUSTY_METAL_VC_DEFAULT_TEXTURES = {
     "GenericMaterial": (
@@ -95,6 +96,7 @@ PROFILE_REGISTRY = (
     MaterialProfile("terrain_runtime", TERRAIN_RUNTIME_SHADERS),
     MaterialProfile("moss_patch", MOSS_PATCH_SHADERS),
     MaterialProfile("wildlife_gear", WILDLIFE_GEAR_SHADERS),
+    MaterialProfile("character_gear_vhq", CHARACTER_GEAR_VHQ_SHADERS),
     MaterialProfile("constants", CONSTANT_SHADERS),
     MaterialProfile("emissive_color", frozenset({"px_emissive_color.mshader"})),
     MaterialProfile("basic_emissive", frozenset({BASIC_EMISSIVE_SHADER})),
@@ -163,6 +165,8 @@ def supported_auxiliary_paths(binding):
         paths = (auxiliary.get("WorldSpaceOverlay"),)
     elif "wildlife_gear" in traits:
         paths = (auxiliary.get("Regions"), auxiliary.get("DetailNormal"))
+    elif "character_gear_vhq" in traits:
+        paths = (auxiliary.get("Masks"), auxiliary.get("DetailNormal"))
     elif "medusa_skin" in traits:
         paths = (
             auxiliary.get("DetailMask"), auxiliary.get("DetailNormal"),

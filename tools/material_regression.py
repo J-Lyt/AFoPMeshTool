@@ -75,6 +75,7 @@ def _material_profile_registry_case():
         "px_wildlife_skin.mshader": {"wildlife_skin"},
         "px_dlc3_medusa_skin.mshader": {"medusa_skin"},
         "px_basic_rustymetal_static.mshader": {"rusty_metal"},
+        "px_character_gear_vhq.mshader": {"character_gear_vhq"},
         "px_rustymetal_vcoverlay_rda_dlc3.mshader": {
             "rusty_metal_vcoverlay"
         },
@@ -971,6 +972,72 @@ def _human_skin_case(directory, source_png):
     )
 
 
+def _character_gear_vhq_case(directory, source_png):
+    shared_diffuse = "textures/cus_115_body_d.dds"
+    body = _assign(
+        {
+            "shader": "dlc3/shaders/PX_Character_Skin_VHQ_Body.mshader",
+            "d": shared_diffuse,
+        },
+        directory,
+        source_png,
+        "Body",
+    )
+    body_image = body.node_tree.nodes["Diffuse / Albedo"].image
+    check(
+        body_image.alpha_mode == "STRAIGHT",
+        "character body diffuse no longer uses Straight alpha",
+    )
+    binding = {
+        "shader": "blue/shaders/PX_Character_Gear_VHQ.mshader",
+        "d": shared_diffuse,
+        "n": "textures/cus_115_body_n.dds",
+        "m": "textures/cus_115_body_m.dds",
+        "aux": {
+            "Masks": "textures/cus_115_body_reg_mask.dds",
+            "DetailNormal": "textures/flat_detail_n.dds",
+        },
+        "parameters": {
+            "myDetailTiling": (0, 0),
+            "myDetailStrength": 1.0,
+        },
+    }
+    material = _assign(binding, directory, source_png, "Rings")
+    _assert_profile(material, "character_gear_vhq_static")
+    shader = _principled(material)
+    _assert_linked(shader.inputs["Base Color"], "character gear color")
+    base_link = shader.inputs["Base Color"].links[0]
+    gear_image = material.node_tree.nodes["Diffuse / Albedo"].image
+    check(
+        gear_image.alpha_mode == "NONE",
+        "character gear diffuse does not ignore its unused alpha channel",
+    )
+    check(
+        gear_image != body_image,
+        "character body and gear unexpectedly share one alpha-configured image",
+    )
+    check(
+        base_link.from_node.name == "Diffuse / Albedo",
+        "character gear color is incorrectly darkened by packed AO",
+    )
+    check(
+        shader.inputs["Metallic"].links[0].from_node.name
+        == "Character Gear VHQ metalness",
+        "character gear region metalness is missing",
+    )
+    check(
+        shader.inputs["Roughness"].links[0].from_node.name
+        == "Character Gear VHQ roughness",
+        "character gear region roughness is missing",
+    )
+    _assert_linked(shader.inputs["Normal"], "character gear normal")
+    check(
+        material.get("afop_character_gear_regions")
+        == "textures/cus_115_body_reg_mask.dds",
+        "character gear region mask was not retained",
+    )
+
+
 def _rusty_metal_vcoverlay_case(directory, source_png):
     binding = {
         "shader": "dlc3/shaders/PX_RustyMetal_VCoverlay_RDA_DLC3.mshader",
@@ -1349,6 +1416,9 @@ def _audit_profile_case():
         "PX_TerrainBlend.mshader": ("terrain_runtime", "specialized"),
         "PX_Basic_MossPatch.mshader": ("moss_patch", "specialized"),
         "PX_Wildlife_Gear.mshader": ("wildlife_gear", "specialized"),
+        "PX_Character_Gear_VHQ.mshader": (
+            "character_gear_vhq", "specialized"
+        ),
         "PX_RustyMetal_VCoverlay_RDA_DLC3.mshader": (
             "rusty_metal_vcoverlay", "specialized"
         ),
@@ -1468,6 +1538,7 @@ def main():
             ),
             ("constants cutout profile", lambda: _constants_case(directory, source_png)),
             ("human skin profile", lambda: _human_skin_case(directory, source_png)),
+            ("character gear VHQ regions", lambda: _character_gear_vhq_case(directory, source_png)),
             ("DLC3 rusty-metal vertex-overlay profile", lambda: _rusty_metal_vcoverlay_case(directory, source_png)),
             ("additional character skin variants", lambda: _character_skin_variant_case(directory, source_png)),
             ("hair cutout profile", lambda: _hair_case(directory, source_png)),
