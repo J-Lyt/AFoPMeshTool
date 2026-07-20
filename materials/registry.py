@@ -38,6 +38,21 @@ MOSS_PATCH_SHADERS = frozenset({
 })
 WILDLIFE_GEAR_SHADERS = frozenset({"px_wildlife_gear.mshader"})
 CONSTANT_SHADERS = frozenset({"px_constants.mshader"})
+RUSTY_METAL_VC_DEFAULT_TEXTURES = {
+    "GenericMaterial": (
+        "blue/baked/art/generic_textures/rda/"
+        "rda_rusty_metal_vcolor_tiling.dds"
+    ),
+    "ProceduralMask": (
+        "snowdrop/baked/art/[assets]/[techtexture]/tt_rust_mask.dds"
+    ),
+    "RustGradient": (
+        "snowdrop/baked/art/[assets]/[generictexture]/_test/rm_gradient.dds"
+    ),
+    "RustNormal": (
+        "snowdrop/baked/art/[assets]/[techtexture]/tt_rust_n.dds"
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -84,6 +99,10 @@ PROFILE_REGISTRY = (
     MaterialProfile("emissive_color", frozenset({"px_emissive_color.mshader"})),
     MaterialProfile("basic_emissive", frozenset({BASIC_EMISSIVE_SHADER})),
     MaterialProfile("rusty_metal", prefixes=("px_basic_rustymetal",)),
+    MaterialProfile(
+        "rusty_metal_vcoverlay",
+        prefixes=("px_rustymetal_vcoverlay",),
+    ),
     MaterialProfile("vegetation", contains=("vegetation",)),
     MaterialProfile("moss_card", MOSS_CARD_SHADERS),
     MaterialProfile(
@@ -152,6 +171,13 @@ def supported_auxiliary_paths(binding):
         )
     elif "rusty_metal" in traits:
         paths = (auxiliary.get("DetailNormal"), auxiliary.get("RustyMetalMask"))
+    elif "rusty_metal_vcoverlay" in traits:
+        paths = (
+            auxiliary.get("AlbedoTexture"), auxiliary.get("DetailNormal1"),
+            auxiliary.get("DetailNormal2"), auxiliary.get("RustyMetalMask"),
+            auxiliary.get("PaintTexture"),
+            *RUSTY_METAL_VC_DEFAULT_TEXTURES.values(),
+        )
     elif "vegetation" in traits:
         paths = (
             auxiliary.get("DetailA"), auxiliary.get("DetailB"),

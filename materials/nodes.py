@@ -39,6 +39,51 @@ def _clamp_node(nodes, label, x, y, minimum=0.0, maximum=1.0):
     node.inputs["Max"].default_value = float(maximum)
     return node
 
+
+def _scan_mask(nodes, links, mask, position, contrast, label, x, y):
+    """Rebuild Snowdrop's ScanMask threshold/contrast function."""
+
+    def assign(socket, value):
+        if isinstance(value, (int, float)):
+            socket.default_value = float(value)
+        else:
+            links.new(value, socket)
+
+    position_clamp = _clamp_node(nodes, f"{label} position", x, y)
+    assign(position_clamp.inputs["Value"], position)
+    doubled = _math_node(nodes, "MULTIPLY", f"{label} position x2", x + 170, y, 2.0)
+    links.new(position_clamp.outputs["Result"], doubled.inputs[0])
+    centered = _math_node(nodes, "SUBTRACT", f"{label} centered", x + 340, y)
+    links.new(doubled.outputs[0], centered.inputs[0])
+    centered.inputs[1].default_value = 1.0
+    absolute = _math_node(nodes, "ABSOLUTE", f"{label} absolute", x + 510, y)
+    links.new(centered.outputs[0], absolute.inputs[0])
+    inverse = _math_node(nodes, "SUBTRACT", f"{label} triangular", x + 680, y)
+    inverse.inputs[0].default_value = 1.0
+    links.new(absolute.outputs[0], inverse.inputs[1])
+    contrast_scale = max(0.0, 1.0 - float(contrast))
+    denominator = _math_node(
+        nodes, "MULTIPLY", f"{label} denominator", x + 850, y,
+        contrast_scale,
+    )
+    links.new(inverse.outputs[0], denominator.inputs[0])
+
+    numerator = _math_node(nodes, "ADD", f"{label} mask + position", x + 340, y - 150)
+    assign(numerator.inputs[0], mask)
+    links.new(position_clamp.outputs["Result"], numerator.inputs[1])
+    subtract_one = _math_node(
+        nodes, "SUBTRACT", f"{label} threshold", x + 510, y - 150, 1.0
+    )
+    links.new(numerator.outputs[0], subtract_one.inputs[0])
+    divide = _math_node(nodes, "DIVIDE", f"{label} contrast", x + 1020, y - 80)
+    links.new(subtract_one.outputs[0], divide.inputs[0])
+    links.new(denominator.outputs[0], divide.inputs[1])
+    bias = _math_node(nodes, "ADD", f"{label} midpoint", x + 1190, y - 80, 0.5)
+    links.new(divide.outputs[0], bias.inputs[0])
+    result = _clamp_node(nodes, label, x + 1360, y - 80)
+    links.new(bias.outputs[0], result.inputs["Value"])
+    return result.outputs["Result"]
+
 def _vector2_parameter(value, default):
     if (
         isinstance(value, (list, tuple))

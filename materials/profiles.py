@@ -21,12 +21,13 @@ from .nodes import (
     _packed_detail_normal_group,
     _packed_normal_nodes,
     _pattern_component,
+    _scan_mask,
     _separate_node,
     _tiling_parameter,
     _vector2_parameter,
     _wildlife_bio_nodes,
 )
-from .registry import profile_traits
+from .registry import RUSTY_METAL_VC_DEFAULT_TEXTURES, profile_traits
 from .textures import _load_image
 
 
@@ -63,6 +64,7 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
         is_emissive_color = "emissive_color" in traits
         is_basic_emissive = "basic_emissive" in traits
         is_rustymetal = "rusty_metal" in traits
+        is_rustymetal_vcoverlay = "rusty_metal_vcoverlay" in traits
         is_vegetation = "vegetation" in traits
         is_moss_card = "moss_card" in traits
         is_basic_blend = "basic_blend" in traits
@@ -106,6 +108,7 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
         shader.location = (1950, 40)
         links.new(shader.outputs["BSDF"], output.inputs["Surface"])
         parameters = binding.get("parameters", {})
+        profile_auxiliary = binding.get("aux", {})
         authored_roughness = parameters.get("myRoughness")
         if isinstance(authored_roughness, (int, float)):
             shader.inputs["Roughness"].default_value = max(
@@ -171,6 +174,8 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
             material["afop_uv_offset"] = list(uv_offset)
 
         diffuse_path = binding.get("d")
+        if is_rustymetal_vcoverlay:
+            diffuse_path = profile_auxiliary.get("AlbedoTexture") or diffuse_path
         diffuse_node = None
         if diffuse_path and diffuse_path.casefold() in texture_files:
             disk_path = texture_files[diffuse_path.casefold()]
@@ -178,11 +183,29 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
             node = _new_image_node(nodes, image, "Diffuse / Albedo", -440, 180)
             if surface_uv_output is not None:
                 links.new(surface_uv_output, node.inputs["Vector"])
+            elif is_rustymetal_vcoverlay:
+                albedo_uv = nodes.new("ShaderNodeUVMap")
+                albedo_uv.uv_map = "UVMap_0"
+                albedo_uv.label = "Rusty metal albedo UV"
+                albedo_uv.name = albedo_uv.label
+                albedo_uv.location = (-850, 180)
+                albedo_scale = nodes.new("ShaderNodeVectorMath")
+                albedo_scale.operation = "MULTIPLY"
+                albedo_scale.label = "Rusty metal albedo tiling"
+                albedo_scale.name = albedo_scale.label
+                albedo_scale.location = (-650, 180)
+                albedo_scale.inputs[1].default_value = (
+                    *_tiling_parameter(parameters.get("myAlbedoTiling")), 1.0
+                )
+                links.new(albedo_uv.outputs["UV"], albedo_scale.inputs[0])
+                links.new(albedo_scale.outputs["Vector"], node.inputs["Vector"])
             diffuse_node = node
             material["afop_diffuse"] = diffuse_path
 
         normal_path = binding.get("n")
-        detail_path = binding.get("aux", {}).get("DetailNormal")
+        if is_rustymetal_vcoverlay:
+            normal_path = profile_auxiliary.get("DetailNormal1") or normal_path
+        detail_path = profile_auxiliary.get("DetailNormal")
         use_detail_normal = bool(
             (is_navi_detail or is_basic_emissive)
             and detail_path
@@ -201,6 +224,22 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
             normal_texture_node = node
             if surface_uv_output is not None:
                 links.new(surface_uv_output, node.inputs["Vector"])
+            elif is_rustymetal_vcoverlay:
+                detail_uv = nodes.new("ShaderNodeUVMap")
+                detail_uv.uv_map = "UVMap_0"
+                detail_uv.label = "Rusty metal detail 1 UV"
+                detail_uv.name = detail_uv.label
+                detail_uv.location = (-850, -80)
+                detail_scale = nodes.new("ShaderNodeVectorMath")
+                detail_scale.operation = "MULTIPLY"
+                detail_scale.label = "Rusty metal detail 1 tiling"
+                detail_scale.name = detail_scale.label
+                detail_scale.location = (-650, -80)
+                detail_scale.inputs[1].default_value = (
+                    *_tiling_parameter(parameters.get("myDetail1Tiling")), 1.0
+                )
+                links.new(detail_uv.outputs["UV"], detail_scale.inputs[0])
+                links.new(detail_scale.outputs["Vector"], node.inputs["Vector"])
             if use_detail_normal:
                 base_channels = nodes.new("ShaderNodeSeparateColor")
                 base_channels.label = "Base packed normal channels"
@@ -234,7 +273,10 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
             normal.location = (1710, -55)
             normal_strength = parameters.get(
                 "myBaseNormalStrength",
-                parameters.get("myNormalStrength", 1.0),
+                parameters.get(
+                    "myNormalStrength",
+                    parameters.get("myBaseDetialNormalStrength", 1.0),
+                ),
             )
             if not isinstance(normal_strength, (int, float)):
                 normal_strength = 1.0
@@ -247,6 +289,8 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
             material["afop_normal_strength"] = normal_strength
 
         mask_path = binding.get("m")
+        if is_rustymetal_vcoverlay:
+            mask_path = profile_auxiliary.get("RustyMetalMask") or mask_path
         mask_node = None
         mask_separate = None
         if mask_path and mask_path.casefold() in texture_files:
@@ -256,6 +300,16 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
             mask_node = mask
             if surface_uv_output is not None:
                 links.new(surface_uv_output, mask.inputs["Vector"])
+            elif is_rustymetal_vcoverlay:
+                rust_uv = nodes.new("ShaderNodeUVMap")
+                rust_uv.uv_map = "UVMap_0"
+                rust_uv.label = "Rusty metal authored mask UV"
+                rust_uv.name = rust_uv.label
+                rust_uv.location = (-650, -340)
+                # RustyMetalMask is the asset-authored control map. Snowdrop
+                # samples it directly with Gfx_UV0; only the separate shared
+                # procedural rust texture uses UV1 * myRustyMetalTiling.
+                links.new(rust_uv.outputs["UV"], mask.inputs["Vector"])
             mask_separate = nodes.new("ShaderNodeSeparateColor")
             mask_separate.label = "R: Metal/SSS  G: Roughness  B: Detail  A: Opacity/Coat"
             mask_separate.name = "Snowdrop material channels"
@@ -311,6 +365,12 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
                     coat_roughness = shader.inputs.get("Coat Roughness")
                     if coat_roughness is not None:
                         links.new(ao_output, coat_roughness)
+            elif is_rustymetal_vcoverlay:
+                # This texture drives the shader's procedural rust, scratch,
+                # dirt, and paint stages. It is not Snowdrop's usual packed
+                # metal/roughness map, so the profile reconstructs the authored
+                # surface values below instead of connecting R/G directly.
+                mask_separate.label = "R/G/B/A: rusty-metal procedural controls"
             else:
                 metallic_output = mask_separate.outputs["Red"]
                 if shader_name == "px_character_gear_simple.mshader":
@@ -456,6 +516,699 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
             material["afop_shader_profile"] = "rusty_metal_static"
             material["afop_profile_limit"] = (
                 "Rust/scratch/dirt weather functions require engine scan masks"
+            )
+
+        if is_rustymetal_vcoverlay:
+            auxiliary = profile_auxiliary
+
+            def color_value(field, label, x, y, default=(0.5, 0.5, 0.5)):
+                value = nodes.new("ShaderNodeRGB")
+                value.label = label
+                value.name = label
+                value.location = (x, y)
+                value.outputs[0].default_value = (
+                    *_color_parameter(parameters.get(field), default), 1.0
+                )
+                return value.outputs[0]
+
+            base_color = color_value(
+                "myBaseColor", "Rusty metal base color", 420, 520
+            )
+            if (
+                _float_parameter(parameters.get("myUseAlbedo"), 0.0) > 0.5
+                and diffuse_node is not None
+            ):
+                albedo_multiply = nodes.new("ShaderNodeMixRGB")
+                albedo_multiply.blend_type = "MULTIPLY"
+                albedo_multiply.inputs[0].default_value = 1.0
+                albedo_multiply.label = "Rusty metal authored albedo"
+                albedo_multiply.name = albedo_multiply.label
+                albedo_multiply.location = (650, 520)
+                links.new(diffuse_node.outputs["Color"], albedo_multiply.inputs[1])
+                links.new(base_color, albedo_multiply.inputs[2])
+                base_color = albedo_multiply.outputs["Color"]
+
+            base_metal = max(
+                0.0, min(1.0, _float_parameter(parameters.get("myBaseisMetal"), 0.0))
+            )
+            base_roughness = max(
+                0.0,
+                _float_parameter(parameters.get("myBaseRoughnessScale"), 0.5),
+            )
+            color_result = base_color
+            metallic_result = None
+            roughness_result = None
+            vertex_channels = None
+            if obj.data.attributes.get("Color_0") is not None:
+                vertex = nodes.new("ShaderNodeVertexColor")
+                vertex.layer_name = "Color_0"
+                vertex.label = "Rusty metal vertex regions"
+                vertex.name = vertex.label
+                vertex.location = (420, 760)
+                vertex_channels = _separate_node(
+                    nodes, links, vertex.outputs["Color"],
+                    "Rusty metal vertex channels", 650, 760,
+                )
+                metallic_result = None
+                roughness_result = None
+                for index, (channel, prefix) in enumerate(
+                    (("Red", "R"), ("Green", "G"), ("Blue", "B"))
+                ):
+                    y = 680 - index * 170
+                    region_color = color_value(
+                        f"my{prefix}Color", f"Vertex {prefix} surface color",
+                        880, y + 80, (1.0, 1.0, 1.0),
+                    )
+                    color_mix = nodes.new("ShaderNodeMixRGB")
+                    color_mix.label = f"Vertex {prefix} surface blend"
+                    color_mix.name = color_mix.label
+                    color_mix.location = (1120 + index * 190, y + 80)
+                    links.new(vertex_channels.outputs[channel], color_mix.inputs[0])
+                    links.new(color_result, color_mix.inputs[1])
+                    links.new(region_color, color_mix.inputs[2])
+                    color_result = color_mix.outputs["Color"]
+
+                    metal_mix = nodes.new("ShaderNodeMix")
+                    metal_mix.data_type = "FLOAT"
+                    metal_mix.label = f"Rusty metal {prefix} metalness"
+                    metal_mix.name = metal_mix.label
+                    metal_mix.location = (1120 + index * 190, y - 20)
+                    links.new(vertex_channels.outputs[channel], metal_mix.inputs[0])
+                    if metallic_result is None:
+                        metal_mix.inputs[2].default_value = base_metal
+                    else:
+                        links.new(metallic_result, metal_mix.inputs[2])
+                    metal_mix.inputs[3].default_value = max(
+                        0.0,
+                        min(
+                            1.0,
+                            _float_parameter(parameters.get(f"my{prefix}isMetal"), 0.0),
+                        ),
+                    )
+                    metallic_result = metal_mix.outputs["Result"]
+
+                    roughness_mix = nodes.new("ShaderNodeMix")
+                    roughness_mix.data_type = "FLOAT"
+                    roughness_mix.label = f"Rusty metal {prefix} roughness"
+                    roughness_mix.name = roughness_mix.label
+                    roughness_mix.location = (1120 + index * 190, y - 100)
+                    links.new(vertex_channels.outputs[channel], roughness_mix.inputs[0])
+                    if roughness_result is None:
+                        roughness_mix.inputs[2].default_value = base_roughness
+                    else:
+                        links.new(roughness_result, roughness_mix.inputs[2])
+                    roughness_mix.inputs[3].default_value = max(
+                        0.0,
+                        _float_parameter(
+                            parameters.get(f"my{prefix}RoughnessStrength"), 0.5
+                        ),
+                    )
+                    roughness_result = roughness_mix.outputs["Result"]
+
+            base_color_override = color_result
+            if diffuse_node is None:
+                links.new(base_color_override, shader.inputs["Base Color"])
+            for link in list(shader.inputs["Metallic"].links):
+                links.remove(link)
+            for link in list(shader.inputs["Roughness"].links):
+                links.remove(link)
+            if metallic_result is not None:
+                links.new(metallic_result, shader.inputs["Metallic"])
+            else:
+                shader.inputs["Metallic"].default_value = base_metal
+            if roughness_result is not None:
+                links.new(roughness_result, shader.inputs["Roughness"])
+            else:
+                shader.inputs["Roughness"].default_value = base_roughness
+
+            detail2_path = auxiliary.get("DetailNormal2")
+            detail2 = _aux_image_node(
+                nodes, links, texture_files, detail2_path,
+                "Rusty Metal Detail Normal 2 (packed)", -440, -720,
+                tiling=parameters.get("myDetail2Tiling", (1.0, 1.0)),
+            )
+            if detail2 is not None:
+                material["afop_detail_normal_2"] = detail2_path
+            rust_mask_path = auxiliary.get("RustyMetalMask") or mask_path
+            if rust_mask_path:
+                material["afop_rusty_metal_mask"] = rust_mask_path
+            paint_path = auxiliary.get("PaintTexture")
+            paint = _aux_image_node(
+                nodes, links, texture_files, paint_path,
+                "Rusty Metal Paint (engine procedural)", -440, -930,
+                tiling=parameters.get("myPaintTiling", (1.0, 1.0)),
+                non_color=False,
+            )
+            if paint is not None:
+                material["afop_paint_texture"] = paint_path
+
+            def socket_input(socket, value):
+                if isinstance(value, (int, float)):
+                    socket.default_value = float(value)
+                elif isinstance(value, (list, tuple)):
+                    socket.default_value = value
+                else:
+                    links.new(value, socket)
+
+            def mix_float(factor, first, second, label, x, y):
+                mix = nodes.new("ShaderNodeMix")
+                mix.data_type = "FLOAT"
+                mix.label = label
+                mix.name = label
+                mix.location = (x, y)
+                socket_input(mix.inputs[0], factor)
+                socket_input(mix.inputs[2], first)
+                socket_input(mix.inputs[3], second)
+                return mix.outputs["Result"]
+
+            def mix_color(factor, first, second, label, x, y, blend_type="MIX"):
+                mix = nodes.new("ShaderNodeMixRGB")
+                mix.blend_type = blend_type
+                mix.label = label
+                mix.name = label
+                mix.location = (x, y)
+                socket_input(mix.inputs[0], factor)
+                socket_input(mix.inputs[1], first)
+                socket_input(mix.inputs[2], second)
+                return mix.outputs["Color"]
+
+            def binary_math(operation, first, second, label, x, y):
+                math = _math_node(nodes, operation, label, x, y)
+                socket_input(math.inputs[0], first)
+                socket_input(math.inputs[1], second)
+                return math.outputs[0]
+
+            defaults = RUSTY_METAL_VC_DEFAULT_TEXTURES
+            generic_material = _aux_image_node(
+                nodes, links, texture_files, defaults["GenericMaterial"],
+                "RDA Generic Material (RGBA packed)", -900, -1180,
+                tiling=parameters.get("myGenericMaterialTiling", (1.0, 1.0)),
+            )
+            procedural_mask = _aux_image_node(
+                nodes, links, texture_files, defaults["ProceduralMask"],
+                "Rust / Scratch / Dirt procedural mask", -900, -1420,
+                tiling=parameters.get("myRustyMetalTiling", (1.0, 1.0)),
+                uv_map="UVMap_1",
+            )
+            rust_gradient = _aux_image_node(
+                nodes, links, texture_files, defaults["RustGradient"],
+                "Rust color gradient", -420, -1420, non_color=True,
+            )
+            rust_normal = _aux_image_node(
+                nodes, links, texture_files, defaults["RustNormal"],
+                "Rust procedural normal (packed)", -900, -1660,
+                tiling=parameters.get("myRustyMetalTiling", (1.0, 1.0)),
+                uv_map="UVMap_1",
+            )
+            for key, path in defaults.items():
+                if path.casefold() in texture_files:
+                    material[f"afop_rusty_metal_{key.casefold()}"] = path
+
+            generic_channels = None
+            if generic_material is not None:
+                generic_channels = _separate_node(
+                    nodes, links, generic_material.outputs["Color"],
+                    "RDA generic material channels", -650, -1180,
+                )
+                generic_blend = _float_parameter(
+                    parameters.get("myGenericMaterialBlend"), 0.0
+                )
+                first_blend = max(0.0, min(1.0, generic_blend * 2.0))
+                second_blend = max(0.0, min(1.0, generic_blend * 2.0 - 1.0))
+                generic_color = mix_float(
+                    first_blend, 0.5, generic_channels.outputs["Blue"],
+                    "RDA generic color phase 1", -360, -1160,
+                )
+                generic_color = mix_float(
+                    second_blend, generic_color, generic_material.outputs["Alpha"],
+                    "RDA generic color phase 2", -180, -1160,
+                )
+                if vertex_channels is not None:
+                    vertex_alpha = mix_color(
+                        1.0, color_result, vertex.outputs["Alpha"],
+                        "Rusty metal vertex alpha", 1450, 720, "MULTIPLY",
+                    )
+                else:
+                    vertex_alpha = color_result
+                color_result = mix_color(
+                    1.0, generic_color, vertex_alpha,
+                    "RDA generic material overlay", 1640, 620, "OVERLAY",
+                )
+
+                detail_strength = _float_parameter(
+                    parameters.get("myBaseDetialNormalStrength"), 1.0
+                )
+                if vertex_channels is not None:
+                    for channel, prefix in (
+                        ("Red", "R"), ("Green", "G"), ("Blue", "B")
+                    ):
+                        detail_strength = mix_float(
+                            vertex_channels.outputs[channel], detail_strength,
+                            _float_parameter(
+                                parameters.get(f"my{prefix}DetailNormalStrength"),
+                                1.0,
+                            ),
+                            f"Rusty metal {prefix} detail strength", 900, -900,
+                        )
+                detail1_layer = None
+                full_detail_mask = nodes.new("ShaderNodeValue")
+                full_detail_mask.label = "Rusty metal detail enabled"
+                full_detail_mask.name = full_detail_mask.label
+                full_detail_mask.location = (1100, -600)
+                full_detail_mask.outputs[0].default_value = 1.0
+                if normal_texture_node is not None:
+                    detail1_layer = _packed_detail_layer(
+                        nodes, links, generic_material.outputs["Color"],
+                        generic_channels.outputs["Red"], normal_texture_node,
+                        normal_texture_node.outputs["Alpha"],
+                        full_detail_mask.outputs[0], 1.0,
+                        "Rusty Metal Detail Normal 1", 1290, -360,
+                    )
+                    links.new(detail_strength, detail1_layer.inputs["Strength"])
+                    ao_output = detail1_layer.outputs["AO"]
+                detail2_layer = None
+                if detail2 is not None:
+                    detail2_layer = _packed_detail_layer(
+                        nodes, links, generic_material.outputs["Color"],
+                        generic_channels.outputs["Red"], detail2,
+                        detail2.outputs["Alpha"], full_detail_mask.outputs[0], 1.0,
+                        "Rusty Metal Detail Normal 2", 1290, -520,
+                    )
+                    links.new(detail_strength, detail2_layer.inputs["Strength"])
+                if detail1_layer is not None and normal is not None:
+                    selected_detail = detail1_layer.outputs["Normal Color"]
+                    if detail2_layer is not None:
+                        detail2_selector = _float_parameter(
+                            parameters.get("myBaseuseDetail2"), 0.0
+                        )
+                        if vertex_channels is not None:
+                            for channel, prefix in (
+                                ("Red", "R"), ("Green", "G"), ("Blue", "B")
+                            ):
+                                detail2_selector = mix_float(
+                                    vertex_channels.outputs[channel], detail2_selector,
+                                    _float_parameter(
+                                        parameters.get(f"my{prefix}useDetail2"), 0.0
+                                    ),
+                                    f"Rusty metal {prefix} detail selection",
+                                    1100, -760,
+                                )
+                        selected_detail = mix_color(
+                            detail2_selector, selected_detail,
+                            detail2_layer.outputs["Normal Color"],
+                            "Rusty Metal selected detail normal", 1510, -440,
+                        )
+                    for link in list(normal.inputs["Color"].links):
+                        links.remove(link)
+                    links.new(selected_detail, normal.inputs["Color"])
+                    normal.inputs["Strength"].default_value = 1.0
+
+                inverse_blue = binary_math(
+                    "SUBTRACT", 1.0, generic_channels.outputs["Blue"],
+                    "RDA inverse blue", -360, -1010,
+                )
+                roughness_signal = mix_float(
+                    0.2, inverse_blue, 0.5,
+                    "RDA roughness neutral blend", -180, -1010,
+                )
+                roughness_signal = mix_float(
+                    first_blend, roughness_signal, inverse_blue,
+                    "RDA roughness phase 1", 0, -1010,
+                )
+                inverse_alpha = binary_math(
+                    "SUBTRACT", 1.0,
+                    mix_float(
+                        0.2, generic_material.outputs["Alpha"], 0.5,
+                        "RDA alpha neutral blend", -180, -900,
+                    ),
+                    "RDA inverse alpha", 0, -900,
+                )
+                roughness_signal = mix_float(
+                    second_blend, roughness_signal, inverse_alpha,
+                    "RDA roughness phase 2", 180, -980,
+                )
+                authored_roughness = roughness_result
+                if authored_roughness is None:
+                    authored_roughness = base_roughness
+                roughness_result = binary_math(
+                    "MULTIPLY", authored_roughness, roughness_signal,
+                    "RDA authored roughness", 360, -980,
+                )
+                roughness_clamp = _clamp_node(
+                    nodes, "RDA authored roughness clamp", 530, -980
+                )
+                links.new(roughness_result, roughness_clamp.inputs["Value"])
+                roughness_result = roughness_clamp.outputs["Result"]
+
+            scratch_mask = rust_mask = dirt_mask = paint_mask = None
+            procedural_channels = None
+            if procedural_mask is not None and mask_separate is not None:
+                procedural_channels = _separate_node(
+                    nodes, links, procedural_mask.outputs["Color"],
+                    "Rust procedural channels", -650, -1420,
+                )
+                scratch_amount = _float_parameter(
+                    parameters.get("myScratchAmount"), 0.0
+                )
+                authored_scratch = binary_math(
+                    "MULTIPLY", mask_separate.outputs["Green"], scratch_amount,
+                    "Authored scratch amount", -360, -1520,
+                )
+                scratch_position = binary_math(
+                    "SUBTRACT", authored_scratch, mask_separate.outputs["Blue"],
+                    "Authored scratch threshold", -180, -1520,
+                )
+                scratch_position_clamp = _clamp_node(
+                    nodes, "Authored scratch threshold clamp", 0, -1520
+                )
+                links.new(scratch_position, scratch_position_clamp.inputs["Value"])
+                scratch_position = binary_math(
+                    "ADD", scratch_position_clamp.outputs["Result"],
+                    authored_scratch, "Authored scratch scan position", 180, -1520,
+                )
+                scratch_position_clamp = _clamp_node(
+                    nodes, "Authored scratch scan position clamp", 360, -1520
+                )
+                links.new(scratch_position, scratch_position_clamp.inputs["Value"])
+                inverse_scratch = binary_math(
+                    "SUBTRACT", 1.0, procedural_channels.outputs["Green"],
+                    "Procedural scratch inverse", -360, -1640,
+                )
+                scratch_scan = binary_math(
+                    "MULTIPLY", inverse_scratch, scratch_amount * 2.0,
+                    "Procedural scratch scan", -180, -1640,
+                )
+                scratch_mask = _scan_mask(
+                    nodes, links, scratch_scan,
+                    scratch_position_clamp.outputs["Result"], 0.5,
+                    "Rusty metal scratch mask", 0, -1800,
+                )
+
+                rust_amount = _float_parameter(parameters.get("myRustAmount"), 0.0)
+                rust_seed = mix_float(
+                    0.3, mask_separate.outputs["Red"],
+                    procedural_channels.outputs["Red"],
+                    "Rust authored/procedural seed", 180, -2060,
+                )
+                scratch_rust = binary_math(
+                    "MULTIPLY", scratch_mask, rust_amount * 0.25,
+                    "Scratch-assisted rust", 360, -2060,
+                )
+                rust_seed = binary_math(
+                    "ADD", rust_seed, scratch_rust, "Combined rust seed", 540, -2060,
+                )
+                rust_mask = _scan_mask(
+                    nodes, links, rust_seed, rust_amount,
+                    _float_parameter(parameters.get("myRustContrast"), 0.0),
+                    "Rusty metal rust mask", 720, -2200,
+                )
+
+                dirt_amount = _float_parameter(parameters.get("myDirtAmount"), 0.6)
+                dirt_factor = binary_math(
+                    "ADD", mask_separate.outputs["Blue"], dirt_amount,
+                    "Dirt authored amount", 180, -2460,
+                )
+                dirt_factor = binary_math(
+                    "MULTIPLY", dirt_factor, 0.5,
+                    "Dirt procedural factor", 360, -2460,
+                )
+                dirt_seed = mix_float(
+                    dirt_factor, procedural_channels.outputs["Blue"],
+                    procedural_channels.outputs["Red"],
+                    "Dirt procedural seed", 540, -2460,
+                )
+                dirt_seed = mix_float(
+                    0.5, dirt_seed, mask_separate.outputs["Blue"],
+                    "Dirt authored/procedural seed", 720, -2460,
+                )
+                dirt_mask = _scan_mask(
+                    nodes, links, dirt_seed, dirt_amount * 0.8,
+                    _float_parameter(parameters.get("myDirtContrast"), 0.0),
+                    "Rusty metal dirt mask", 900, -2600,
+                )
+
+            if paint is not None:
+                paint_channels = _separate_node(
+                    nodes, links, paint.outputs["Color"],
+                    "Rusty metal paint channels", -180, -930,
+                )
+                paint_color = None
+                paint_weight = None
+                paint_sum = None
+                for index, (channel, prefix) in enumerate(
+                    (("Red", "R"), ("Green", "G"), ("Blue", "B"))
+                ):
+                    rgba = parameters.get(f"my{prefix}PaintColor")
+                    if not isinstance(rgba, (list, tuple)) or len(rgba) < 4:
+                        rgba = (0.0, 0.0, 0.0, 0.0)
+                    region_color = color_value(
+                        f"my{prefix}PaintColor", f"Rusty metal {prefix} paint color",
+                        60, -760 - index * 120, (0.0, 0.0, 0.0),
+                    )
+                    contribution = mix_color(
+                        1.0, region_color, paint_channels.outputs[channel],
+                        f"Rusty metal {prefix} paint contribution",
+                        260, -760 - index * 120, "MULTIPLY",
+                    )
+                    if paint_color is None:
+                        paint_color = contribution
+                    else:
+                        add_color = nodes.new("ShaderNodeVectorMath")
+                        add_color.operation = "ADD"
+                        add_color.label = f"Rusty metal {prefix} paint sum"
+                        add_color.name = add_color.label
+                        add_color.location = (450, -760 - index * 120)
+                        links.new(paint_color, add_color.inputs[0])
+                        links.new(contribution, add_color.inputs[1])
+                        paint_color = add_color.outputs["Vector"]
+                    weighted = binary_math(
+                        "MULTIPLY", paint_channels.outputs[channel], float(rgba[3]),
+                        f"Rusty metal {prefix} paint weight", 60, -1120 - index * 100,
+                    )
+                    paint_weight = (
+                        weighted if paint_weight is None else binary_math(
+                            "ADD", paint_weight, weighted,
+                            f"Rusty metal {prefix} combined paint weight",
+                            260, -1120 - index * 100,
+                        )
+                    )
+                    paint_sum = (
+                        paint_channels.outputs[channel] if paint_sum is None else
+                        binary_math(
+                            "ADD", paint_sum, paint_channels.outputs[channel],
+                            f"Rusty metal {prefix} paint channel sum",
+                            450, -1120 - index * 100,
+                        )
+                    )
+                paint_ratio = binary_math(
+                    "DIVIDE", paint_weight, paint_sum,
+                    "Rusty metal paint alpha ratio", 650, -1260,
+                )
+                paint_scan = binary_math(
+                    "MULTIPLY", paint.outputs["Alpha"], paint_ratio,
+                    "Rusty metal paint alpha", 830, -1260,
+                )
+                paint_scan = binary_math(
+                    "MULTIPLY", paint_scan,
+                    _float_parameter(parameters.get("myPaintAmount"), 0.0),
+                    "Rusty metal paint amount", 1010, -1260,
+                )
+                paint_mask = _scan_mask(
+                    nodes, links, paint_scan, paint.outputs["Alpha"],
+                    _float_parameter(parameters.get("myPaintContrast"), 0.0),
+                    "Rusty metal paint mask", 1180, -1420,
+                )
+                if ao_output is not None:
+                    paint_mask = binary_math(
+                        "MULTIPLY", paint_mask, ao_output,
+                        "Rusty metal paint AO", 1540, -1500,
+                    )
+                paint_color_clamp = nodes.new("ShaderNodeVectorMath")
+                paint_color_clamp.operation = "MINIMUM"
+                paint_color_clamp.label = "Rusty metal paint color clamp"
+                paint_color_clamp.name = paint_color_clamp.label
+                paint_color_clamp.location = (650, -760)
+                paint_color_clamp.inputs[1].default_value = (1.0, 1.0, 1.0)
+                links.new(paint_color, paint_color_clamp.inputs[0])
+                paint_color = paint_color_clamp.outputs["Vector"]
+
+            if paint_mask is not None and paint_color is not None:
+                color_result = mix_color(
+                    paint_mask, color_result, paint_color,
+                    "Rusty metal paint color", 1840, 500,
+                )
+            if scratch_mask is not None and procedural_channels is not None:
+                scratch_color = mix_color(
+                    procedural_channels.outputs["Red"],
+                    (0.270498, 0.300544, 0.300544, 1.0),
+                    (0.152365, 0.182932, 0.182676, 1.0),
+                    "Rusty metal scratch color", 1840, 340,
+                )
+                color_result = mix_color(
+                    scratch_mask, color_result, scratch_color,
+                    "Rusty metal scratches", 2030, 420,
+                )
+            if rust_mask is not None and rust_gradient is not None:
+                gradient_x = binary_math(
+                    "MULTIPLY", procedural_channels.outputs["Red"], 2.0,
+                    "Rust gradient coordinate", 1260, -2240,
+                )
+                rust_tint = _float_parameter(parameters.get("myRustTinting"), 0.0)
+                gradient_x = binary_math(
+                    "ADD", gradient_x, rust_tint,
+                    "Rust gradient tint", 1440, -2240,
+                )
+                gradient_vector = nodes.new("ShaderNodeCombineXYZ")
+                gradient_vector.label = "Rust gradient lookup"
+                gradient_vector.name = gradient_vector.label
+                gradient_vector.location = (1620, -2240)
+                links.new(gradient_x, gradient_vector.inputs["X"])
+                gradient_vector.inputs["Y"].default_value = rust_tint
+                links.new(gradient_vector.outputs["Vector"], rust_gradient.inputs["Vector"])
+                color_result = mix_color(
+                    rust_mask, color_result, rust_gradient.outputs["Color"],
+                    "Rusty metal rust color", 2220, 340,
+                )
+            if dirt_mask is not None:
+                dirt_tint = max(
+                    0.0,
+                    min(1.0, _float_parameter(parameters.get("myDirtTinting"), 0.0)),
+                )
+                dirt_color = tuple(
+                    low + (high - low) * dirt_tint
+                    for low, high in zip(
+                        (0.087945, 0.064132, 0.047828),
+                        (0.358197, 0.331559, 0.291203),
+                    )
+                ) + (1.0,)
+                color_result = mix_color(
+                    dirt_mask, color_result, dirt_color,
+                    "Rusty metal dirt color", 2410, 340,
+                )
+            base_color_override = color_result
+
+            if roughness_result is None:
+                roughness_result = base_roughness
+            if paint_mask is not None:
+                roughness_result = mix_float(
+                    paint_mask, roughness_result,
+                    _float_parameter(parameters.get("myPaintRoughness"), 1.0),
+                    "Rusty metal paint roughness", 1840, 120,
+                )
+            if scratch_mask is not None:
+                roughness_result = mix_float(
+                    scratch_mask, roughness_result, 0.45,
+                    "Rusty metal scratch roughness 1", 2030, 100,
+                )
+                roughness_result = mix_float(
+                    scratch_mask, roughness_result, 0.4,
+                    "Rusty metal scratch roughness 2", 2220, 100,
+                )
+            if rust_mask is not None:
+                roughness_result = mix_float(
+                    rust_mask, roughness_result, 1.0,
+                    "Rusty metal rust roughness", 2410, 100,
+                )
+            if dirt_mask is not None:
+                roughness_result = mix_float(
+                    dirt_mask, roughness_result, 1.0,
+                    "Rusty metal dirt roughness", 2600, 100,
+                )
+
+            if metallic_result is None:
+                metallic_result = base_metal
+            if paint_mask is not None:
+                metallic_result = mix_float(
+                    paint_mask, metallic_result, 0.0,
+                    "Rusty metal paint metalness", 1840, -80,
+                )
+            if scratch_mask is not None:
+                scratch_metal = scratch_mask
+                scratch_paint = _float_parameter(
+                    parameters.get("myScratchPaint"), 0.0
+                )
+                if scratch_paint:
+                    scratch_metal = binary_math(
+                        "MULTIPLY", scratch_mask, 1.0 - scratch_paint,
+                        "Rusty metal exposed scratch", 2030, -160,
+                    )
+                metallic_result = mix_float(
+                    scratch_metal, metallic_result, 0.4,
+                    "Rusty metal scratch metalness", 2220, -80,
+                )
+            if rust_mask is not None:
+                metallic_result = mix_float(
+                    rust_mask, metallic_result, 0.0,
+                    "Rusty metal rust metalness", 2410, -80,
+                )
+            if dirt_mask is not None:
+                metallic_result = mix_float(
+                    dirt_mask, metallic_result, 0.0,
+                    "Rusty metal dirt metalness", 2600, -80,
+                )
+
+            for link in list(shader.inputs["Metallic"].links):
+                links.remove(link)
+            for link in list(shader.inputs["Roughness"].links):
+                links.remove(link)
+            socket_input(shader.inputs["Metallic"], metallic_result)
+            socket_input(shader.inputs["Roughness"], roughness_result)
+
+            weather_mask = None
+            for effect in (scratch_mask, rust_mask, dirt_mask):
+                if effect is None:
+                    continue
+                weather_mask = (
+                    effect if weather_mask is None else binary_math(
+                        "MAXIMUM", weather_mask, effect,
+                        "Rusty metal combined weather mask", 2600, -360,
+                    )
+                )
+            if (
+                weather_mask is not None
+                and rust_normal is not None
+                and normal is not None
+            ):
+                rust_normal_color, _rust_ao = _packed_normal_nodes(
+                    nodes, links, rust_normal
+                )
+                rust_normal_map = nodes.new("ShaderNodeNormalMap")
+                rust_normal_map.label = "Rust procedural tangent normal"
+                rust_normal_map.name = rust_normal_map.label
+                rust_normal_map.location = (2220, -520)
+                links.new(rust_normal_color, rust_normal_map.inputs["Color"])
+                weather_normal = mix_color(
+                    weather_mask, normal.outputs["Normal"],
+                    rust_normal_map.outputs["Normal"],
+                    "Rusty metal weather normal", 2410, -520,
+                )
+                bump_height = weather_mask
+                if paint_mask is not None:
+                    paint_bump = binary_math(
+                        "MULTIPLY", paint_mask,
+                        _float_parameter(parameters.get("myPaintBumpIntensity"), 0.0),
+                        "Rusty metal paint bump", 2410, -700,
+                    )
+                    bump_height = binary_math(
+                        "ADD", bump_height, paint_bump,
+                        "Rusty metal weather bump", 2600, -700,
+                    )
+                bump = nodes.new("ShaderNodeBump")
+                bump.label = "Rusty metal procedural relief"
+                bump.name = bump.label
+                bump.location = (2760, -480)
+                bump.inputs["Strength"].default_value = 0.2
+                bump.inputs["Distance"].default_value = 0.1
+                links.new(bump_height, bump.inputs["Height"])
+                links.new(weather_normal, bump.inputs["Normal"])
+                for link in list(shader.inputs["Normal"].links):
+                    links.remove(link)
+                links.new(bump.outputs["Normal"], shader.inputs["Normal"])
+
+            material["afop_shader_profile"] = "rusty_metal_vcoverlay_static"
+            material["afop_profile_limit"] = (
+                "Static reconstruction of Snowdrop rust, scratch, dirt and paint; "
+                "normal-driven UV distortion and roughness anti-aliasing are approximated"
             )
 
         if (
@@ -2225,6 +2978,7 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
         has_specialized_detail = (
             is_basic_emissive
             or is_rustymetal
+            or is_rustymetal_vcoverlay
             or is_navi_skin
             or is_wildlife_skin
             or is_medusa_skin

@@ -75,6 +75,9 @@ def _material_profile_registry_case():
         "px_wildlife_skin.mshader": {"wildlife_skin"},
         "px_dlc3_medusa_skin.mshader": {"medusa_skin"},
         "px_basic_rustymetal_static.mshader": {"rusty_metal"},
+        "px_rustymetal_vcoverlay_rda_dlc3.mshader": {
+            "rusty_metal_vcoverlay"
+        },
         "px_dlc3_vegetation_static.mshader": {"vegetation"},
     }
     for shader_name, expected in expected_traits.items():
@@ -101,6 +104,25 @@ def _material_profile_registry_case():
             "textures/hair_ao.dds",
         ),
         "hair auxiliary textures are not routed by the registered profile",
+    )
+
+    rusty_binding = {
+        "shader": "dlc3/shaders/PX_RustyMetal_VCoverlay_RDA_DLC3.mshader",
+        "aux": {
+            "AlbedoTexture": "textures/blade_albedo.dds",
+            "DetailNormal1": "textures/blade_detail_1.dds",
+            "DetailNormal2": "textures/blade_detail_2.dds",
+            "RustyMetalMask": "textures/blade_mask.dds",
+            "PaintTexture": "textures/blade_paint.dds",
+        },
+    }
+    check(
+        material_import.supported_auxiliary_paths(rusty_binding)
+        == (
+            *rusty_binding["aux"].values(),
+            *material_profile_registry.RUSTY_METAL_VC_DEFAULT_TEXTURES.values(),
+        ),
+        "DLC3 rusty-metal auxiliary textures are not all requested",
     )
 
 
@@ -179,6 +201,7 @@ def _logical_texture_paths(binding):
     for path in binding.get("aux", {}).values():
         if isinstance(path, str):
             paths.append(path)
+    paths.extend(material_import.supported_auxiliary_paths(binding))
     return list(dict.fromkeys(paths))
 
 
@@ -948,6 +971,83 @@ def _human_skin_case(directory, source_png):
     )
 
 
+def _rusty_metal_vcoverlay_case(directory, source_png):
+    binding = {
+        "shader": "dlc3/shaders/PX_RustyMetal_VCoverlay_RDA_DLC3.mshader",
+        "aux": {
+            "AlbedoTexture": "textures/default_grey_d.dds",
+            "DetailNormal1": "textures/blade_detail_1.dds",
+            "DetailNormal2": "textures/blade_detail_2.dds",
+            "RustyMetalMask": "textures/blade_mask.dds",
+            "PaintTexture": "textures/default_white_d.dds",
+        },
+        "parameters": {
+            "myUseAlbedo": 0,
+            "myBaseColor": (0.0945, 0.0769, 0.0632),
+            "myBaseisMetal": 1,
+            "myBaseRoughnessScale": 1.2078,
+            "myBaseDetialNormalStrength": 0.1647,
+            "myDetail1Tiling": (5, 5),
+            "myDetail2Tiling": (5, 5),
+            "myRustyMetalTiling": (2, 2),
+            "myRColor": (0.0044, 0.0017, 0.0001),
+            "myRisMetal": 1,
+            "myRRoughnessStrength": 0.7115,
+            "myGColor": (0, 1, 0),
+            "myGisMetal": 0,
+            "myGRoughnessStrength": 0.7,
+            "myBColor": (1, 1, 1),
+            "myBisMetal": 0,
+            "myBRoughnessStrength": 1.4,
+        },
+    }
+    material = _assign(binding, directory, source_png, "WukulaBlade")
+    _assert_profile(material, "rusty_metal_vcoverlay_static")
+    shader = _principled(material)
+    _assert_linked(shader.inputs["Base Color"], "rusty-metal blade base color")
+    _assert_linked(shader.inputs["Metallic"], "rusty-metal blade metalness")
+    _assert_linked(shader.inputs["Roughness"], "rusty-metal blade roughness")
+    _assert_linked(shader.inputs["Normal"], "rusty-metal blade normal")
+    check(
+        material.get("afop_rusty_metal_mask") == "textures/blade_mask.dds",
+        "rusty-metal blade mask was not retained",
+    )
+    authored_mask = material.node_tree.nodes.get("Material / Mask (packed)")
+    authored_mask_uv = authored_mask.inputs["Vector"].links[0].from_node
+    check(
+        authored_mask_uv.bl_idname == "ShaderNodeUVMap"
+        and authored_mask_uv.uv_map == "UVMap_0",
+        "rusty-metal authored mask is not sampled directly with UVMap_0",
+    )
+    check(
+        material.get("afop_normal_strength") == 0.1647,
+        "rusty-metal blade base detail strength was not applied",
+    )
+    check(
+        material.node_tree.nodes.get("Rusty Metal selected detail normal") is not None,
+        "rusty-metal blade detail-normal selector was not built",
+    )
+    for node_name in (
+        "RDA Generic Material (RGBA packed)",
+        "Rust / Scratch / Dirt procedural mask",
+        "Rust color gradient",
+        "Rust procedural normal (packed)",
+        "Rusty metal scratch mask",
+        "Rusty metal rust mask",
+        "Rusty metal dirt mask",
+        "Rusty metal procedural relief",
+    ):
+        check(
+            material.node_tree.nodes.get(node_name) is not None,
+            f"rusty-metal reconstruction is missing {node_name}",
+        )
+    rust_gradient = material.node_tree.nodes.get("Rust color gradient")
+    check(
+        rust_gradient.image.colorspace_settings.name == "Non-Color",
+        "linear rust gradient is being sampled as sRGB",
+    )
+
+
 def _character_skin_variant_case(directory, source_png):
     for shader_name in (
         "blue/shaders/px_character_skin_human.mshader",
@@ -1249,6 +1349,9 @@ def _audit_profile_case():
         "PX_TerrainBlend.mshader": ("terrain_runtime", "specialized"),
         "PX_Basic_MossPatch.mshader": ("moss_patch", "specialized"),
         "PX_Wildlife_Gear.mshader": ("wildlife_gear", "specialized"),
+        "PX_RustyMetal_VCoverlay_RDA_DLC3.mshader": (
+            "rusty_metal_vcoverlay", "specialized"
+        ),
     }
     for shader_name, profile in expected.items():
         actual = material_audit._runtime_profile(f"blue/shaders/{shader_name}")
@@ -1365,6 +1468,7 @@ def main():
             ),
             ("constants cutout profile", lambda: _constants_case(directory, source_png)),
             ("human skin profile", lambda: _human_skin_case(directory, source_png)),
+            ("DLC3 rusty-metal vertex-overlay profile", lambda: _rusty_metal_vcoverlay_case(directory, source_png)),
             ("additional character skin variants", lambda: _character_skin_variant_case(directory, source_png)),
             ("hair cutout profile", lambda: _hair_case(directory, source_png)),
             ("wildlife skin and bioluminescence", lambda: _wildlife_skin_case(directory, source_png)),

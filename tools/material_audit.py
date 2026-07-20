@@ -82,6 +82,8 @@ def _runtime_profile(shader_path):
         return "wildlife_wing", "specialized"
     if name.startswith("px_basic_rustymetal"):
         return "rusty_metal", "specialized"
+    if name.startswith("px_rustymetal_vcoverlay"):
+        return "rusty_metal_vcoverlay", "specialized"
     if name == "px_basic_blendmaterial.mshader":
         return "basic_blend", "specialized"
     if name in {"px_mosscard.mshader", "px_mosscard_ground.mshader"}:
@@ -120,7 +122,8 @@ def _sampler_blender_mapping(sampler, profile, support):
     if role == "detail_normal":
         if profile in {
             "basic_emissive", "navi_skin", "wildlife_skin", "medusa_skin",
-            "rusty_metal", "vegetation", "basic_blend", "wildlife_gear",
+            "rusty_metal", "rusty_metal_vcoverlay", "vegetation",
+            "basic_blend", "wildlife_gear",
         }:
             return "Tiled RNM detail-normal layer", "connected"
         return "Generic tiled RNM detail-normal layer", "connected_preview"
@@ -167,6 +170,10 @@ def _sampler_blender_mapping(sampler, profile, support):
         return "Medusa detail/bloodvein/transmission profile", "connected"
     if profile == "rusty_metal" and role == "rustymetalmask":
         return "Imported for engine-procedural rust profile", "preview_source"
+    if profile == "rusty_metal_vcoverlay" and role in {
+        "albedotexture", "detail_normal", "rustymetalmask", "painttexture",
+    }:
+        return "DLC3 rusty-metal vertex-overlay profile", "connected_preview"
     if profile == "vegetation" and role in {
         "detaila", "detailb", "bioluminescence",
     }:
