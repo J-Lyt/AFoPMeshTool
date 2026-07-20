@@ -6,7 +6,7 @@ import os
 
 import bpy
 
-from .. import mgraph
+from ..formats import mgraph
 from .nodes import (
     _aux_image_node,
     _clamp_node,

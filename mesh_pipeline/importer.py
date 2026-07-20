@@ -8,7 +8,7 @@ from mathutils import Euler, Matrix, Vector
 
 from .blender_utils import compute_normals_for_object
 from ..log import logger
-from ..mmb import SkeletalMeshAsset
+from ..formats.mmb import SkeletalMeshAsset
 
 class BlenderMeshImporter:
     @staticmethod

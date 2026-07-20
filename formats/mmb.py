@@ -6,8 +6,8 @@ from struct import pack, unpack
 from mathutils import Vector
 
 from .binary_io import bp, br
-from .mesh_pipeline.files import CopyFile
-from .log import logger
+from ..mesh_pipeline.files import CopyFile
+from ..log import logger
 
 # Known values:
 #   0.0     -> float32   : (8 bytes/vert, unquantized)

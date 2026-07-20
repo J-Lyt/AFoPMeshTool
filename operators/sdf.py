@@ -11,9 +11,10 @@ from pathlib import PurePosixPath
 
 import bpy
 
-from .. import addon_state, material_import, mgraph, shader_schema
+from .. import addon_state, material_import
+from ..formats import mgraph, shader_schema
 from ..log import logger
-from ..mmb import SkeletalMeshAsset
+from ..formats.mmb import SkeletalMeshAsset
 from ..sdf import oodle as oodle_helper
 from ..sdf import toc as sdf_toc
 from ..sdf.reader import SdfArchive

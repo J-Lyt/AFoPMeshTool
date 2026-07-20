@@ -12,7 +12,7 @@ import numpy as np
 from mathutils import Vector
 
 from .. import addon_state
-from ..binary_io import bp
+from ..formats.binary_io import bp
 from .blender_utils import (
     bake_parent_inverse,
     compute_normals_for_object,
@@ -21,8 +21,8 @@ from .blender_utils import (
 )
 from .cloth import _sim_free_slot_flags
 from ..log import logger
-from .. import meshlet as meshlet_codec
-from ..mmb import (
+from ..formats import meshlet as meshlet_codec
+from ..formats.mmb import (
     SkeletalMeshAsset,
     _VERTEX_FORMAT_LAYOUTS,
     _pack_vertex_format,

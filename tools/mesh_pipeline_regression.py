@@ -78,7 +78,8 @@ def main():
             if not exported_path.is_file() or exported_path.parent != Path(directory):
                 raise RuntimeError(f"Expected a temporary exported MMB, got {exported_path}")
 
-            from afop_mesh_pipeline_regression.mmb import SkeletalMeshAsset
+            from afop_mesh_pipeline_regression.formats import mcloth
+            from afop_mesh_pipeline_regression.formats.mmb import SkeletalMeshAsset
 
             with exported_path.open("rb") as stream:
                 exported_asset = SkeletalMeshAsset()
@@ -95,8 +96,8 @@ def main():
                 exported_cloth = exported_path.with_suffix(".mcloth")
                 if not exported_cloth.is_file():
                     raise RuntimeError("Paired cloth export was not created")
-                source_streams, _ = addon.mcloth.parse_streams(source_cloth.read_bytes())
-                exported_streams, _ = addon.mcloth.parse_streams(exported_cloth.read_bytes())
+                source_streams, _ = mcloth.parse_streams(source_cloth.read_bytes())
+                exported_streams, _ = mcloth.parse_streams(exported_cloth.read_bytes())
                 if len(exported_streams) != len(source_streams):
                     raise RuntimeError(
                         "Exported cloth stream count changed: "

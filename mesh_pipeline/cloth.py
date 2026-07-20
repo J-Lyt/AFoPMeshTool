@@ -10,14 +10,15 @@ import bpy
 
 from .. import addon_state
 from ..log import logger
-from ..mmb import SkeletalMeshAsset
+from ..formats.mmb import SkeletalMeshAsset
 
 try:
-    from .. import mcloth
+    from ..formats import mcloth
 except ImportError:
     try:
         _path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'formats',
             'mcloth.py',
         )
         _spec = importlib.util.spec_from_file_location('afop_mcloth', _path)

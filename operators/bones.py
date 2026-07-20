@@ -8,12 +8,12 @@ import bpy
 from mathutils import Matrix, Vector
 
 from .. import addon_state
-from ..binary_io import br
+from ..formats.binary_io import br
 from ..mesh_pipeline.exporter import BME
 from ..mesh_pipeline.files import _mod_file_output, get_merged_mmb
 from ..mesh_pipeline.importer import BMI
 from ..log import logger
-from ..mmb import SkeletalMeshAsset
+from ..formats.mmb import SkeletalMeshAsset
 
 def _compute_inv_bind_from_skeleton(bone_name):
     """

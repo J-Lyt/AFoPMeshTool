@@ -8,7 +8,7 @@ import bpy
 from . import addon_state
 from .mesh_pipeline.files import _strip_mod_suffix, get_merged_mmb
 from .log import logger, set_debug
-from .mmb import SkeletalMeshAsset
+from .formats.mmb import SkeletalMeshAsset
 
 
 _sdf_search_generation = 0

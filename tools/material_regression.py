@@ -47,11 +47,10 @@ def _load_addon_package():
 ADDON = _load_addon_package()
 from afop_material_regression import (  # noqa: E402
     material_import,
-    mgraph,
     operators_sdf,
-    shader_schema,
     updater,
 )
+from afop_material_regression.formats import mgraph, shader_schema  # noqa: E402
 from afop_material_regression.materials import registry as material_profile_registry
 
 _audit_spec = importlib.util.spec_from_file_location(

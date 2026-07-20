@@ -14,8 +14,8 @@ _REPOSITORY = Path(__file__).resolve().parents[1]
 if str(_REPOSITORY) not in sys.path:
     sys.path.insert(0, str(_REPOSITORY))
 
-import mgraph
-from shader_schema import parse_shader_source
+from formats import mgraph
+from formats.shader_schema import parse_shader_source
 
 
 SCHEMA_VERSION = 5
