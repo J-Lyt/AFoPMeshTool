@@ -35,6 +35,7 @@ def _on_sdf_search_update(self, context):
                     continue
                 settings = getattr(scene, "SWOMT", None)
                 if settings is not None:
+                    settings.sdf_show_all_results = False
                     settings.sdf_search_applied = settings.sdf_search
                     from .operators import sdf as operators_sdf
                     operators_sdf.populate_search_results(scene, settings.sdf_search)
@@ -411,6 +412,34 @@ class SWOMTSettings(bpy.types.PropertyGroup):
         options={'SKIP_SAVE'},
         update=_on_sdf_search_update,
     )
+    sdf_show_rogue: bpy.props.BoolProperty(
+        name="Rogue",
+        description="Include Rogue assets in search results",
+        default=True,
+        options={'SKIP_SAVE'},
+        update=_on_sdf_search_update,
+    )
+    sdf_show_dlc1: bpy.props.BoolProperty(
+        name="DLC1",
+        description="Include DLC1 assets in search results",
+        default=True,
+        options={'SKIP_SAVE'},
+        update=_on_sdf_search_update,
+    )
+    sdf_show_dlc2: bpy.props.BoolProperty(
+        name="DLC2",
+        description="Include DLC2 assets in search results",
+        default=True,
+        options={'SKIP_SAVE'},
+        update=_on_sdf_search_update,
+    )
+    sdf_show_dlc3: bpy.props.BoolProperty(
+        name="DLC3",
+        description="Include DLC3 assets in search results",
+        default=True,
+        options={'SKIP_SAVE'},
+        update=_on_sdf_search_update,
+    )
     sdf_search: bpy.props.StringProperty(
         name="Filter Game Assets",
         description="Filter the enabled MMB, mgraphobject, and mcompoundnode paths",
@@ -419,6 +448,10 @@ class SWOMTSettings(bpy.types.PropertyGroup):
     )
     sdf_search_applied: bpy.props.StringProperty(options={'HIDDEN', 'SKIP_SAVE'})
     sdf_search_result_status: bpy.props.StringProperty(options={'HIDDEN', 'SKIP_SAVE'})
+    sdf_show_all_results: bpy.props.BoolProperty(
+        default=False,
+        options={'HIDDEN', 'SKIP_SAVE'},
+    )
     sdf_asset_index: bpy.props.IntProperty(default=-1, min=-1, options={'SKIP_SAVE'})
     sdf_result_generation: bpy.props.IntProperty(default=-1, options={'HIDDEN', 'SKIP_SAVE'})
     sdf_load_as_asset: bpy.props.BoolProperty(

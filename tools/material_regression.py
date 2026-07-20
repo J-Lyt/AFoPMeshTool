@@ -509,6 +509,113 @@ def _multi_mmb_import_selection_case():
         operators_sdf._referenced_compound_data = original_compound_data
 
 
+class _SDFResultCollection(list):
+    def add(self):
+        item = SimpleNamespace()
+        self.append(item)
+        return item
+
+
+def _sdf_search_settings(**overrides):
+    values = dict(
+        sdf_assets=_SDFResultCollection(),
+        sdf_asset_index=-1,
+        sdf_search_applied="",
+        sdf_search_result_status="",
+        sdf_show_all_results=False,
+        sdf_show_mmb=True,
+        sdf_show_mgraphobject=False,
+        sdf_show_mcompoundnode=False,
+        sdf_show_rogue=True,
+        sdf_show_dlc1=True,
+        sdf_show_dlc2=True,
+        sdf_show_dlc3=True,
+    )
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _sdf_archive_filter_case():
+    settings = _sdf_search_settings()
+    scene = SimpleNamespace(SWOMT=settings)
+    labels = ("rogue", "dlc1", "DLC2", "dlc3", "future_archive")
+    entries = [
+        (
+            operators_sdf._ASSET_MMB,
+            operators_sdf._IndexedAsset(
+                archive=None,
+                asset=SimpleNamespace(name=f"blue/baked/shared_{index}.mmb"),
+                archive_label=label,
+                cache_key=label,
+            ),
+        )
+        for index, label in enumerate(labels)
+    ]
+    original_entries = operators_sdf._state.search_entries
+    original_generation = operators_sdf._state.generation
+    try:
+        operators_sdf._state.search_entries = entries
+        operators_sdf._state.generation = original_generation + 1
+        operators_sdf.populate_search_results(scene, "shared")
+        check(
+            [item.archive_label for item in settings.sdf_assets] == list(labels),
+            "enabled-by-default archive filters hid search results",
+        )
+
+        settings.sdf_show_rogue = False
+        settings.sdf_show_dlc2 = False
+        operators_sdf.populate_search_results(scene, "shared")
+        check(
+            [item.archive_label for item in settings.sdf_assets]
+            == ["dlc1", "dlc3", "future_archive"],
+            "archive filters did not hide only the selected Rogue/DLC archives",
+        )
+    finally:
+        operators_sdf._state.search_entries = original_entries
+        operators_sdf._state.generation = original_generation
+
+
+def _sdf_show_all_results_case():
+    settings = _sdf_search_settings(sdf_search_applied="shared")
+    scene = SimpleNamespace(SWOMT=settings)
+    entries = [
+        (
+            operators_sdf._ASSET_MMB,
+            operators_sdf._IndexedAsset(
+                archive=None,
+                asset=SimpleNamespace(name=f"blue/baked/shared_{index}.mmb"),
+                archive_label="rogue",
+                cache_key=f"rogue_{index}",
+            ),
+        )
+        for index in range(501)
+    ]
+    original_entries = operators_sdf._state.search_entries
+    original_generation = operators_sdf._state.generation
+    try:
+        operators_sdf._state.search_entries = entries
+        operators_sdf._state.generation = original_generation + 1
+        operators_sdf.populate_search_results(scene, settings.sdf_search_applied)
+        check(len(settings.sdf_assets) == 500, "search result safety cap changed")
+        check(
+            settings.sdf_search_result_status.startswith("Showing first 500"),
+            "truncated search did not show its result-limit message",
+        )
+
+        result = operators_sdf.ShowAllSDFResults.execute(
+            None, SimpleNamespace(scene=scene)
+        )
+        check(result == {"FINISHED"}, "Show All search action did not finish")
+        check(len(settings.sdf_assets) == 501, "Show All did not reveal every result")
+        check(
+            not settings.sdf_search_result_status,
+            "Show All left the truncated-result message visible",
+        )
+    finally:
+        operators_sdf._state.search_entries = original_entries
+        operators_sdf._state.generation = original_generation
+
+
 def _direhorse_weakpoint_binding_case():
     body_paths = {
         "d": "blue/baked/wildlife/direhorse/wildlife_direhorse_01_d.dds",
@@ -1153,12 +1260,32 @@ def _addon_registration_case():
     try:
         check(hasattr(bpy.types.Scene, "SWOMT"), "scene settings were not registered")
         check(
+            hasattr(bpy.types, "SWOMT_PT_sdf_archive_filters"),
+            "archive-filter popover was not registered",
+        )
+        check(
+            ADDON.ui.SDFArchiveFilterPopover.bl_region_type == "HEADER",
+            "archive-filter popover would also appear as a Scene Properties panel",
+        )
+        check(
+            hasattr(bpy.types, "OBJECT_OT_show_all_sdf_results"),
+            "Show All search-results action was not registered",
+        )
+        check(
             not hasattr(ADDON.operators_sdf, "AuditSDFMaterials"),
             "the material-audit operator is still coupled to Blender",
         )
     finally:
         ADDON.unregister()
     check(not hasattr(bpy.types.Scene, "SWOMT"), "scene settings were not unregistered")
+    check(
+        not hasattr(bpy.types, "SWOMT_PT_sdf_archive_filters"),
+        "archive-filter popover was not unregistered",
+    )
+    check(
+        not hasattr(bpy.types, "OBJECT_OT_show_all_sdf_results"),
+        "Show All search-results action was not unregistered",
+    )
 
 
 def _standalone_audit_case(directory):
@@ -1226,6 +1353,8 @@ def main():
             ("direct and compound binding resolution", _binding_resolution_cases),
             ("direct-only MMB material-source discovery", _direct_material_source_discovery_case),
             ("multi-MMB graph import selection", _multi_mmb_import_selection_case),
+            ("Rogue and DLC search-result filters", _sdf_archive_filter_case),
+            ("show all truncated search results", _sdf_show_all_results_case),
             ("Direhorse weakpoint inherits body binding", _direhorse_weakpoint_binding_case),
             ("wildlife gameplay parts inherit rendered skin", _wildlife_gameplay_part_alias_case),
             ("named mask and piercing texture families", _named_mask_and_piercing_binding_case),

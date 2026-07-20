@@ -6,6 +6,24 @@ from . import addon_state, bl_info, updater
 from .operators import sdf as operators_sdf
 from .settings import _vert_count_changed
 
+
+class SDFArchiveFilterPopover(bpy.types.Panel):
+    """Choose which game assets are included in search results."""
+
+    bl_idname = "SWOMT_PT_sdf_archive_filters"
+    bl_label = "Archive Filters"
+    bl_space_type = "PROPERTIES"
+    bl_region_type = "HEADER"
+
+    def draw(self, context):
+        settings = context.scene.SWOMT
+        layout = self.layout
+        layout.prop(settings, "sdf_show_rogue", text="Rogue")
+        layout.prop(settings, "sdf_show_dlc1", text="DLC1")
+        layout.prop(settings, "sdf_show_dlc2", text="DLC2")
+        layout.prop(settings, "sdf_show_dlc3", text="DLC3")
+
+
 class SWOMTPanel(bpy.types.Panel):
     """Creates a Panel in the Scene Properties window"""
     bl_label = "AFoP Mesh Tool | Version {}.{}.{}".format(*bl_info["version"])
@@ -113,10 +131,27 @@ class SWOMTPanel(bpy.types.Panel):
                 type_row.prop(
                     SWOMT, "sdf_show_mcompoundnode", text="MCompoundNode"
                 )
-                sdf_box.prop(SWOMT, "sdf_search", text="", icon="VIEWZOOM")
+                search_row = sdf_box.row(align=True)
+                search_row.prop(SWOMT, "sdf_search", text="", icon="VIEWZOOM")
+                search_row.popover(
+                    panel="SWOMT_PT_sdf_archive_filters",
+                    text="",
+                    icon="FILTER",
+                )
                 if SWOMT.sdf_search_applied.strip():
                     if SWOMT.sdf_search_result_status:
-                        sdf_box.label(text=SWOMT.sdf_search_result_status, icon="INFO")
+                        status_row = sdf_box.row(align=True)
+                        message_row = status_row.row(align=True)
+                        message_row.label(
+                            text=SWOMT.sdf_search_result_status,
+                            icon="INFO",
+                        )
+                        show_all_row = status_row.row(align=True)
+                        show_all_row.ui_units_x = 4.5
+                        show_all_row.operator(
+                            "object.show_all_sdf_results",
+                            text="Show All",
+                        )
                     sdf_box.template_list(
                         "SWOMT_UL_sdf_assets",
                         "",
@@ -298,4 +333,4 @@ class SWOMTPanel(bpy.types.Panel):
                                 if is_added:
                                     slot_row.enabled = False
 
-CLASSES = (SWOMTPanel,)
+CLASSES = (SDFArchiveFilterPopover, SWOMTPanel)

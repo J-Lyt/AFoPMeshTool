@@ -32,6 +32,12 @@ _INDEX_CACHE_VERSION = 4
 _ASSET_MMB = "MMB"
 _ASSET_MGRAPH = "MGRAPHOBJECT"
 _ASSET_MCOMPOUND = "MCOMPOUNDNODE"
+_ARCHIVE_FILTER_PROPERTIES = {
+    "rogue": "sdf_show_rogue",
+    "dlc1": "sdf_show_dlc1",
+    "dlc2": "sdf_show_dlc2",
+    "dlc3": "sdf_show_dlc3",
+}
 _MATERIAL_SOURCE_AUTO = "__AUTO__"
 _material_source_dialog_items = [
     (_MATERIAL_SOURCE_AUTO, "Automatic", "Use the highest-ranked material source", 0)
@@ -480,6 +486,7 @@ def _populate_scene_results(generation):
         settings.sdf_assets.clear()
         settings.sdf_asset_index = -1
         settings.sdf_search_result_status = ""
+        settings.sdf_show_all_results = False
         settings.sdf_result_generation = generation
         if settings.sdf_search_applied.strip():
             populate_search_results(scene, settings.sdf_search_applied)
@@ -511,13 +518,22 @@ def populate_search_results(scene, search):
 
     matches = []
     truncated = False
+    result_limit = (
+        None if getattr(settings, "sdf_show_all_results", False)
+        else _MAX_SEARCH_RESULTS
+    )
     for entry_id, (asset_type, entry) in enumerate(search_entries):
         if asset_type not in enabled_types:
+            continue
+        archive_property = _ARCHIVE_FILTER_PROPERTIES.get(
+            entry.archive_label.casefold()
+        )
+        if archive_property and not getattr(settings, archive_property):
             continue
         haystack = f"{entry.asset.name} {entry.archive_label}".casefold()
         if not all(term in haystack for term in terms):
             continue
-        if len(matches) >= _MAX_SEARCH_RESULTS:
+        if result_limit is not None and len(matches) >= result_limit:
             truncated = True
             break
         matches.append((entry_id, asset_type, entry.asset.name, entry.archive_label))
@@ -1682,6 +1698,21 @@ class SDFAssetList(bpy.types.UIList):
         else:
             layout.label(text="", icon="MESH_DATA")
 
+
+class ShowAllSDFResults(bpy.types.Operator):
+    """Show every result for the current game-asset search."""
+
+    bl_idname = "object.show_all_sdf_results"
+    bl_label = "Show All"
+    bl_description = "Show every result for the current search"
+
+    def execute(self, context):
+        settings = context.scene.SWOMT
+        settings.sdf_show_all_results = True
+        populate_search_results(context.scene, settings.sdf_search_applied)
+        return {"FINISHED"}
+
+
 class BrowseSDFDirectory(bpy.types.Operator):
     """Choose the AFOP folder containing SDF archives."""
 
@@ -2061,6 +2092,7 @@ CLASSES = (
     SDFMMBImportChoice,
     SDFMMBChoiceList,
     SDFAssetList,
+    ShowAllSDFResults,
     BrowseSDFDirectory,
     BrowseSDFExtractedDirectory,
     ClearSDFIndexCache,

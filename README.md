@@ -38,7 +38,12 @@ Default game and extraction folders can be saved in the add-on preferences.
 3. Wait for the archive index to load.
 4. Choose which asset types to search. **MMB** is enabled by default;
    **MGraph** and **MCompoundNode** are optional.
-5. Search for and select an asset, then load or import it.
+5. Choose which archives to include. **Rogue**, **DLC1**, **DLC2**, and
+   **DLC3** are all enabled by default.
+6. Search for and select an asset, then load or import it.
+
+Broad searches initially show up to 500 matches. Use **Show All** beside the
+result notice to display every match for the current search.
 
 Selecting an MGraph or MCompoundNode imports its referenced MMB files. 
 
