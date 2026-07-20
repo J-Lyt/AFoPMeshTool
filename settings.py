@@ -6,7 +6,7 @@ from pathlib import Path
 import bpy
 
 from . import addon_state
-from .file_utils import _strip_mod_suffix, get_merged_mmb
+from .mesh_pipeline.files import _strip_mod_suffix, get_merged_mmb
 from .log import logger, set_debug
 from .mmb import SkeletalMeshAsset
 

@@ -6,7 +6,7 @@ from struct import pack, unpack
 from mathutils import Vector
 
 from .binary_io import bp, br
-from .file_utils import CopyFile
+from .mesh_pipeline.files import CopyFile
 from .log import logger
 
 # Known values:

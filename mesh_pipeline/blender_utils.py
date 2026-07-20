@@ -4,7 +4,7 @@ import bmesh
 import bpy
 from mathutils import Vector
 
-from .log import logger
+from ..log import logger
 
 def compute_normals_for_object(obj):
     """

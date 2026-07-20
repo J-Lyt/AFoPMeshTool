@@ -1,7 +1,7 @@
 # .mcloth reader/writer for the AFoP Mesh Tool.
 #
 # Pure module: no bpy imports, usable standalone (tests, CLI tooling).
-# The Blender-side layer (_export_mcloth_for_asset) lives in cloth_export.py.
+# The Blender-side layer (_export_mcloth_for_asset) lives in mesh_pipeline/cloth.py.
 #
 # ---------------- Format ----------------
 # .mcloth files drive cloth: a low-res <name>_CLOTH_SIM mesh is simulated and

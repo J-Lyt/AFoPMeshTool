@@ -11,18 +11,18 @@ import bpy
 import numpy as np
 from mathutils import Vector
 
-from . import addon_state
-from .binary_io import bp
-from .blender_mesh_utils import (
+from .. import addon_state
+from ..binary_io import bp
+from .blender_utils import (
     bake_parent_inverse,
     compute_normals_for_object,
     find_object_by_name,
     triangulate_object,
 )
-from .cloth_export import _sim_free_slot_flags
-from .log import logger
-from . import meshlet as meshlet_codec
-from .mmb import (
+from .cloth import _sim_free_slot_flags
+from ..log import logger
+from .. import meshlet as meshlet_codec
+from ..mmb import (
     SkeletalMeshAsset,
     _VERTEX_FORMAT_LAYOUTS,
     _pack_vertex_format,

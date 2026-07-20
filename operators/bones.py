@@ -9,9 +9,9 @@ from mathutils import Matrix, Vector
 
 from .. import addon_state
 from ..binary_io import br
-from ..exporter import BME
-from ..file_utils import _mod_file_output, get_merged_mmb
-from ..importer import BMI
+from ..mesh_pipeline.exporter import BME
+from ..mesh_pipeline.files import _mod_file_output, get_merged_mmb
+from ..mesh_pipeline.importer import BMI
 from ..log import logger
 from ..mmb import SkeletalMeshAsset
 

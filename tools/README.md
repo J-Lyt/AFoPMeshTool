@@ -61,6 +61,26 @@ The runner prints one line per check and raises after reporting every failure.
 Keep the runner developer-only: do not add it to `updater.CODE_FILES` or the
 add-on registration/UI.
 
+## Mesh pipeline smoke test
+
+`mesh_pipeline_regression.py` exercises the complete Blender-facing MMB path
+against one extracted asset: load, import every LOD0 mesh, export to a temporary
+directory, and parse the result again. It never modifies the source asset.
+
+Run it from the repository root with Blender 5.0 or newer:
+
+```powershell
+& 'C:\Program Files\Blender Foundation\Blender 5.0\blender.exe' `
+    --background --factory-startup --python-exit-code 1 `
+    --python tools\mesh_pipeline_regression.py -- `
+    --mmb 'D:\path\asset.mmb'
+```
+
+Use a small, non-cloth asset for a quick structural check. Cloth assets remain
+subject to the separate byte-level and in-game validation described in the
+reverse-engineering notes. Keep this runner developer-only and out of the
+add-on updater manifest and UI.
+
 ## Real-import material snapshots
 
 `material_snapshot.py` records the material result of an approved `.blend`

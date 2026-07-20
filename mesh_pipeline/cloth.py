@@ -8,15 +8,18 @@ from struct import pack, unpack
 
 import bpy
 
-from . import addon_state
-from .log import logger
-from .mmb import SkeletalMeshAsset
+from .. import addon_state
+from ..log import logger
+from ..mmb import SkeletalMeshAsset
 
 try:
-    from . import mcloth
+    from .. import mcloth
 except ImportError:
     try:
-        _path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mcloth.py')
+        _path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'mcloth.py',
+        )
         _spec = importlib.util.spec_from_file_location('afop_mcloth', _path)
         mcloth = importlib.util.module_from_spec(_spec)
         _spec.loader.exec_module(mcloth)

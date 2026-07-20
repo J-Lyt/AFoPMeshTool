@@ -6,9 +6,9 @@ import bmesh
 import bpy
 from mathutils import Euler, Matrix, Vector
 
-from .blender_mesh_utils import compute_normals_for_object
-from .log import logger
-from .mmb import SkeletalMeshAsset
+from .blender_utils import compute_normals_for_object
+from ..log import logger
+from ..mmb import SkeletalMeshAsset
 
 class BlenderMeshImporter:
     @staticmethod

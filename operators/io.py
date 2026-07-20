@@ -6,10 +6,10 @@ from pathlib import Path
 import bpy
 
 from .. import addon_state
-from ..cloth_export import _export_mcloth_for_asset
-from ..exporter import BME
-from ..file_utils import _mod_file_output, get_merged_mmb
-from ..importer import BMI
+from ..mesh_pipeline.cloth import _export_mcloth_for_asset
+from ..mesh_pipeline.exporter import BME
+from ..mesh_pipeline.files import _mod_file_output, get_merged_mmb
+from ..mesh_pipeline.importer import BMI
 from ..mmb import SkeletalMeshAsset
 
 class BrowseMMBFile(bpy.types.Operator):
