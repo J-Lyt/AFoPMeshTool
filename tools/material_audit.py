@@ -60,7 +60,11 @@ def _runtime_profile(shader_path):
         return "eye_shell", "specialized"
     if name == "px_constants.mshader":
         return "constants", "specialized"
-    if name == "px_skin_vhq.mshader":
+    if name in {
+        "px_skin_vhq.mshader",
+        "px_character_skin_human.mshader",
+        "px_character_skin_vhq_body.mshader",
+    }:
         return "human_skin", "specialized"
     if name == "px_hair2_3color_tousle.mshader":
         return "hair", "specialized"

@@ -21,6 +21,11 @@ CODE_FILES = (
     "importer.py",
     "log.py",
     "material_import.py",
+    "materials/__init__.py",
+    "materials/nodes.py",
+    "materials/profiles.py",
+    "materials/registry.py",
+    "materials/textures.py",
     "meshlet.py",
     "mgraph.py",
     "mcloth.py",
@@ -110,6 +115,7 @@ def _install_payloads(payloads):
         for filename, data in payloads.items():
             destination = os.path.join(plugin_dir, filename)
             temporary = destination + ".update_tmp"
+            os.makedirs(os.path.dirname(destination), exist_ok=True)
             if os.path.isfile(destination):
                 with open(destination, "rb") as stream:
                     originals[filename] = stream.read()

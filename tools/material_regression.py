@@ -48,8 +48,11 @@ ADDON = _load_addon_package()
 from afop_material_regression import (  # noqa: E402
     material_import,
     mgraph,
+    operators_sdf,
     shader_schema,
+    updater,
 )
+from afop_material_regression.materials import registry as material_profile_registry
 
 _audit_spec = importlib.util.spec_from_file_location(
     "afop_material_audit_tool", REPOSITORY / "tools" / "material_audit.py"
@@ -58,6 +61,75 @@ if _audit_spec is None or _audit_spec.loader is None:
     raise RuntimeError("Could not load the standalone material-audit report engine")
 material_audit = importlib.util.module_from_spec(_audit_spec)
 _audit_spec.loader.exec_module(material_audit)
+
+
+def _material_profile_registry_case():
+    registry = material_profile_registry
+    check(
+        material_import.supported_auxiliary_paths
+        is registry.supported_auxiliary_paths,
+        "material-import facade bypasses the profile registry",
+    )
+    expected_traits = {
+        "px_character_navi_face.mshader": {"navi_skin", "navi_face"},
+        "px_hair2_3color_tousle.mshader": {"hair"},
+        "px_wildlife_skin.mshader": {"wildlife_skin"},
+        "px_dlc3_medusa_skin.mshader": {"medusa_skin"},
+        "px_basic_rustymetal_static.mshader": {"rusty_metal"},
+        "px_dlc3_vegetation_static.mshader": {"vegetation"},
+    }
+    for shader_name, expected in expected_traits.items():
+        actual = registry.profile_traits(shader_name)
+        check(
+            expected.issubset(actual),
+            f"profile registry did not classify {shader_name}: {sorted(actual)}",
+        )
+
+    hair_binding = {
+        "shader": "blue/shaders/px_hair2_3color_tousle.mshader",
+        "aux": {
+            "HairMaps": "textures/hair_m.dds",
+            "DirectionMap": "textures/hair_dir.dds",
+            "AO": "textures/hair_ao.dds",
+            "DetailNormal": "textures/unrelated_detail.dds",
+        },
+    }
+    check(
+        material_import.supported_auxiliary_paths(hair_binding)
+        == (
+            "textures/hair_m.dds",
+            "textures/hair_dir.dds",
+            "textures/hair_ao.dds",
+        ),
+        "hair auxiliary textures are not routed by the registered profile",
+    )
+
+
+def _nested_update_install_case():
+    with tempfile.TemporaryDirectory(prefix="afop_nested_update_") as directory:
+        destination = Path(directory)
+        payloads = {
+            "material_import.py": b"VALUE = 'facade'\n",
+            "materials/__init__.py": b"VALUE = 'package'\n",
+            "materials/profiles.py": b"VALUE = 'profiles'\n",
+        }
+        original_plugin_dir = updater._plugin_dir
+        original_update_files = updater.UPDATE_FILES
+        try:
+            updater._plugin_dir = lambda: str(destination)
+            updater.UPDATE_FILES = tuple(payloads)
+            updater._install_payloads(payloads)
+        finally:
+            updater._plugin_dir = original_plugin_dir
+            updater.UPDATE_FILES = original_update_files
+
+        for relative_path, expected in payloads.items():
+            installed = destination / relative_path
+            check(installed.is_file(), f"updater did not create {relative_path}")
+            check(
+                installed.read_bytes() == expected,
+                f"updater corrupted nested payload {relative_path}",
+            )
 
 _audit_cli_spec = importlib.util.spec_from_file_location(
     "afop_material_audit_cli", REPOSITORY / "tools" / "audit_material_corpus.py"
@@ -267,6 +339,177 @@ def _binding_resolution_cases():
         mgraph._bv2_plain = original_plain
 
 
+def _direct_material_source_discovery_case():
+    target_path = "blue/baked/wl_test_01.mmb"
+    direct_graph_path = "blue/graphs/wl_test_direct.mgraphobject"
+    indirect_graph_path = "blue/graphs/wl_test_indirect.mgraphobject"
+    direct_compound_path = "blue/graphs/wl_test_direct.mcompoundnode"
+    indirect_compound_path = "blue/graphs/wl_test_indirect.mcompoundnode"
+    payloads = {
+        direct_graph_path: mgraph.MAGIC + b"direct-graph",
+        indirect_graph_path: mgraph.MAGIC + b"indirect-graph",
+        direct_compound_path: mgraph.MAGIC + b"direct-compound",
+        indirect_compound_path: mgraph.MAGIC + b"indirect-compound",
+    }
+    nested_payload = mgraph.MAGIC + b"nested-compound"
+
+    class FakeArchive:
+        def extract(self, asset):
+            return payloads[asset.name]
+
+    archive = FakeArchive()
+
+    def indexed(path):
+        return operators_sdf._IndexedAsset(
+            archive=archive,
+            asset=SimpleNamespace(name=path),
+            archive_label="synthetic",
+            cache_key="synthetic",
+        )
+
+    target = indexed(target_path)
+    graph_entries = [indexed(direct_graph_path), indexed(indirect_graph_path)]
+    compound_entries = [indexed(direct_compound_path), indexed(indirect_compound_path)]
+    original_graphs = operators_sdf._state.graphs
+    original_compounds = operators_sdf._state.compounds
+    original_referenced_meshes = mgraph.referenced_meshes
+    original_compound_data = operators_sdf._referenced_compound_data
+    original_richness = operators_sdf._material_source_richness
+    traversed = []
+
+    def referenced_meshes(data):
+        if data in (payloads[direct_graph_path], payloads[direct_compound_path], nested_payload):
+            return [target_path]
+        return []
+
+    def compound_data(data, _archive):
+        traversed.append(data)
+        if data in (payloads[indirect_graph_path], payloads[indirect_compound_path]):
+            return {"blue/graphs/nested.mcompoundnode": nested_payload}
+        return {}
+
+    try:
+        operators_sdf._state.graphs = {
+            entry.asset.name.casefold(): [entry] for entry in graph_entries
+        }
+        operators_sdf._state.compounds = {
+            entry.asset.name.casefold(): [entry] for entry in compound_entries
+        }
+        mgraph.referenced_meshes = referenced_meshes
+        operators_sdf._referenced_compound_data = compound_data
+        operators_sdf._material_source_richness = lambda _data, _compounds: 1
+
+        graph_options = operators_sdf._material_graph_options(target)
+        compound_options = operators_sdf._material_compound_options(target)
+        check(
+            [item[0].asset.name for item in graph_options] == [direct_graph_path],
+            "automatic MMB discovery accepted an indirectly linked graph",
+        )
+        check(
+            [item[0].asset.name for item in compound_options] == [direct_compound_path],
+            "automatic MMB discovery accepted an indirectly linked compound",
+        )
+        check(
+            set(traversed) == {
+                payloads[direct_graph_path],
+                payloads[direct_compound_path],
+            },
+            "automatic MMB discovery traversed a source before confirming its direct link",
+        )
+
+        recursive_references, _sources = operators_sdf._material_source_references(
+            payloads[indirect_graph_path], archive
+        )
+        check(
+            recursive_references == [target_path],
+            "explicit graph/compound traversal no longer resolves nested MMB references",
+        )
+    finally:
+        operators_sdf._state.graphs = original_graphs
+        operators_sdf._state.compounds = original_compounds
+        mgraph.referenced_meshes = original_referenced_meshes
+        operators_sdf._referenced_compound_data = original_compound_data
+        operators_sdf._material_source_richness = original_richness
+
+
+def _multi_mmb_import_selection_case():
+    source_path = "blue/graphs/wildlife_test.mgraphobject"
+    direct_path = "blue/baked/wildlife_direct.mmb"
+    linked_path = "blue/baked/wildlife_linked.mmb"
+    source_data = mgraph.MAGIC + b"source"
+    linked_data = mgraph.MAGIC + b"linked"
+
+    class FakeArchive:
+        def extract(self, asset):
+            check(asset.name == source_path, "unexpected asset extraction during scope test")
+            return source_data
+
+    archive = FakeArchive()
+
+    def indexed(path):
+        return operators_sdf._IndexedAsset(
+            archive=archive,
+            asset=SimpleNamespace(name=path),
+            archive_label="synthetic",
+            cache_key="synthetic",
+        )
+
+    source = indexed(source_path)
+    direct = indexed(direct_path)
+    linked = indexed(linked_path)
+    original_entries = operators_sdf._state.entries
+    original_referenced_meshes = mgraph.referenced_meshes
+    original_compound_data = operators_sdf._referenced_compound_data
+
+    def referenced_meshes(data):
+        if data == source_data:
+            return [direct_path]
+        if data == linked_data:
+            return [linked_path]
+        return []
+
+    try:
+        operators_sdf._state.entries = [direct, linked]
+        mgraph.referenced_meshes = referenced_meshes
+        operators_sdf._referenced_compound_data = (
+            lambda _data, _archive: {
+                "blue/graphs/wildlife_linked.mcompoundnode": linked_data
+            }
+        )
+
+        entries, missing = operators_sdf._referenced_mmb_entries(source)
+        check(
+            [entry.asset.name for entry in entries] == [direct_path, linked_path],
+            "graph import did not resolve both direct and linked MMB references",
+        )
+        check(not missing, "graph import unexpectedly lost an indexed MMB")
+        choices = [
+            SimpleNamespace(
+                cache_key=direct.cache_key,
+                asset_path=direct.asset.name,
+                selected=False,
+            ),
+            SimpleNamespace(
+                cache_key=linked.cache_key,
+                asset_path=linked.asset.name,
+                selected=True,
+            ),
+        ]
+        selected = operators_sdf._selected_mmb_entries(entries, choices)
+        check(
+            [entry.asset.name for entry in selected] == [linked_path],
+            "multi-MMB dialog selection did not filter the resolved import targets",
+        )
+        check(
+            operators_sdf._selected_mmb_entries(entries, []) == entries,
+            "single/no-dialog graph import no longer retains every resolved MMB",
+        )
+    finally:
+        operators_sdf._state.entries = original_entries
+        mgraph.referenced_meshes = original_referenced_meshes
+        operators_sdf._referenced_compound_data = original_compound_data
+
+
 def _direhorse_weakpoint_binding_case():
     body_paths = {
         "d": "blue/baked/wildlife/direhorse/wildlife_direhorse_01_d.dds",
@@ -341,6 +584,185 @@ def _direhorse_weakpoint_binding_case():
     check(weakpoint["n"] == body_paths["n"], "Direhorse weakpoint normal is not the body normal")
     check(weakpoint["m"] == body_paths["m"], "Direhorse weakpoint mask is not the body mask")
     check(weakpoint.get("bio_palette") == bio_palette, "Direhorse weakpoint lost the body bio palette")
+
+
+def _wildlife_gameplay_part_alias_case():
+    wildlife_shader = "blue/shaders/PX_Wildlife_Skin.mshader"
+    body = {
+        "shader": wildlife_shader,
+        "d": "textures/armoredprey_body_d.dds",
+        "n": "textures/armoredprey_body_n.dds",
+        "m": "textures/armoredprey_body_m.dds",
+        "aux": {"PatternCoat": "textures/armoredprey_pattern.dds"},
+        "bio_palette": [(0.0, 0.1, 0.2), (0.1, 0.4, 0.8)],
+    }
+    head = {
+        "shader": wildlife_shader,
+        "d": "textures/creature_head_d.dds",
+        "n": "textures/creature_head_n.dds",
+        "m": "textures/creature_head_m.dds",
+    }
+    wrong = {
+        "shader": "blue/shaders/PX_Emissive_Color.mshader",
+        "d": None,
+        "n": None,
+        "m": None,
+    }
+    names = [
+        "wildlife_armoredprey_01",
+        "wildlife_armoredprey_01_armor",
+        "wildlife_armoredprey_weakpoint",
+        "creature_head",
+        "creature_head_armor",
+        "creature_head_weakpoint",
+    ]
+    bindings = {
+        names[0]: dict(body),
+        names[1]: dict(wrong),
+        names[2]: dict(wrong),
+        names[3]: dict(head),
+        names[4]: dict(wrong),
+        names[5]: dict(wrong),
+    }
+    mgraph._apply_wildlife_part_aliases(names, bindings)
+
+    check(bindings[names[1]] == body, "Armored Prey armor did not inherit its body binding")
+    check(bindings[names[2]] == body, "Armored Prey weakpoint did not inherit its body binding")
+    check(bindings[names[4]] == head, "part-specific armor did not inherit its base binding")
+    check(bindings[names[5]] == head, "part-specific weakpoint did not inherit its base binding")
+
+
+def _named_mask_and_piercing_binding_case():
+    check(
+        mgraph._classify_texture("textures/g_hmn_mask_01_d.dds") == "d",
+        "asset-family word 'mask' overrode an explicit diffuse suffix",
+    )
+    check(
+        mgraph._classify_texture("textures/g_hmn_mask_01_n.dds") == "n",
+        "asset-family word 'mask' overrode an explicit normal suffix",
+    )
+    check(
+        mgraph._classify_texture("textures/g_hmn_mask_01_m.dds") == "m",
+        "asset-family word 'mask' overrode an explicit material suffix",
+    )
+
+    body = {
+        "shader": "dlc3/shaders/px_character_skin_vhq_body.mshader",
+        "d": "textures/cus_115_body_d.dds",
+        "n": "textures/cus_115_body_n.dds",
+        "m": "textures/cus_115_body_m.dds",
+    }
+    piercing = {
+        "shader": body["shader"],
+        "d": body["d"],
+        "n": body["n"],
+        "m": "textures/cus_115_head_m.dds",
+    }
+    bindings = {"Body": dict(body), "piercing_body": piercing}
+    mgraph._apply_named_part_texture_aliases(list(bindings), bindings)
+    check(
+        bindings["piercing_body"]["m"] == body["m"],
+        "piercing_body did not inherit cus_115_body_m.dds",
+    )
+
+
+def _supplemental_graph_override_case():
+    glass_name = "g_hmn_mask_01_Glass"
+    mask_name = "g_hmn_mask_01_Mask"
+    source_data = mgraph.MAGIC + b"cus-03-mask"
+
+    class FakeArchive:
+        def extract(self, _asset):
+            return source_data
+
+    archive = FakeArchive()
+    primary = operators_sdf._IndexedAsset(
+        archive=archive,
+        asset=SimpleNamespace(name="blue/graph objects/gear/cus_03_gear.mgraphobject"),
+        archive_label="synthetic",
+        cache_key="synthetic",
+    )
+    supplemental = operators_sdf._IndexedAsset(
+        archive=archive,
+        asset=SimpleNamespace(name="blue/graph objects/gear/cus_03_mask.mgraphobject"),
+        archive_label="synthetic",
+        cache_key="synthetic",
+    )
+    mesh_entry = operators_sdf._IndexedAsset(
+        archive=archive,
+        asset=SimpleNamespace(
+            name="blue/baked/characterart/npc/custom/cus_03/cus_03_gear.mmb"
+        ),
+        archive_label="synthetic",
+        cache_key="synthetic",
+    )
+    expected = {
+        glass_name: {
+            "shader": "blue/shaders/PX_Glass_Simple.mshader",
+            "d": "textures/g_rda_accessories_d.dds",
+            "n": "textures/g_rda_accessories_n.dds",
+            "m": "textures/g_rda_accessories_m.dds",
+        },
+        mask_name: {
+            "shader": "blue/shaders/PX_Character_RDA_Human.mshader",
+            "d": "textures/g_hmn_mask_01_d.dds",
+            "n": "textures/g_hmn_mask_01_n.dds",
+            "m": "textures/g_hmn_mask_01_m.dds",
+        },
+    }
+    bindings = {
+        name: {
+            "shader": "blue/shaders/px_ch_cloth.mshader",
+            "d": "textures/cus_03_upperbody_d.dds",
+            "n": "textures/cus_03_upperbody_n.dds",
+            "m": "textures/cus_03_upperbody_m.dds",
+        }
+        for name in expected
+    }
+    replacements = {
+        "compound": operators_sdf._referenced_compound_data,
+        "pins": operators_sdf._shader_pins_for_sources,
+        "pool": mgraph.texture_pool,
+        "materials": mgraph._graph_materials,
+        "bindings": mgraph.material_bindings,
+    }
+    with operators_sdf._state.lock:
+        original_graphs = operators_sdf._state.graphs
+        operators_sdf._state.graphs = {
+            primary.asset.name.casefold(): [primary],
+            supplemental.asset.name.casefold(): [supplemental],
+        }
+    try:
+        operators_sdf._referenced_compound_data = lambda _data, _archive: {}
+        operators_sdf._shader_pins_for_sources = lambda _data, _sources, _archive: ({}, {})
+        mgraph.texture_pool = lambda _data: [{"path": "textures/present.dds"}]
+        mgraph._graph_materials = lambda _data: [
+            (glass_name, expected[glass_name]["shader"]),
+            (mask_name, expected[mask_name]["shader"]),
+        ]
+        mgraph.material_bindings = (
+            lambda _data, names, **_kwargs: {
+                name: dict(expected[name]) for name in names if name in expected
+            }
+        )
+        result = operators_sdf._supplemental_material_bindings(
+            mesh_entry,
+            primary,
+            list(expected),
+            bindings,
+            primary_material_names={"Lowerbody", "Upperbody", "Female_Body"},
+        )
+    finally:
+        with operators_sdf._state.lock:
+            operators_sdf._state.graphs = original_graphs
+        operators_sdf._referenced_compound_data = replacements["compound"]
+        operators_sdf._shader_pins_for_sources = replacements["pins"]
+        mgraph.texture_pool = replacements["pool"]
+        mgraph._graph_materials = replacements["materials"]
+        mgraph.material_bindings = replacements["bindings"]
+
+    check(result[glass_name] == expected[glass_name], "mask glass sibling graph was not authoritative")
+    check(result[mask_name] == expected[mask_name], "mask body sibling graph was not authoritative")
 
 
 def _cloth_sim_case(temporary_directory, source_png):
@@ -420,6 +842,36 @@ def _human_skin_case(directory, source_png):
     )
 
 
+def _character_skin_variant_case(directory, source_png):
+    for shader_name in (
+        "blue/shaders/px_character_skin_human.mshader",
+        "dlc3/shaders/px_character_skin_vhq_body.mshader",
+    ):
+        check(
+            material_audit._runtime_profile(shader_name)
+            == ("human_skin", "specialized"),
+            f"standalone audit does not recognize {shader_name} as specialized skin",
+        )
+        binding = {
+            "shader": shader_name,
+            "d": "textures/character_skin_d.dds",
+            "n": "textures/character_skin_n.dds",
+            "m": "textures/character_skin_m.dds",
+            "parameters": {"myBaseColorOverlay": (0.5, 0.5, 0.5, 0.5)},
+        }
+        material = _assign(binding, directory, source_png)
+        _assert_profile(material, "human_skin_vhq_static")
+        shader = _principled(material)
+        check(
+            not shader.inputs["Metallic"].links,
+            f"{shader_name} retained a packed-mask metallic connection",
+        )
+        check(
+            shader.inputs["Metallic"].default_value == 0.0,
+            f"{shader_name} did not force skin metalness to zero",
+        )
+
+
 def _hair_case(directory, source_png):
     binding = {
         "shader": "blue/shaders/PX_Hair2_3Color_Tousle.mshader",
@@ -441,8 +893,26 @@ def _hair_case(directory, source_png):
     _assert_linked(shader.inputs["Base Color"], "hair procedural base color")
     _assert_linked(shader.inputs["Alpha"], "hair cutout")
     check(
-        material.get("afop_alpha_source") == "hairmaps+vertex-color",
-        "hair alpha did not use its packed maps and vertex color",
+        material.get("afop_alpha_source") == "hairmaps-alpha",
+        "hair alpha did not use the authored HairMaps alpha channel",
+    )
+    alpha_link = shader.inputs["Alpha"].links[0]
+    check(
+        alpha_link.from_node.name == "Hair Maps (root/color/depth/alpha)"
+        and alpha_link.from_socket.name == "Alpha",
+        "hair opacity is not connected directly from HairMaps alpha",
+    )
+    check(
+        not any(
+            node.name in {
+                "Hair vertex cutout",
+                "Hair map x vertex cutout",
+                "Hair deferred opacity R x G",
+                "Hair cutout x deferred opacity",
+            }
+            for node in material.node_tree.nodes
+        ),
+        "hair retained an extra RGB or vertex opacity multiplier",
     )
 
 
@@ -752,14 +1222,22 @@ def main():
     with tempfile.TemporaryDirectory(prefix="afop_material_regression_") as directory:
         source_png = _make_source_png(directory)
         cases = [
+            ("material profile registry and public facade", _material_profile_registry_case),
+            ("nested material-package update install", _nested_update_install_case),
             ("direct and compound binding resolution", _binding_resolution_cases),
+            ("direct-only MMB material-source discovery", _direct_material_source_discovery_case),
+            ("multi-MMB graph import selection", _multi_mmb_import_selection_case),
             ("Direhorse weakpoint inherits body binding", _direhorse_weakpoint_binding_case),
+            ("wildlife gameplay parts inherit rendered skin", _wildlife_gameplay_part_alias_case),
+            ("named mask and piercing texture families", _named_mask_and_piercing_binding_case),
+            ("supplemental graph exact-material override", _supplemental_graph_override_case),
             (
                 "CLOTH_SIM material exclusion",
                 lambda: _cloth_sim_case(directory, source_png),
             ),
             ("constants cutout profile", lambda: _constants_case(directory, source_png)),
             ("human skin profile", lambda: _human_skin_case(directory, source_png)),
+            ("additional character skin variants", lambda: _character_skin_variant_case(directory, source_png)),
             ("hair cutout profile", lambda: _hair_case(directory, source_png)),
             ("wildlife skin and bioluminescence", lambda: _wildlife_skin_case(directory, source_png)),
             ("Medusa skin and bioluminescence", lambda: _medusa_case(directory, source_png)),

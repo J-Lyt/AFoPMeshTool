@@ -757,6 +757,9 @@ def _ranked_material_graph_candidates(entry):
     """Name-ranked graph candidates; contents provide final authority."""
     mesh_name = entry.asset.name.casefold()
     mesh_stem = os.path.splitext(os.path.basename(mesh_name))[0]
+    mesh_parts = tuple(
+        token for token in re.split(r"[^a-z0-9]+", mesh_stem) if token
+    )
     mesh_tokens = {token for token in _source_name_tokens(mesh_stem) if len(token) >= 4}
     with _state.lock:
         all_graphs = [candidate for values in _state.graphs.values() for candidate in values]
@@ -764,6 +767,9 @@ def _ranked_material_graph_candidates(entry):
     candidates = []
     for candidate in all_graphs:
         graph_stem = os.path.splitext(os.path.basename(candidate.asset.name))[0].casefold()
+        graph_parts = tuple(
+            token for token in re.split(r"[^a-z0-9]+", graph_stem) if token
+        )
         if graph_stem == mesh_stem:
             name_score = 3
             token_affinity = 0
@@ -785,6 +791,20 @@ def _ranked_material_graph_candidates(entry):
                 and (mesh_token in graph_token or graph_token in mesh_token)
             }
             token_affinity = len(exact_overlap) * 4 + len(partial_overlap)
+            # Custom-character assets commonly split one MMB across sibling
+            # graphs such as cus_03_gear and cus_03_mask.  Their useful family
+            # identity consists of short tokens that the general affinity gate
+            # deliberately ignores. Admit only the structured <family>_<id>
+            # prefix here; an exact material-name match remains authoritative
+            # when the supplemental graph is inspected.
+            shared_numbered_family = (
+                len(mesh_parts) >= 3
+                and len(graph_parts) >= 3
+                and mesh_parts[:2] == graph_parts[:2]
+                and any(character.isdigit() for character in mesh_parts[1])
+            )
+            if not token_affinity and shared_numbered_family:
+                token_affinity = 2
             if not token_affinity:
                 # A full graph-library content scan would make every import
                 # unexpectedly expensive. Filename token/substring affinity is
@@ -806,7 +826,7 @@ def _ranked_material_graph_candidates(entry):
 
 
 def _material_graph_options(entry):
-    """Return every graph with an exact or confirmed family MMB reference."""
+    """Return graphs that directly reference the exact or family MMB."""
     mesh_name = entry.asset.name.casefold()
     options = []
     successful_paths = set()
@@ -818,14 +838,12 @@ def _material_graph_options(entry):
             data = candidate.archive.extract(candidate.asset)
             if data[:4] != mgraph.MAGIC:
                 continue
-            source_references, compound_sources = _material_source_references(
-                data, candidate.archive
-            )
-            references = {path.casefold() for path in source_references}
+            references = _direct_material_source_references(data)
             if mesh_name not in references and not _material_family_reference(
                 mesh_name, candidate.asset.name, references
             ):
                 continue
+            compound_sources = _referenced_compound_data(data, candidate.archive)
             richness = _material_source_richness(data, compound_sources)
             if richness == 0:
                 continue
@@ -886,18 +904,16 @@ def _material_graph(entry, selected_path=None):
             data = candidate.archive.extract(candidate.asset)
             if data[:4] != mgraph.MAGIC:
                 continue
-            source_references, compound_sources = _material_source_references(
-                data, candidate.archive
-            )
-            references = {path.casefold() for path in source_references}
+            references = _direct_material_source_references(data)
             exact_reference = mesh_name in references
             family_reference = _material_family_reference(
                 mesh_name, candidate.asset.name, references
             )
-            if references and not (exact_reference or family_reference):
+            if not (exact_reference or family_reference):
                 continue
             if name_score == 1 and not exact_reference:
                 continue
+            compound_sources = _referenced_compound_data(data, candidate.archive)
             richness = _material_source_richness(data, compound_sources)
             if richness == 0:
                 continue
@@ -954,7 +970,7 @@ def _ranked_material_compound_candidates(entry):
 
 
 def _material_compound_options(entry):
-    """Return every candidate compound chain that references this exact MMB."""
+    """Return candidate compounds that directly reference this exact MMB."""
     mesh_name = entry.asset.name.casefold()
     options = []
     successful_paths = set()
@@ -966,12 +982,10 @@ def _material_compound_options(entry):
             data = candidate.archive.extract(candidate.asset)
             if data[:4] != mgraph.MAGIC:
                 continue
-            source_references, compound_sources = _material_source_references(
-                data, candidate.archive
-            )
-            references = {path.casefold() for path in source_references}
+            references = _direct_material_source_references(data)
             if mesh_name not in references:
                 continue
+            compound_sources = _referenced_compound_data(data, candidate.archive)
             richness = _material_source_richness(data, compound_sources)
             if richness == 0:
                 continue
@@ -1032,12 +1046,10 @@ def _material_compound(entry, selected_path=None):
             data = candidate.archive.extract(candidate.asset)
             if data[:4] != mgraph.MAGIC:
                 continue
-            source_references, compound_sources = _material_source_references(
-                data, candidate.archive
-            )
-            references = {path.casefold() for path in source_references}
+            references = _direct_material_source_references(data)
             if mesh_name not in references:
                 continue
+            compound_sources = _referenced_compound_data(data, candidate.archive)
             richness = _material_source_richness(data, compound_sources)
             if richness == 0:
                 continue
@@ -1194,6 +1206,11 @@ def _material_source_references(data, preferred_archive):
     return references, compound_sources
 
 
+def _direct_material_source_references(data):
+    """Return normalized MMB references stored directly in one BV2 source."""
+    return {path.casefold() for path in mgraph.referenced_meshes(data)}
+
+
 def _material_source_richness(data, compound_sources):
     """Count distinct texture constants across a linked material-source chain."""
     paths = {
@@ -1204,12 +1221,29 @@ def _material_source_richness(data, compound_sources):
     return len(paths)
 
 
-def _supplemental_material_bindings(entry, primary_entry, material_names, bindings):
+def _supplemental_material_bindings(
+    entry,
+    primary_entry,
+    material_names,
+    bindings,
+    primary_material_names=None,
+):
     """Fill composite-placement gaps from a strongly related species graph."""
+    primary_keys = {
+        name.casefold()
+        for name in (
+            material_names
+            if primary_material_names is None
+            else primary_material_names
+        )
+    }
     unresolved = {
         name.casefold(): name
         for name in material_names
-        if not bindings.get(name, {}).get("shader")
+        if (
+            not bindings.get(name, {}).get("shader")
+            or name.casefold() not in primary_keys
+        )
     }
     if not unresolved:
         return bindings
@@ -1280,7 +1314,18 @@ def _material_parent_graph_for_compound(entry, compound_entry):
     """Return the best MMB-related graph that instantiates a compound."""
     compound_key = compound_entry.asset.name.replace("\\", "/").lstrip("/").casefold()
     cross_archive = None
-    for candidate, data, _richness, _name_score, _affinity in _material_graph_options(entry):
+    for _name_score, _affinity, candidate in _ranked_material_graph_candidates(entry):
+        try:
+            data = candidate.archive.extract(candidate.asset)
+        except Exception as error:
+            logger.debug(
+                "Could not inspect parent material graph %s: %s",
+                candidate.asset.name,
+                error,
+            )
+            continue
+        if data[:4] != mgraph.MAGIC:
+            continue
         references = {
             path.replace("\\", "/").lstrip("/").casefold()
             for path in mgraph.referenced_compounds(data)
@@ -1380,8 +1425,17 @@ def _import_materials_for_entry(
         shader_parameter_pins=shader_parameter_pins,
     )
     if source_is_graph:
+        primary_material_names = {
+            name
+            for source_data in (binding_data, *compound_sources.values())
+            for name, _shader in mgraph._graph_materials(source_data)
+        }
         bindings = _supplemental_material_bindings(
-            entry, source_entry, material_names, bindings
+            entry,
+            source_entry,
+            material_names,
+            bindings,
+            primary_material_names=primary_material_names,
         )
     if not bindings:
         raise LookupError(f"{source_entry.asset.name} contains no usable material textures")
@@ -1457,6 +1511,21 @@ def _referenced_mmb_entries(source_entry):
         else:
             missing.append(logical_path)
     return resolved, missing
+
+
+def _selected_mmb_entries(targets, choices):
+    """Filter resolved MMBs using choices captured by the import dialog."""
+    if len(choices) == 0:
+        return targets
+    selected = {
+        (choice.cache_key, choice.asset_path.casefold())
+        for choice in choices
+        if choice.selected
+    }
+    return [
+        target for target in targets
+        if (target.cache_key, target.asset.name.casefold()) in selected
+    ]
 
 
 def _process_mmb_entry(
@@ -1561,6 +1630,34 @@ def _process_mmb_entry(
     finally:
         if temporary_directory is not None:
             temporary_directory.cleanup()
+
+
+class SDFMMBImportChoice(bpy.types.PropertyGroup):
+    """One resolved MMB shown in the multi-import selection dialog."""
+
+    asset_path: bpy.props.StringProperty(options={"SKIP_SAVE"})
+    archive_label: bpy.props.StringProperty(options={"SKIP_SAVE"})
+    cache_key: bpy.props.StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    selected: bpy.props.BoolProperty(default=True, options={"SKIP_SAVE"})
+
+
+class SDFMMBChoiceList(bpy.types.UIList):
+    """Scrollable checkbox list for graph/compound MMB references."""
+
+    bl_idname = "SWOMT_UL_sdf_mmb_choices"
+
+    def draw_item(
+        self, context, layout, data, item, icon, active_data, active_propname, index
+    ):
+        if self.layout_type in {"DEFAULT", "COMPACT"}:
+            row = layout.row(align=True)
+            row.prop(item, "selected", text="")
+            row.label(text=item.asset_path, icon="MESH_DATA")
+            archive_column = row.column(align=True)
+            archive_column.alignment = "RIGHT"
+            archive_column.label(text=item.archive_label)
+        else:
+            layout.label(text="", icon="MESH_DATA")
 
 
 class SDFAssetList(bpy.types.UIList):
@@ -1704,6 +1801,14 @@ class ImportSDFMMB(bpy.types.Operator):
         default=0,
         options={"SKIP_SAVE"},
     )
+    mmb_choices: bpy.props.CollectionProperty(
+        type=SDFMMBImportChoice,
+        options={"SKIP_SAVE"},
+    )
+    mmb_choice_index: bpy.props.IntProperty(
+        default=0,
+        options={"SKIP_SAVE"},
+    )
 
     @classmethod
     def description(cls, context, properties):
@@ -1715,7 +1820,7 @@ class ImportSDFMMB(bpy.types.Operator):
             and 0 <= settings.sdf_asset_index < len(settings.sdf_assets)
             and settings.sdf_assets[settings.sdf_asset_index].asset_type != _ASSET_MMB
         ):
-            return "Import LOD0 from every indexed MMB referenced by this source"
+            return "Choose and import LOD0 from MMBs referenced by this source"
         return "Import LOD0 from the selected MMB"
 
     @classmethod
@@ -1729,11 +1834,35 @@ class ImportSDFMMB(bpy.types.Operator):
     def invoke(self, context, _event):
         global _material_source_dialog_items
         settings = context.scene.SWOMT
-        if not self.import_lod0 or not settings.sdf_import_materials:
+        if not self.import_lod0:
             return self.execute(context)
         item = settings.sdf_assets[settings.sdf_asset_index]
         asset_type, entry = _search_entry_for_id(item.entry_id)
-        if entry is None or asset_type != _ASSET_MMB:
+        if entry is None:
+            return self.execute(context)
+        if asset_type != _ASSET_MMB:
+            try:
+                targets, _missing = _referenced_mmb_entries(entry)
+            except Exception as error:
+                logger.debug(
+                    "Could not enumerate referenced MMBs for %s: %s",
+                    item.asset_path,
+                    error,
+                )
+                return self.execute(context)
+            if len(targets) <= 1:
+                return self.execute(context)
+            self.mmb_choices.clear()
+            for target in targets:
+                choice = self.mmb_choices.add()
+                choice.name = target.asset.name
+                choice.asset_path = target.asset.name
+                choice.archive_label = target.archive_label
+                choice.cache_key = target.cache_key
+                choice.selected = True
+            self.mmb_choice_index = 0
+            return context.window_manager.invoke_props_dialog(self, width=1000)
+        if not settings.sdf_import_materials:
             return self.execute(context)
         try:
             options = _material_source_options(entry)
@@ -1765,6 +1894,27 @@ class ImportSDFMMB(bpy.types.Operator):
 
     def draw(self, _context):
         layout = self.layout
+        if len(self.mmb_choices):
+            selected_count = sum(choice.selected for choice in self.mmb_choices)
+            layout.label(
+                text="Multiple MMB files are referenced by this source.",
+                icon="MESH_DATA",
+            )
+            layout.label(text="Select the MMB files to import:")
+            layout.template_list(
+                "SWOMT_UL_sdf_mmb_choices",
+                "",
+                self,
+                "mmb_choices",
+                self,
+                "mmb_choice_index",
+                rows=min(12, max(4, len(self.mmb_choices))),
+            )
+            layout.label(
+                text=f"{selected_count} of {len(self.mmb_choices)} selected",
+                icon="CHECKMARK" if selected_count else "ERROR",
+            )
+            return
         layout.label(text="Multiple material sources match this MMB.", icon="MATERIAL")
         layout.label(text="Choose the texture/material variant to import:")
         layout.prop(self, "material_source", text="")
@@ -1812,6 +1962,10 @@ class ImportSDFMMB(bpy.types.Operator):
                     {"ERROR"},
                     f"{source_entry.asset.name} has no importable MMB references{detail}.",
                 )
+                return {"CANCELLED"}
+            targets = _selected_mmb_entries(targets, self.mmb_choices)
+            if len(self.mmb_choices) and not targets:
+                self.report({"ERROR"}, "Select at least one MMB file to import.")
                 return {"CANCELLED"}
             material_source_path = source_entry.asset.name
 
@@ -1902,6 +2056,8 @@ class ImportSDFMMB(bpy.types.Operator):
 
 
 CLASSES = (
+    SDFMMBImportChoice,
+    SDFMMBChoiceList,
     SDFAssetList,
     BrowseSDFDirectory,
     BrowseSDFExtractedDirectory,

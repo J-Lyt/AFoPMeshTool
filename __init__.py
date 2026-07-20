@@ -3,7 +3,7 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt, SaintBaron",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 97),
+    "version": (0, 1, 98),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 11-17.",
     "category": "Import-Export",
@@ -17,14 +17,18 @@ import shutil
 _bootstrap_logger = logging.getLogger("afop_mesh_tool")
 
 
-# Delete the package cache before importing split modules. Blender updates are
+# Delete package caches before importing split modules. Blender updates are
 # restart-based, so no loaded submodule is expected to survive this import.
-_cache_dir = os.path.join(os.path.dirname(__file__), "__pycache__")
-try:
-    if os.path.exists(_cache_dir):
-        shutil.rmtree(_cache_dir)
-except OSError:
-    pass
+_package_dir = os.path.dirname(__file__)
+for _cache_dir in (
+    os.path.join(_package_dir, "__pycache__"),
+    os.path.join(_package_dir, "materials", "__pycache__"),
+):
+    try:
+        if os.path.exists(_cache_dir):
+            shutil.rmtree(_cache_dir)
+    except OSError:
+        pass
 
 # v0.1.70 and older only download __init__.py, mcloth.py, and data files when
 # applying an update. This one-time bridge retrieves missing v0.1.71 modules
@@ -41,6 +45,11 @@ _REQUIRED_SPLIT_MODULES = (
     "importer.py",
     "log.py",
     "material_import.py",
+    "materials/__init__.py",
+    "materials/nodes.py",
+    "materials/profiles.py",
+    "materials/registry.py",
+    "materials/textures.py",
     "meshlet.py",
     "mgraph.py",
     "mmb.py",
@@ -85,6 +94,7 @@ def _bootstrap_split_modules():
         for filename, data in payloads.items():
             destination = os.path.join(os.path.dirname(__file__), filename)
             temporary = destination + ".bootstrap_tmp"
+            os.makedirs(os.path.dirname(destination), exist_ok=True)
             with open(temporary, "wb") as stream:
                 stream.write(data)
             staged[filename] = temporary
@@ -141,6 +151,8 @@ classes = (
     operators_io.ImportAllLOD2s,
     operators_io.ImportAllLOD3s,
     operators_io.ExportAllLODs,
+    operators_sdf.SDFMMBImportChoice,
+    operators_sdf.SDFMMBChoiceList,
     operators_sdf.SDFAssetList,
     operators_sdf.BrowseSDFDirectory,
     operators_sdf.BrowseSDFExtractedDirectory,

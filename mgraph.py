@@ -1047,13 +1047,16 @@ def _classify_texture(path):
         return "x"
     if stem.endswith(("_n_ta", "_normal_ta")):
         return "n"
+    # A conventional terminal D/N/M suffix is authoritative even when the
+    # asset family itself contains words such as ``mask``.  For example,
+    # g_hmn_mask_01_d/n/m is a normal three-texture material set.
+    explicit = re.search(r"_([dnm])$", stem)
+    if explicit:
+        return explicit.group(1)
     if "rgb_mask" in stem or stem.endswith("_mask") or "_mask_" in stem:
         return "m"
     if stem.endswith(("_d_ta", "_ta")):
         return "d"
-    explicit = re.search(r"_([dnm])$", stem)
-    if explicit:
-        return explicit.group(1)
     if stem.endswith(("_nr", "_nrm")) or "_nr_" in stem:
         return "n"
     if re.search(
@@ -1320,6 +1323,77 @@ def _semantic_path(textures, role, material_tokens):
         if score:
             ranked.append((score, -index, texture["path"]))
     return max(ranked)[2] if ranked else None
+
+
+def _apply_wildlife_part_aliases(names, bindings):
+    """Make gameplay-only wildlife parts reuse their rendered base material."""
+    skin_sources = []
+    for index, name in enumerate(names):
+        key = name.casefold()
+        if key.endswith(("_weakpoint", "_armor")):
+            continue
+        binding = bindings.get(name)
+        shader_name = os.path.basename((binding or {}).get("shader", "")).casefold()
+        if shader_name.startswith("px_wildlife_skin"):
+            skin_sources.append((index, name, binding))
+    if not skin_sources:
+        return
+
+    source_by_key = {name.casefold(): (name, binding) for _index, name, binding in skin_sources}
+    for target_name in names:
+        target_key = target_name.casefold()
+        if target_key.endswith("_armor"):
+            source = source_by_key.get(target_key[:-6])
+            if source is not None:
+                bindings[target_name] = dict(source[1])
+            continue
+        if not target_key.endswith("_weakpoint"):
+            continue
+
+        base_key = target_key[:-10]
+        source = source_by_key.get(base_key)
+        if source is None:
+            target_tokens = _tokens(base_key)
+            ranked = []
+            for source_index, source_name, source_binding in skin_sources:
+                source_tokens = _tokens(source_name)
+                overlap = len(target_tokens & source_tokens)
+                body = int("body" in source_tokens)
+                ranked.append((
+                    (
+                        overlap,
+                        body,
+                        -len(source_tokens - target_tokens),
+                        -source_index,
+                    ),
+                    source_name,
+                    source_binding,
+                ))
+            best = max(ranked, key=lambda item: item[0]) if ranked else None
+            if best is not None and (
+                best[0][0] > 0 or best[0][1] or len(skin_sources) == 1
+            ):
+                source = (best[1], best[2])
+        if source is not None:
+            bindings[target_name] = dict(source[1])
+
+
+def _apply_named_part_texture_aliases(names, bindings):
+    """Reuse explicit base-part textures for semantic duplicate meshes."""
+    binding_by_key = {
+        name.casefold(): binding
+        for name, binding in bindings.items()
+    }
+    for target_name in names:
+        target_key = target_name.casefold()
+        if not target_key.startswith("piercing_"):
+            continue
+        source = binding_by_key.get(target_key[len("piercing_"):])
+        target = bindings.get(target_name)
+        if source is None or target is None:
+            continue
+        for role in ("d", "n", "m"):
+            target[role] = source.get(role)
 
 
 def material_bindings(
@@ -1845,16 +1919,9 @@ def material_bindings(
             if bio is not None:
                 binding.update(bio)
         result[name] = binding
-    if banshee_body_index is not None and banshee_weakpoint_index is not None:
-        body_name = names[banshee_body_index]
-        weakpoint_name = names[banshee_weakpoint_index]
-        if body_name in result:
-            result[weakpoint_name] = dict(result[body_name])
-    if is_direhorse:
-        body_name = names[index_by_name["body"]]
-        weakpoint_name = names[index_by_name["wildlife_dirhorse_weakpoint"]]
-        if body_name in result:
-            # Copy the complete binding, including shader, auxiliaries and bio
-            # palette, so weakpoint and body cannot drift independently.
-            result[weakpoint_name] = dict(result[body_name])
+    # Wildlife weakpoint and armor graph nodes drive gameplay/VFX state. Their
+    # mesh geometry still renders with the corresponding skin material, so copy
+    # the complete binding (shader, textures, auxiliaries and bio parameters).
+    _apply_wildlife_part_aliases(names, result)
+    _apply_named_part_texture_aliases(names, result)
     return result
