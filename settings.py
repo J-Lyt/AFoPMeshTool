@@ -36,7 +36,7 @@ def _on_sdf_search_update(self, context):
                 settings = getattr(scene, "SWOMT", None)
                 if settings is not None:
                     settings.sdf_search_applied = settings.sdf_search
-                    from . import operators_sdf
+                    from .operators import sdf as operators_sdf
                     operators_sdf.populate_search_results(scene, settings.sdf_search)
                 break
             for window in bpy.context.window_manager.windows:
@@ -126,7 +126,7 @@ def _on_load_post(filepath, *args, **kwargs):
     except Exception as e:
         logger.exception("Load-post handler failed: %s", e)
     try:
-        from . import operators_sdf
+        from .operators import sdf as operators_sdf
         operators_sdf.schedule_cached_auto_load(reset=True)
     except Exception as e:
         logger.warning("Could not schedule cached SDF auto-load: %s", e)

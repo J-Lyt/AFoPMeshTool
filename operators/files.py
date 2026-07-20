@@ -7,7 +7,7 @@ from pathlib import Path
 
 import bpy
 
-from . import addon_state
+from .. import addon_state
 
 class SelectMGraphObject(bpy.types.Operator):
     """Select the MGraphObject file and patch the mesh name inside it"""

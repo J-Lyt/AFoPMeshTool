@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-sdf_toc.py - Reader for AFOP (Avatar: Frontiers of Pandora) Snowdrop SDF
+sdf/toc.py - Reader for AFOP (Avatar: Frontiers of Pandora) Snowdrop SDF
 table-of-contents files (sdf.sdftoc), magic 'WEST', VERSION 41 (0x29).
 
 Ported from the open-source Galanthus C# unpacker (SdfToc.cs / GameManager.cs /
@@ -373,7 +373,7 @@ def parse_asset_table(table: bytes, is_signed: bool, version: int, progress=None
     """Walk the asset trie and return every :class:`Asset`.
 
     ``progress(done, total, sample=None)`` -- same shape/convention as
-    ``sdf_reader.decrypt_file_table``'s callback -- is invoked periodically
+    ``sdf.reader.decrypt_file_table``'s callback -- is invoked periodically
     WHILE walking the trie (not just at start/end). This closes a real,
     measured silent gap: on the real "rogue" archive, this function is the
     single biggest cost in the whole TOC-load pipeline (~16.5s of a ~31.8s

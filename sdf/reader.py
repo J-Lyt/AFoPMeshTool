@@ -1,5 +1,5 @@
 """
-sdf_reader.py - Standalone reader for AFOP (Snowdrop) SDF v41 archives.
+sdf/reader.py - Standalone reader for AFOP (Snowdrop) SDF v41 archives.
 
 Decrypts + parses sdf.sdftoc and extracts individual assets from the
 sdf-A-NNNN.sdfdata blobs, byte-identical to the original game files. Pure Python
@@ -19,9 +19,9 @@ import zlib
 
 
 try:
-    from . import sdf_toc
+    from . import toc as sdf_toc
 except ImportError:  # Allow direct execution outside the Blender package.
-    import sdf_toc
+    import toc as sdf_toc
 
 M64 = (1 << 64) - 1
 M32 = 0xffffffff

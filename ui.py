@@ -2,7 +2,8 @@
 
 import bpy
 
-from . import addon_state, bl_info, operators_sdf, updater
+from . import addon_state, bl_info, updater
+from .operators import sdf as operators_sdf
 from .settings import _vert_count_changed
 
 class SWOMTPanel(bpy.types.Panel):

@@ -21,9 +21,9 @@ for path in (str(REPOSITORY), str(TOOLS_DIRECTORY)):
         sys.path.insert(0, path)
 
 import material_audit
-import oodle_helper
-import sdf_toc
-from sdf_reader import SdfArchive
+from sdf import oodle as oodle_helper
+from sdf import toc as sdf_toc
+from sdf.reader import SdfArchive
 
 
 INDEX_CACHE_VERSION = 4

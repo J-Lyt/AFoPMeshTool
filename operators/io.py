@@ -5,12 +5,12 @@ from pathlib import Path
 
 import bpy
 
-from . import addon_state
-from .cloth_export import _export_mcloth_for_asset
-from .exporter import BME
-from .file_utils import _mod_file_output, get_merged_mmb
-from .importer import BMI
-from .mmb import SkeletalMeshAsset
+from .. import addon_state
+from ..cloth_export import _export_mcloth_for_asset
+from ..exporter import BME
+from ..file_utils import _mod_file_output, get_merged_mmb
+from ..importer import BMI
+from ..mmb import SkeletalMeshAsset
 
 class BrowseMMBFile(bpy.types.Operator):
     """Load a .mmb file"""

@@ -11,11 +11,12 @@ from pathlib import PurePosixPath
 
 import bpy
 
-from . import addon_state, material_import, mgraph, oodle_helper, shader_schema
-from .log import logger
-from .mmb import SkeletalMeshAsset
-from . import sdf_toc
-from .sdf_reader import SdfArchive
+from .. import addon_state, material_import, mgraph, shader_schema
+from ..log import logger
+from ..mmb import SkeletalMeshAsset
+from ..sdf import oodle as oodle_helper
+from ..sdf import toc as sdf_toc
+from ..sdf.reader import SdfArchive
 
 
 _OODLE_NAMES = (
@@ -592,7 +593,7 @@ def _start_archive_load(root, allow_rebuild):
             settings.sdf_asset_index = -1
             settings.sdf_search_result_status = ""
 
-    from .settings import blender_sdf_index_cache_directory
+    from ..settings import blender_sdf_index_cache_directory
     threading.Thread(
         target=_load_archives_worker,
         args=(root, generation, blender_sdf_index_cache_directory(), allow_rebuild),
@@ -693,7 +694,7 @@ def _safe_asset_parts(asset_name):
 def _extract_to_cache(entry, extracted_directory=None, destination=None):
     if destination is None:
         if not extracted_directory:
-            from .settings import get_default_extracted_files_directory
+            from ..settings import get_default_extracted_files_directory
             extracted_directory = get_default_extracted_files_directory()
         destination = os.path.join(
             _cache_root(entry.cache_key, extracted_directory),
@@ -1591,7 +1592,7 @@ def _process_mmb_entry(
                 raise ValueError(f"The extracted MMB could not be loaded: {entry.asset.name}")
             return {"FINISHED"}, extracted, None
 
-        from .operators_io import _import_all_lods
+        from .io import _import_all_lods
 
         if load_as_asset:
             settings.AssetPath = mmb_path
@@ -1732,7 +1733,7 @@ class ClearSDFIndexCache(bpy.types.Operator):
     )
 
     def execute(self, context):
-        from .settings import blender_sdf_index_cache_directory
+        from ..settings import blender_sdf_index_cache_directory
 
         cache_dir = blender_sdf_index_cache_directory()
         removed = 0

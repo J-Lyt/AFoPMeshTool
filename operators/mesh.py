@@ -2,8 +2,8 @@
 
 import bpy
 
-from . import addon_state
-from .exporter import BME
+from .. import addon_state
+from ..exporter import BME
 
 def _max_weights_for_mesh(mesh, lod0_obj=None):
     """Safe generated-LOD limit: source usage capped by declared capacity."""

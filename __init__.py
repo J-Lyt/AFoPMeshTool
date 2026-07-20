@@ -3,7 +3,7 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt, SaintBaron",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 98),
+    "version": (0, 1, 99),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 11-17.",
     "category": "Import-Export",
@@ -23,6 +23,8 @@ _package_dir = os.path.dirname(__file__)
 for _cache_dir in (
     os.path.join(_package_dir, "__pycache__"),
     os.path.join(_package_dir, "materials", "__pycache__"),
+    os.path.join(_package_dir, "operators", "__pycache__"),
+    os.path.join(_package_dir, "sdf", "__pycache__"),
 ):
     try:
         if os.path.exists(_cache_dir):
@@ -53,14 +55,16 @@ _REQUIRED_SPLIT_MODULES = (
     "meshlet.py",
     "mgraph.py",
     "mmb.py",
-    "oodle_helper.py",
-    "operators_bones.py",
-    "operators_files.py",
-    "operators_io.py",
-    "operators_mesh.py",
-    "operators_sdf.py",
-    "sdf_reader.py",
-    "sdf_toc.py",
+    "operators/__init__.py",
+    "operators/bones.py",
+    "operators/files.py",
+    "operators/io.py",
+    "operators/mesh.py",
+    "operators/sdf.py",
+    "sdf/__init__.py",
+    "sdf/oodle.py",
+    "sdf/reader.py",
+    "sdf/toc.py",
     "settings.py",
     "shader_schema.py",
     "ui.py",
@@ -126,11 +130,11 @@ _bootstrap_split_modules()
 
 import bpy
 
-from . import operators_bones
-from . import operators_files
-from . import operators_io
-from . import operators_mesh
-from . import operators_sdf
+from .operators import bones as operators_bones
+from .operators import files as operators_files
+from .operators import io as operators_io
+from .operators import mesh as operators_mesh
+from .operators import sdf as operators_sdf
 from . import settings
 from . import ui
 from . import updater
