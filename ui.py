@@ -9,10 +9,10 @@ from .settings import _vert_count_changed
 
 
 class SDFArchiveFilterPopover(bpy.types.Panel):
-    """Choose which game assets are included in search results."""
+    """Select which game assets are included in search results."""
 
     bl_idname = "SWOMT_PT_sdf_archive_filters"
-    bl_label = "Archive Filters"
+    bl_label = "Filter"
     bl_space_type = "PROPERTIES"
     bl_region_type = "HEADER"
 
@@ -128,7 +128,7 @@ class SWOMTPanel(bpy.types.Panel):
                 type_row = sdf_box.row(align=True)
                 type_row.alignment = "LEFT"
                 type_row.prop(SWOMT, "sdf_show_mmb", text="MMB")
-                type_row.prop(SWOMT, "sdf_show_mgraphobject", text="MGraph")
+                type_row.prop(SWOMT, "sdf_show_mgraphobject", text="MGraphObject")
                 type_row.prop(
                     SWOMT, "sdf_show_mcompoundnode", text="MCompoundNode"
                 )

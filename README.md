@@ -36,9 +36,9 @@ Default game and extraction folders can be set in the add-on preferences.
 1. Expand **Load from Game Files**.
 2. Select the AFoP game root folder. e.g. `"...\Ubisoft\AFOP"`
 3. Wait for the archive index to load.
-4. Choose which asset types to search. **MMB** is enabled by default;
+4. Select which asset types to search. **MMB** is enabled by default;
    **MGraph** and **MCompoundNode** are optional.
-5. Choose which archives are include when searching. **Rogue**, **DLC1**, **DLC2**, and
+5. Select which archives are include when searching. **Rogue**, **DLC1**, **DLC2**, and
    **DLC3** are all enabled by default.
 6. Search for and select an asset, then load or import it.
 
@@ -56,7 +56,7 @@ one of the color patterns and click **Apply Pattern** to update the imported
 body, head, and body-linked weakpoint materials. Use **Remove Pattern** to restore 
 their originally imported pattern settings.
 
-When a selected MGraph directly references Banshee colour and control files,
+When a selected MGraph directly references Banshee color and control files,
 that pattern is applied automatically during import.
 
 ## Extracted files and archive cache

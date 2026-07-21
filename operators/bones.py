@@ -375,7 +375,7 @@ class RemapMeshBone(bpy.types.Operator):
             if new_matrix is None:
                 self.report({'ERROR'},
                     f"Donor file found but '{new_name}' is not referenced by any mesh in it. "
-                    f"Choose a donor MMB whose mesh already uses that bone.")
+                    f"Select a donor MMB whose mesh already uses that bone.")
                 return {'CANCELLED'}
 
         # Stage both the skeleton index AND the matrix for export
@@ -491,7 +491,7 @@ class AddMeshBone(bpy.types.Operator):
             if new_matrix is None:
                 self.report({'ERROR'},
                     f"Donor file found but '{new_name}' is not referenced by any mesh in it. "
-                    f"Choose a donor MMB whose mesh already uses that bone.")
+                    f"Select a donor MMB whose mesh already uses that bone.")
                 return {'CANCELLED'}
 
         # Stage the addition; reuse an unused slot when this mesh declares uint8 indices.
@@ -862,9 +862,9 @@ def _select_all_update_cb(self, context):
     self.bone_names = _all_donor_bones_field_text() if self.select_all else ""
 
 class MergeSkeletonsPickBones(bpy.types.Operator):
-    """Choose which donor bones to merge (shown after selecting the donor .mmb)"""
+    """Select which donor bones to merge (shown after selecting the donor .mmb)"""
     bl_idname = "object.merge_skeletons_pick_bones"
-    bl_label = "Choose Bones to Merge"
+    bl_label = "Select Bones to Merge"
     bl_options = {'REGISTER'}
 
     filepath: bpy.props.StringProperty(subtype="FILE_PATH")
@@ -1052,7 +1052,7 @@ class AddBonesFromVertexGroups(bpy.types.Operator):
         return {'FINISHED'}
 
 class ExportPosedBoneMatrices(bpy.types.Operator):
-    """Export the armature's current pose. Use this after posing the armature in 'Pose Mode'."""
+    """Export the armature's current pose.\nUse this after posing the armature in 'Pose Mode'."""
     bl_idname = "object.export_posed_bone_matrices"
     bl_label = "Export Pose as New Rest Pose"
     bl_options = {'REGISTER'}

@@ -79,7 +79,7 @@ class _SdfState:
         self.lock = threading.Lock()
         self.generation = 0
         self.phase = "idle"
-        self.status = "Choose the game folder containing the SDF archives."
+        self.status = "Select the AFOP game root folder (e.g. '...\\Ubisoft\\AFOP')"
         self.warning = ""
         self.progress = 0.0
         self.entries: list[_IndexedAsset] = []
@@ -679,7 +679,7 @@ def _cached_auto_load_timer():
     if not found_directory:
         with _state.lock:
             if _state.phase == "idle":
-                _state.status = "Choose the game folder containing the SDF archives."
+                _state.status = "Select the AFOP game root folder (e.g. '...\\Ubisoft\\AFOP')"
     return None
 
 
@@ -2023,10 +2023,10 @@ class ShowAllSDFResults(bpy.types.Operator):
 
 
 class BrowseSDFDirectory(bpy.types.Operator):
-    """Choose the AFOP folder containing SDF archives."""
+    """Select the AFOP game root folder (e.g. '...\\Ubisoft\\AFOP')"""
 
     bl_idname = "object.browse_sdf_directory"
-    bl_label = "Choose Game Folder"
+    bl_label = "Select Game Folder"
 
     directory: bpy.props.StringProperty(subtype="DIR_PATH")
 
@@ -2044,10 +2044,10 @@ class BrowseSDFDirectory(bpy.types.Operator):
 
 
 class BrowseSDFExtractedDirectory(bpy.types.Operator):
-    """Choose where assets extracted from SDF archives are stored."""
+    """Select where assets extracted from SDF archives are stored."""
 
     bl_idname = "object.browse_sdf_extracted_directory"
-    bl_label = "Choose Extracted Files Folder"
+    bl_label = "Select Extracted Files Folder"
 
     directory: bpy.props.StringProperty(subtype="DIR_PATH")
 
@@ -2111,7 +2111,7 @@ class ClearSDFIndexCache(bpy.types.Operator):
 
 
 class IndexSDFArchives(bpy.types.Operator):
-    """Decrypt and index supported assets in the selected AFOP SDF archives."""
+    """Index assets in the AFOP SDF archives."""
 
     bl_idname = "object.index_sdf_archives"
     bl_label = "Reload SDF Archives"
@@ -2120,7 +2120,7 @@ class IndexSDFArchives(bpy.types.Operator):
         if not _start_archive_load(
             context.scene.SWOMT.sdf_game_directory, allow_rebuild=True
         ):
-            self.report({"ERROR"}, "Choose an existing game folder first.")
+            self.report({"ERROR"}, "Select an existing game folder first.")
             return {"CANCELLED"}
         self.report({"INFO"}, "Loading SDF archives in the background...")
         return {"FINISHED"}
@@ -2136,7 +2136,7 @@ class ImportSDFMMB(bpy.types.Operator):
     material_source: bpy.props.EnumProperty(
         name="Material Source",
         description=(
-            "Choose which matching mgraphobject or mcompoundnode "
+            "Select which matching mgraphobject or mcompoundnode "
             "supplies the materials"
         ),
         items=_material_source_enum_items,
@@ -2155,15 +2155,15 @@ class ImportSDFMMB(bpy.types.Operator):
     @classmethod
     def description(cls, context, properties):
         if not properties.import_lod0:
-            return "Extract the selected MMB and load it in Asset Path"
+            return "Extract the selected MMB and load it"
         settings = getattr(context.scene, "SWOMT", None)
         if (
             settings is not None
             and 0 <= settings.sdf_asset_index < len(settings.sdf_assets)
             and settings.sdf_assets[settings.sdf_asset_index].asset_type != _ASSET_MMB
         ):
-            return "Choose and import LOD0 from MMBs referenced by this source"
-        return "Import LOD0 from the selected MMB"
+            return "Import LOD0 meshes from MMBs referenced by this source"
+        return "Import LOD0 meshes from the selected MMB"
 
     @classmethod
     def poll(cls, context):
@@ -2258,7 +2258,7 @@ class ImportSDFMMB(bpy.types.Operator):
             )
             return
         layout.label(text="Multiple material sources match this MMB.", icon="MATERIAL")
-        layout.label(text="Choose the texture/material variant to import:")
+        layout.label(text="Select the texture/material variant to import:")
         layout.prop(self, "material_source", text="")
 
     def execute(self, context):

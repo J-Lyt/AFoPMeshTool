@@ -15,7 +15,7 @@ from ..formats.mmb import SkeletalMeshAsset
 class BrowseMMBFile(bpy.types.Operator):
     """Load a .mmb file"""
     bl_idname = "object.browse_mmb_file"
-    bl_label = "Import .mmb"
+    bl_label = "Select .mmb"
 
     filepath: bpy.props.StringProperty(subtype="FILE_PATH")
     filter_glob: bpy.props.StringProperty(default="*.mmb", options={'HIDDEN'})
@@ -33,10 +33,10 @@ class BrowseMMBFile(bpy.types.Operator):
 
 
 class BrowseExportDirectory(bpy.types.Operator):
-    """Choose where exported MMB and paired mcloth files are written."""
+    """Select where MMB and MCloth files are exported."""
 
     bl_idname = "object.browse_export_directory"
-    bl_label = "Choose Export Folder"
+    bl_label = "Select Export Folder"
 
     directory: bpy.props.StringProperty(subtype="DIR_PATH")
 
@@ -78,7 +78,7 @@ class LoadMMB(bpy.types.Operator):
         return {'FINISHED'}
 
 class ImportLOD(bpy.types.Operator):
-    """Imports the given LOD"""
+    """Imports LOD"""
     bl_idname = 'object.import_lod'
     bl_label = 'Import'
 
@@ -107,7 +107,7 @@ class ImportLOD(bpy.types.Operator):
         return {'FINISHED'}
 
 class ExportLOD(bpy.types.Operator):
-    """Exports the given LOD"""
+    """Exports LOD"""
     bl_idname = 'object.export_lod'
     bl_label = 'Export'
 
@@ -229,7 +229,7 @@ def _import_all_lods(context, lod_n, skeletal_mesh=None, asset_path=None):
     return {'FINISHED'}
 
 class ImportAllLOD0s(bpy.types.Operator):
-    """Imports LOD0 for every mesh in the asset"""
+    """Imports LOD0 for every mesh in the .mmb"""
     bl_idname = 'object.import_all_lod0s'
     bl_label = "Import All LOD0's"
 
@@ -241,7 +241,7 @@ class ImportAllLOD0s(bpy.types.Operator):
         return _import_all_lods(context, 0)
 
 class ImportAllLOD1s(bpy.types.Operator):
-    """Imports LOD1 for every mesh in the asset"""
+    """Imports LOD1 for every mesh in the .mmb"""
     bl_idname = 'object.import_all_lod1s'
     bl_label = "Import All LOD1's"
 
@@ -253,7 +253,7 @@ class ImportAllLOD1s(bpy.types.Operator):
         return _import_all_lods(context, 1)
 
 class ImportAllLOD2s(bpy.types.Operator):
-    """Imports LOD2 for every mesh in the asset"""
+    """Imports LOD2 for every mesh in the .mmb"""
     bl_idname = 'object.import_all_lod2s'
     bl_label = "Import All LOD2's"
 
@@ -265,7 +265,7 @@ class ImportAllLOD2s(bpy.types.Operator):
         return _import_all_lods(context, 2)
 
 class ImportAllLOD3s(bpy.types.Operator):
-    """Imports LOD3 for every mesh in the asset"""
+    """Imports LOD3 for every mesh in the .mmb"""
     bl_idname = 'object.import_all_lod3s'
     bl_label = "Import All LOD3's"
 

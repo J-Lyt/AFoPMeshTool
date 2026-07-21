@@ -370,10 +370,12 @@ def _banshee_pattern_items(self, context):
 
 
 class SWOMTSettings(bpy.types.PropertyGroup):
-    AssetPath: bpy.props.StringProperty(name="Asset Path", update=_auto_load_mmb)
+    AssetPath: bpy.props.StringProperty(
+        name="Path of the currently loaded asset",
+        update=_auto_load_mmb,
+    )
     ExportPath: bpy.props.StringProperty(
-        name="Export Path",
-        description="Folder where exported MMB and paired mcloth files are written",
+        name="Folder where MMB and MCloth files are exported",
         get=_get_export_path,
         set=_set_export_path,
     )
@@ -383,13 +385,13 @@ class SWOMTSettings(bpy.types.PropertyGroup):
     )
     sdf_game_directory: bpy.props.StringProperty(
         name="Game Directory",
-        description="AFOP game folder containing sdf.sdftoc and sdfdata files",
+        description="AFOP game root folder (e.g. '...\\Ubisoft\\AFOP')",
         get=_get_sdf_game_directory,
         set=_set_sdf_game_directory,
     )
     sdf_extracted_directory: bpy.props.StringProperty(
         name="Extracted Files",
-        description="Folder for MMB, mcloth, and texture files extracted from SDF archives",
+        description="Folder for MMB, MCloth, and Texture files extracted from SDF archives",
         get=_get_sdf_extracted_directory,
         set=_set_sdf_extracted_directory,
     )
@@ -405,15 +407,15 @@ class SWOMTSettings(bpy.types.PropertyGroup):
         update=_on_sdf_search_update,
     )
     sdf_show_mgraphobject: bpy.props.BoolProperty(
-        name="MGraph",
-        description="Show mgraphobject material sources in search results",
+        name="MGraphObject",
+        description="Show MGraphObject files in search results",
         default=False,
         options={'SKIP_SAVE'},
         update=_on_sdf_search_update,
     )
     sdf_show_mcompoundnode: bpy.props.BoolProperty(
         name="MCompoundNode",
-        description="Show mcompoundnode material sources in search results",
+        description="Show MCompoundNode files in search results",
         default=False,
         options={'SKIP_SAVE'},
         update=_on_sdf_search_update,
@@ -447,8 +449,7 @@ class SWOMTSettings(bpy.types.PropertyGroup):
         update=_on_sdf_search_update,
     )
     sdf_search: bpy.props.StringProperty(
-        name="Filter Game Assets",
-        description="Filter the enabled MMB, mgraphobject, and mcompoundnode paths",
+        name="Search MMB, MGraphObject, and MCompoundNode paths",
         options={'SKIP_SAVE', 'TEXTEDIT_UPDATE'},
         update=_on_sdf_search_update,
     )
@@ -463,23 +464,19 @@ class SWOMTSettings(bpy.types.PropertyGroup):
     sdf_load_as_asset: bpy.props.BoolProperty(
         name="Load as Asset",
         description=(
-            "Keep the selected MMB loaded in Asset Path after importing it; "
-            "for a graph or compound containing several MMBs, keep the last one loaded"
+            "The selected MMB will be loaded in 'MMB File' on import;\n"
+            "for a MGraph or MCompound containing several MMBs, the last one will be loaded"
         ),
         default=True,
     )
     sdf_import_materials: bpy.props.BoolProperty(
         name="Import Materials and Textures",
-        description=(
-            "Use the selected graph/compound or find a source for the selected "
-            "MMB, extract its referenced textures, and assign Blender materials "
-            "to imported LOD0 render meshes; CLOTH_SIM meshes are excluded"
-        ),
         default=False,
+        description="Extract referenced textures, and assign Blender materials to imported meshes",
     )
     banshee_pattern: bpy.props.EnumProperty(
         name="Pattern",
-        description="Choose a Banshee colour pattern from the loaded game assets",
+        description="Select a Banshee color pattern from the loaded game assets",
         items=_banshee_pattern_items,
         options={'SKIP_SAVE'},
     )
@@ -489,7 +486,7 @@ class SWOMTSettings(bpy.types.PropertyGroup):
     overwrite_existing: bpy.props.BoolProperty(
         name="Overwrite existing file",
         default=False,
-        description="When checked, export overwrites the loaded file instead of creating a new _MOD file",
+        description="Overwrite the loaded MMB instead of creating a new _MOD file",
     )
     mesh_expanded: bpy.props.BoolVectorProperty(size=32, default=tuple([False]*32))
     bone_slots_expanded: bpy.props.BoolVectorProperty(size=32, default=tuple([False]*32))
@@ -501,20 +498,26 @@ class SWOMTSettings(bpy.types.PropertyGroup):
     )
     export_normals: bpy.props.BoolProperty(
         name="Export Normals",
-        description="Write normals into the exported file. When unchecked, the original normals from the .mmb are preserved. Automatically forced on when vert count has changed.",
+        description=(
+            "Write normals into the exported file. When unchecked, preserve the original normals.\n"
+            "Automatically forced on when vert count has changed."
+        ),
         get=_get_export_normals,
         set=_set_export_normals,
     )
     export_weights: bpy.props.BoolProperty(
         name="Export Weights",
-        description="Write bone weights into the exported file. When unchecked, the original weights from the .mmb are preserved. Automatically forced on when vert count has changed.",
+        description=(
+            "Write bone weights into the exported file. When unchecked, preserve the original weights.\n"
+            "Automatically forced on when vert count has changed."
+        ),
         get=_get_export_weights,
         set=_set_export_weights,
     )
     export_vertex_colors: bpy.props.BoolProperty(
         name="Export Vertex Colors",
         default=False,
-        description="Write vertex colors from Blender into the exported file. When unchecked, the original vertex colors from the .mmb are preserved.",
+        description="Write vertex colors from Blender into the exported file. When unchecked, preserve the original vertex colors.",
         update=_on_export_vertex_colors_update,
     )
     cloth_donor_radius: bpy.props.FloatProperty(
@@ -524,11 +527,14 @@ class SWOMTSettings(bpy.types.PropertyGroup):
         soft_max=0.5,
         precision=3,
         subtype='DISTANCE',
-        description="Verts added to a '_CLOTH_RENDER' mesh inherit cloth behavior from the nearest original vertex within this distance.",
+        description="Vertices added to a '_CLOTH_RENDER' mesh inherit cloth behavior from the nearest original vertex within this distance.",
     )
     export_uvs: bpy.props.BoolProperty(
         name="Export UVs",
-        description="Write UV coordinates from Blender into the exported file. When unchecked, the original UVs from the .mmb are preserved. Automatically forced on when vert count has changed.",
+        description=(
+            "Write UV coordinates from Blender into the exported file. When unchecked, preserve the original UVs.\n"
+            "Automatically forced on when vert count has changed."
+        ),
         get=_get_export_uvs,
         set=_set_export_uvs,
     )

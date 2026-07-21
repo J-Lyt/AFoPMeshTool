@@ -1,11 +1,11 @@
 # Original author: AlexPo
 bl_info = {
     "name": "AFoP Mesh Tool",
-    "author": "JasperZebra, J-Lyt, SaintBaron",
+    "author": "JasperZebra, KickingWriter, SaintBaron",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
     "version": (0, 1, 106),
     "blender": (5, 0, 0),
-    "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 11-17.",
+    "description": "Import and Export meshes from AFoP .mmb files.",
     "category": "Import-Export",
 }
 

@@ -398,7 +398,7 @@ class RenameMesh(bpy.types.Operator):
         return {'FINISHED'}
 
 class ComputeNormals(bpy.types.Operator):
-    """Compute normals for the selected mesh object (Original normals are preserved on export)"""
+    """Compute normals for the selected mesh object"""
     bl_idname = "object.compute_normals"
     bl_label = "Compute Normals"
 
@@ -418,7 +418,7 @@ class ComputeNormals(bpy.types.Operator):
         return {'FINISHED'}
 
 class ClearNormals(bpy.types.Operator):
-    """Clear normals for the selected mesh object (Original normals are preserved on export)"""
+    """Clear normals for the selected mesh object"""
     bl_idname = "object.clear_custom_normals"
     bl_label = "Clear Normals"
 
