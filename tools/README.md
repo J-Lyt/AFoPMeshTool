@@ -47,6 +47,7 @@ textures, then covers:
 - character skin, hair, wildlife skin, Medusa, natural rock, terrain, moss,
   constants, and wildlife-gear material profiles;
 - alpha, packed channel, bioluminescence, projection, and profile-audit wiring.
+- Banshee pattern manifests, palettes, controls, and wildlife node updates.
 
 Run it from the repository root with Blender 5.0 or newer:
 

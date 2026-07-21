@@ -50,8 +50,11 @@ from afop_material_regression import (  # noqa: E402
     operators_sdf,
     updater,
 )
-from afop_material_regression.formats import mgraph, shader_schema  # noqa: E402
+from afop_material_regression.formats import (  # noqa: E402
+    banshee_patterns, mgraph, shader_schema,
+)
 from afop_material_regression.materials import registry as material_profile_registry
+from afop_material_regression.materials import profiles as material_profiles
 
 _audit_spec = importlib.util.spec_from_file_location(
     "afop_material_audit_tool", REPOSITORY / "tools" / "material_audit.py"
@@ -87,7 +90,6 @@ def _material_profile_registry_case():
             expected.issubset(actual),
             f"profile registry did not classify {shader_name}: {sorted(actual)}",
         )
-
     hair_binding = {
         "shader": "blue/shaders/px_hair2_3color_tousle.mshader",
         "aux": {
@@ -124,6 +126,113 @@ def _material_profile_registry_case():
             *material_profile_registry.RUSTY_METAL_VC_DEFAULT_TEXTURES.values(),
         ),
         "DLC3 rusty-metal auxiliary textures are not all requested",
+    )
+
+
+def _banshee_pattern_parser_case():
+    manifest = banshee_patterns.BansheePatternData.loads(b'''\
+include blue/gameplay/vanity/fruit/bansheepatterndata.fruit
+include "blue/vanity/banshee body.mcolorpattern"
+include "blue/vanity/banshee head.mcolorpattern"
+include "blue/vanity/banshee body.mpatterncontrol"
+include "blue/vanity/banshee head.mpatterncontrol"
+BansheePatternData test_pattern < uid=ABCDEF >
+{
+ myBodyColorPattern < uid=1111 > = "banshee body" AABBCCDD
+ myHeadPatternControl < uid=2222 > = "banshee head" 11223344
+ myBodyPatternCoat blue/baked/body_pc.dds
+ myHeadPatternCoat blue/baked/head_pc.dds
+}
+''')
+    members = manifest.member_paths()
+    check(manifest.name == "test_pattern", "Banshee manifest name was not parsed")
+    check(
+        members[("body", "color")].endswith("banshee body.mcolorpattern")
+        and members[("head", "coat")] == "blue/baked/head_pc.dds",
+        f"Banshee manifest members were not resolved: {members!r}",
+    )
+    check(
+        manifest.reference_targets() == {
+            ("body", "color"): "AABBCCDD",
+            ("head", "control"): "11223344",
+        },
+        "Banshee manifest target UIDs were not parsed",
+    )
+    colors = banshee_patterns.ColorPattern.loads(b'''\
+ColorPattern "test colours" < uid=1234 >
+{
+ myColor1 0xff804020
+ myColor10 0xfe102040
+}
+''')
+    check(
+        colors.rgb(0) == (128 / 255.0, 64 / 255.0, 32 / 255.0),
+        "ARGB Banshee colour was not converted to RGB",
+    )
+    control = banshee_patterns.PatternControl.loads(b'''\
+PatternControl "test control" < uid=5678 >
+{
+ myPattern1Invert -1.0
+ myPattern2Invert 1.0
+ myPattern1LevelControl 1.7
+ myPattern2LevelControl 0.3
+}
+''')
+    check(
+        (control.invert1, control.invert2, control.level1, control.level2)
+        == (-1.0, 1.0, 1.7, 0.3),
+        "Banshee pattern controls were not parsed",
+    )
+
+
+def _banshee_graph_pattern_reference_case():
+    tree = {
+        "nodesById": {
+            10: {
+                "type": "internal:Compound",
+                "filename": "blue/nodes/compounds/wl_banshee_character_compound.mcompoundnode",
+            },
+            20: {"type": "native:Constant", "valueType": "texture", "value": "textures/body_pc.dds"},
+            21: {"type": "native:Constant", "valueType": "texture", "value": "textures/head_pc.dds"},
+            22: {"type": "native:Constant", "valueType": "Color Pattern", "value": ["#&BODYCOLOR"]},
+            23: {"type": "native:Constant", "valueType": "Color Pattern", "value": ["#&HEADCOLOR"]},
+            24: {"type": "native:Constant", "valueType": "Pattern Control", "value": ["#&BODYCONTROL"]},
+            25: {"type": "native:Constant", "valueType": "Pattern Control", "value": ["#&HEADCONTROL"]},
+        },
+        "connectionsById": {
+            1: [20, 0, 10, 124], 2: [21, 0, 10, 125],
+            3: [22, 0, 10, 126], 4: [23, 0, 10, 127],
+            5: [24, 0, 10, 128], 6: [25, 0, 10, 129],
+        },
+    }
+
+    class FakeDecoder:
+        def __init__(self, _data):
+            pass
+
+        def root(self):
+            return tree
+
+    original = mgraph._Bv2Decoder
+    try:
+        mgraph._Bv2Decoder = FakeDecoder
+        detected = mgraph.banshee_pattern_bindings(b"synthetic")
+    finally:
+        mgraph._Bv2Decoder = original
+    check(
+        detected == {
+            "body": {
+                "coat": "textures/body_pc.dds",
+                "color_uid": "BODYCOLOR",
+                "control_uid": "BODYCONTROL",
+            },
+            "head": {
+                "coat": "textures/head_pc.dds",
+                "color_uid": "HEADCOLOR",
+                "control_uid": "HEADCONTROL",
+            },
+        },
+        f"Banshee graph UID references were not mapped by body/head: {detected!r}",
     )
 
 
@@ -895,6 +1004,52 @@ def _supplemental_graph_override_case():
     check(result[mask_name] == expected[mask_name], "mask body sibling graph was not authoritative")
 
 
+def _banshee_layered_texture_fallback_case():
+    diffuse = "textures/wildlife_banshee_01_body_d.dds"
+    bindings = {
+        "Banshee_Body": {
+            "shader": "blue/shaders/PX_Wildlife_Skin_Banshee.mshader",
+            "d": diffuse,
+            "n": "snowdrop/textures/flat/sd_flat_normal_128_n.dds",
+            "m": None,
+        },
+        "Banshee_Eyes": {
+            "shader": "blue/shaders/PX_Wildlife_Eye.mshader",
+            "d": "textures/banshee_eye_d.dds",
+            "n": "textures/banshee_eye_n.dds",
+            "m": None,
+        },
+    }
+    indexed = {
+        "textures/wildlife_banshee_01_body_nr.dds",
+        "textures/wildlife_banshee_01_body_m.dds",
+    }
+    original_texture_entry = operators_sdf._texture_entry
+    try:
+        operators_sdf._texture_entry = (
+            lambda path, _archive: object() if path.casefold() in indexed else None
+        )
+        result = operators_sdf._complete_banshee_skin_bindings(
+            bindings, object()
+        )
+    finally:
+        operators_sdf._texture_entry = original_texture_entry
+    check(
+        result["Banshee_Body"]["n"]
+        == "textures/wildlife_banshee_01_body_nr.dds",
+        "layered Banshee graph did not recover its matching normal texture",
+    )
+    check(
+        result["Banshee_Body"]["m"]
+        == "textures/wildlife_banshee_01_body_m.dds",
+        "layered Banshee graph did not recover its matching material mask",
+    )
+    check(
+        result["Banshee_Eyes"]["m"] is None,
+        "Banshee skin fallback changed an unrelated eye material",
+    )
+
+
 def _cloth_sim_case(temporary_directory, source_png):
     global _case_number
     _case_number += 1
@@ -1223,6 +1378,217 @@ def _wildlife_skin_case(directory, source_png):
     check(emission is not None, "Principled emission input is unavailable")
     _assert_linked(emission, "wildlife bioluminescence")
     check(material.get("afop_bio_preview") == "night", "wildlife bio preview is missing")
+    replacement = tuple(
+        (index / 20.0, index / 30.0, index / 40.0)
+        for index in range(1, 11)
+    )
+    control = SimpleNamespace(invert1=-1.0, invert2=1.0, level1=1.7, level2=0.3)
+    pattern_node = material.node_tree.nodes.get("Wildlife Pattern Coat")
+    check(pattern_node is not None, "wildlife pattern texture node is missing")
+    original_first_color = tuple(
+        sorted(
+            material.node_tree.nodes["Wildlife Coat 1 palette"].color_ramp.elements,
+            key=lambda element: element.position,
+        )[0].color[:3]
+    )
+    check(
+        material_profiles.apply_banshee_pattern(
+            material, pattern_node.image, replacement, control,
+            "textures/replacement_pc.dds",
+        ),
+        "Banshee pattern did not apply to an imported wildlife material",
+    )
+    first_ramp = material.node_tree.nodes.get("Wildlife Coat 1 palette")
+    first_color = sorted(
+        first_ramp.color_ramp.elements, key=lambda element: element.position
+    )[0].color
+    check(
+        all(
+            abs(actual - expected) < 1e-6
+            for actual, expected in zip(first_color[:3], replacement[0])
+        ),
+        "Banshee colour selection did not update the first coat ramp",
+    )
+    pattern1 = material.node_tree.nodes.get("Wildlife pattern 1")
+    check(
+        abs(pattern1.inputs["From Max"].default_value - 0.425) < 1e-6,
+        "Banshee level control did not update the pattern threshold",
+    )
+    check(
+        material_profiles.restore_banshee_pattern(material),
+        "Banshee pattern removal did not restore the imported material",
+    )
+    restored_first_color = tuple(
+        sorted(first_ramp.color_ramp.elements, key=lambda element: element.position)[0]
+        .color[:3]
+    )
+    check(
+        all(
+            abs(actual - expected) < 1e-6
+            for actual, expected in zip(restored_first_color, original_first_color)
+        ) and "afop_banshee_original_colors" not in material,
+        "Banshee pattern removal did not restore and clear its saved state",
+    )
+
+    fallback_binding = dict(binding)
+    fallback_binding["parameters"] = {}
+    fallback_material = _assign(fallback_binding, directory, source_png)
+    fallback_shader = _principled(fallback_material)
+    original_base_source = fallback_shader.inputs["Base Color"].links[0].from_node.name
+    fallback_pattern = fallback_material.node_tree.nodes.get("Wildlife Pattern Coat")
+    check(
+        fallback_pattern is not None
+        and fallback_material.node_tree.nodes.get("Wildlife Coat 1 palette") is None,
+        "wildlife fallback material unexpectedly had authored pattern constants",
+    )
+    check(
+        material_profiles.apply_banshee_pattern(
+            fallback_material, fallback_pattern.image, replacement, control,
+            "textures/replacement_pc.dds",
+        ) and fallback_material.get("afop_banshee_original_pipeline_missing", False),
+        "Banshee fallback pattern did not save its original base-color connection",
+    )
+    check(
+        sum(
+            node.bl_idname == "ShaderNodeTexImage"
+            and node.name.startswith("Wildlife Pattern Coat")
+            for node in fallback_material.node_tree.nodes
+        ) == 1,
+        "Banshee fallback duplicated an already imported pattern texture node",
+    )
+    check(
+        material_profiles.restore_banshee_pattern(fallback_material),
+        "Banshee fallback pattern could not be removed",
+    )
+    check(
+        fallback_shader.inputs["Base Color"].links[0].from_node.name
+        == original_base_source
+        and fallback_material.node_tree.nodes.get("Wildlife Coat 1 palette") is None,
+        "Banshee fallback removal did not restore the original node setup",
+    )
+
+    legacy_material = _assign(fallback_binding, directory, source_png)
+    legacy_shader = _principled(legacy_material)
+    legacy_source = legacy_shader.inputs["Base Color"].links[0].from_node.name
+    legacy_pattern = legacy_material.node_tree.nodes.get("Wildlife Pattern Coat")
+    check(
+        material_profiles.apply_banshee_pattern(
+            legacy_material, legacy_pattern.image, replacement, control,
+            "textures/replacement_pc.dds",
+        ),
+        "legacy Banshee fallback pattern setup failed",
+    )
+    legacy_material["afop_banshee_pattern"] = "legacy/test.mbansheepatterndata"
+    for key in (
+        "afop_banshee_original_pipeline_missing",
+        "afop_banshee_original_base_node",
+        "afop_banshee_original_base_socket",
+        "afop_banshee_original_pattern_coat",
+    ):
+        if key in legacy_material:
+            del legacy_material[key]
+    for node in legacy_material.node_tree.nodes:
+        if "afop_banshee_pattern_generated" in node:
+            del node["afop_banshee_pattern_generated"]
+    check(
+        material_profiles.restore_banshee_pattern(legacy_material),
+        "legacy Banshee pattern could not be removed",
+    )
+    check(
+        legacy_shader.inputs["Base Color"].links[0].from_node.name == legacy_source
+        and legacy_material.node_tree.nodes.get("Wildlife Coat 1 palette") is None,
+        "legacy Banshee removal did not recover the original node setup",
+    )
+
+
+def _banshee_auto_pattern_case(directory, source_png):
+    binding = {
+        "shader": "blue/shaders/PX_Wildlife_Skin.mshader",
+        "d": "textures/auto_banshee_d.dds",
+        "n": "textures/auto_banshee_n.dds",
+        "m": "textures/auto_banshee_m.dds",
+        "aux": {"PatternCoat": "textures/original_body_pc.dds"},
+        "parameters": {},
+    }
+    material = _assign(binding, directory, source_png, part_suffix="Banshee_Body")
+    obj = next(
+        obj for obj in bpy.data.objects
+        if obj.type == "MESH" and material.name in obj.data.materials
+    )
+    asset = SimpleNamespace(
+        meshes=[SimpleNamespace(
+            name="Banshee_Body",
+            lods=[SimpleNamespace(blender_obj_name=obj.name)],
+        )]
+    )
+    color_data = b'''ColorPattern "auto" < uid=AABB >\n{\n''' + b"\n".join(
+        f"myColor{index} 0xff{index:02x}4060".encode("ascii")
+        for index in range(1, 11)
+    ) + b"\n}\n"
+    control_data = b'''PatternControl "auto" < uid=CCDD >
+{
+ myPattern1Invert -1.0
+ myPattern2Invert 1.0
+ myPattern1LevelControl 1.7
+ myPattern2LevelControl 0.3
+}
+'''
+
+    class FakeArchive:
+        def extract(self, indexed_asset):
+            return color_data if indexed_asset.name == "color" else control_data
+
+    archive = FakeArchive()
+    color_entry = SimpleNamespace(archive=archive, asset=SimpleNamespace(name="color"))
+    control_entry = SimpleNamespace(archive=archive, asset=SimpleNamespace(name="control"))
+    coat_entry = SimpleNamespace(archive=archive, asset=SimpleNamespace(name="coat"))
+    pattern_image = material.node_tree.nodes["Wildlife Pattern Coat"].image
+    originals = {
+        "bindings": mgraph.banshee_pattern_bindings,
+        "uid_entry": operators_sdf._banshee_uid_member_entry,
+        "member_entry": operators_sdf.banshee_pattern_member_entry,
+        "extract": operators_sdf._extract_texture_to_cache,
+        "load_image": operators_sdf._load_image,
+    }
+    try:
+        mgraph.banshee_pattern_bindings = lambda _data: {
+            "body": {
+                "coat": "textures/detected_body_pc.dds",
+                "color_uid": "AABB",
+                "control_uid": "CCDD",
+            }
+        }
+        operators_sdf._banshee_uid_member_entry = lambda _uid, role, _archive: (
+            color_entry if role == "color" else control_entry
+        )
+        operators_sdf.banshee_pattern_member_entry = (
+            lambda _path, _archive, _role: coat_entry
+        )
+        operators_sdf._extract_texture_to_cache = (
+            lambda _entry, _directory: source_png
+        )
+        operators_sdf._load_image = (
+            lambda _disk, _logical, non_color=True: pattern_image
+        )
+        applied = operators_sdf._apply_detected_banshee_pattern(
+            asset,
+            b"synthetic graph",
+            archive,
+            directory,
+            "blue/graphs/wl_banshee_character_test.mgraphobject",
+        )
+    finally:
+        mgraph.banshee_pattern_bindings = originals["bindings"]
+        operators_sdf._banshee_uid_member_entry = originals["uid_entry"]
+        operators_sdf.banshee_pattern_member_entry = originals["member_entry"]
+        operators_sdf._extract_texture_to_cache = originals["extract"]
+        operators_sdf._load_image = originals["load_image"]
+    check(
+        applied == 1
+        and material.get("afop_banshee_pattern_source") == "graph UID references"
+        and material.get("afop_banshee_pattern", "").endswith("test.mgraphobject"),
+        "graph-detected Banshee pattern was not applied automatically",
+    )
 
 
 def _medusa_case(directory, source_png):
@@ -1445,6 +1811,13 @@ def _addon_registration_case():
             "Show All search-results action was not registered",
         )
         check(
+            hasattr(bpy.types, "OBJECT_OT_apply_banshee_pattern")
+            and hasattr(bpy.types, "OBJECT_OT_remove_banshee_pattern")
+            and "banshee_pattern"
+            in ADDON.settings.SWOMTSettings.bl_rna.properties,
+            "Banshee pattern controls were not registered",
+        )
+        check(
             not hasattr(ADDON.operators_sdf, "AuditSDFMaterials"),
             "the material-audit operator is still coupled to Blender",
         )
@@ -1458,6 +1831,14 @@ def _addon_registration_case():
     check(
         not hasattr(bpy.types, "OBJECT_OT_show_all_sdf_results"),
         "Show All search-results action was not unregistered",
+    )
+    check(
+        not hasattr(bpy.types, "OBJECT_OT_apply_banshee_pattern"),
+        "Banshee pattern action was not unregistered",
+    )
+    check(
+        not hasattr(bpy.types, "OBJECT_OT_remove_banshee_pattern"),
+        "Banshee pattern removal was not unregistered",
     )
 
 
@@ -1522,6 +1903,8 @@ def main():
         source_png = _make_source_png(directory)
         cases = [
             ("material profile registry and public facade", _material_profile_registry_case),
+            ("Banshee pattern text formats", _banshee_pattern_parser_case),
+            ("Banshee graph UID references", _banshee_graph_pattern_reference_case),
             ("nested material-package update install", _nested_update_install_case),
             ("direct and compound binding resolution", _binding_resolution_cases),
             ("direct-only MMB material-source discovery", _direct_material_source_discovery_case),
@@ -1532,6 +1915,7 @@ def main():
             ("wildlife gameplay parts inherit rendered skin", _wildlife_gameplay_part_alias_case),
             ("named mask and piercing texture families", _named_mask_and_piercing_binding_case),
             ("supplemental graph exact-material override", _supplemental_graph_override_case),
+            ("layered Banshee skin texture fallback", _banshee_layered_texture_fallback_case),
             (
                 "CLOTH_SIM material exclusion",
                 lambda: _cloth_sim_case(directory, source_png),
@@ -1543,6 +1927,7 @@ def main():
             ("additional character skin variants", lambda: _character_skin_variant_case(directory, source_png)),
             ("hair cutout profile", lambda: _hair_case(directory, source_png)),
             ("wildlife skin and bioluminescence", lambda: _wildlife_skin_case(directory, source_png)),
+            ("automatic Banshee graph pattern", lambda: _banshee_auto_pattern_case(directory, source_png)),
             ("Medusa skin and bioluminescence", lambda: _medusa_case(directory, source_png)),
             ("natural-rock procedural lookup", lambda: _rock_case(directory, source_png)),
             ("terrain runtime placeholder", lambda: _terrain_case(directory, source_png)),

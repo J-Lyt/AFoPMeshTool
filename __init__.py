@@ -3,7 +3,7 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, J-Lyt, SaintBaron",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 105),
+    "version": (0, 1, 106),
     "blender": (5, 0, 0),
     "description": "Imports skeletal meshes from AFoP .mmb files. Supports versions 11-17.",
     "category": "Import-Export",
@@ -43,6 +43,7 @@ _REQUIRED_SPLIT_MODULES = (
     "addon_state.py",
     "formats/__init__.py",
     "formats/binary_io.py",
+    "formats/banshee_patterns.py",
     "formats/mcloth.py",
     "formats/meshlet.py",
     "formats/mgraph.py",
@@ -66,6 +67,7 @@ _REQUIRED_SPLIT_MODULES = (
     "operators/files.py",
     "operators/io.py",
     "operators/mesh.py",
+    "operators/patterns.py",
     "operators/sdf.py",
     "sdf/__init__.py",
     "sdf/oodle.py",
@@ -139,6 +141,7 @@ from .operators import bones as operators_bones
 from .operators import files as operators_files
 from .operators import io as operators_io
 from .operators import mesh as operators_mesh
+from .operators import patterns as operators_patterns
 from .operators import sdf as operators_sdf
 from . import settings
 from . import ui
@@ -169,6 +172,8 @@ classes = (
     operators_sdf.ClearSDFIndexCache,
     operators_sdf.IndexSDFArchives,
     operators_sdf.ImportSDFMMB,
+    operators_patterns.ApplyBansheePattern,
+    operators_patterns.RemoveBansheePattern,
     operators_bones.RemapMeshBone,
     operators_bones.AddMeshBone,
     operators_bones.MergeSkeletons,

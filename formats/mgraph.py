@@ -300,6 +300,113 @@ def _bv2_plain(value):
     return value
 
 
+def banshee_pattern_bindings(data):
+    """Return direct body/head coat, colour, and control references from a graph.
+
+    Banshee character compounds use two layouts: values grouped by data type,
+    or values grouped by body/head.  In both layouts, sorting each value type
+    by destination pin preserves the order of the directly connected body/head
+    coat textures, so no character-name profile is required.
+    """
+    try:
+        tree = _bv2_plain(_Bv2Decoder(data).root())
+    except (IndexError, KeyError, TypeError, ValueError):
+        return {}
+    candidates = []
+
+    def uid(value):
+        if isinstance(value, list) and value:
+            value = value[0]
+        if not isinstance(value, str):
+            return None
+        return value.removeprefix("#&").removeprefix("#").upper()
+
+    def visit(value):
+        if isinstance(value, dict):
+            nodes = value.get("nodesById")
+            connections = value.get("connectionsById")
+            if isinstance(nodes, dict) and isinstance(connections, (dict, list)):
+                incoming = {}
+                connection_values = (
+                    connections.values()
+                    if isinstance(connections, dict)
+                    else connections
+                )
+                for connection in connection_values:
+                    if not isinstance(connection, list) or len(connection) < 4:
+                        continue
+                    source = nodes.get(connection[0])
+                    destination = nodes.get(connection[2])
+                    if not isinstance(source, dict) or not isinstance(destination, dict):
+                        continue
+                    destination_name = str(
+                        destination.get("filename")
+                        or destination.get("name")
+                        or destination.get("type")
+                        or ""
+                    )
+                    if "banshee" not in destination_name.casefold():
+                        continue
+                    incoming.setdefault((connection[2], destination_name), []).append(
+                        (int(connection[3]), source)
+                    )
+                for (_destination_id, destination_name), values in incoming.items():
+                    coats = []
+                    colors = []
+                    controls = []
+                    for pin, source in values:
+                        value_type = str(source.get("valueType", "")).casefold()
+                        source_value = source.get("value")
+                        if value_type == "texture" and isinstance(source_value, str):
+                            lower = source_value.casefold()
+                            part = (
+                                "body" if "body" in lower
+                                else ("head" if "head" in lower else None)
+                            )
+                            if part and lower.endswith("_pc.dds"):
+                                coats.append((pin, part, source_value))
+                        elif value_type == "color pattern":
+                            reference = uid(source_value)
+                            if reference:
+                                colors.append((pin, reference))
+                        elif value_type == "pattern control":
+                            reference = uid(source_value)
+                            if reference:
+                                controls.append((pin, reference))
+                    coats.sort()
+                    colors.sort()
+                    controls.sort()
+                    part_order = [part for _pin, part, _path in coats]
+                    if (
+                        len(coats) == 2 and set(part_order) == {"body", "head"}
+                        and len(colors) == 2 and len(controls) == 2
+                    ):
+                        resolved = {}
+                        for index, part in enumerate(part_order):
+                            resolved[part] = {
+                                "coat": coats[index][2],
+                                "color_uid": colors[index][1],
+                                "control_uid": controls[index][1],
+                            }
+                        candidates.append((destination_name, resolved))
+            for item in value.values():
+                visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    visit(tree)
+    if not candidates:
+        return {}
+    candidates.sort(
+        key=lambda item: (
+            "character" not in item[0].casefold(),
+            item[0].casefold(),
+        )
+    )
+    return candidates[0][1]
+
+
 def _connected_material_constants(data, shader_prefixes, pin_ids):
     """Return connected native constants by material name and shader pin."""
     try:

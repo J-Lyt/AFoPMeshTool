@@ -31,6 +31,340 @@ from .registry import RUSTY_METAL_VC_DEFAULT_TEXTURES, profile_traits
 from .textures import _load_image
 
 
+def _set_pattern_ramp(node, colors):
+    elements = sorted(node.color_ramp.elements, key=lambda element: element.position)
+    if len(elements) != 5:
+        return False
+    for element, color in zip(elements, colors):
+        element.color = (*color[:3], 1.0)
+    return True
+
+
+def _set_pattern_control(nodes, index, level, invert):
+    label = f"Wildlife pattern {index}"
+    mapping = nodes.get(label)
+    signed = nodes.get(f"{label} signed")
+    bias = nodes.get(f"{label} inversion bias")
+    if mapping is None or signed is None or bias is None:
+        return False
+    upper = float(level) * 0.25
+    mapping.inputs["From Min"].default_value = upper - 0.25
+    mapping.inputs["From Max"].default_value = upper
+    signed.inputs[1].default_value = float(invert)
+    bias.inputs[1].default_value = min(0.0, float(invert))
+    return True
+
+
+def apply_banshee_pattern(material, image, colors, control, logical_path):
+    """Apply one body/head vanity pattern to an imported wildlife material."""
+    if material is None or not material.use_nodes or len(colors) != 10:
+        return False
+    nodes = material.node_tree.nodes
+    links = material.node_tree.links
+    pattern = nodes.get("Wildlife Pattern Coat")
+    coat1 = nodes.get("Wildlife Coat 1 palette")
+    coat2 = nodes.get("Wildlife Coat 2 palette")
+    original_pipeline = pattern is not None and coat1 is not None and coat2 is not None
+
+    if pattern is None or coat1 is None or coat2 is None:
+        diffuse = nodes.get("Diffuse / Albedo")
+        mask_channels = nodes.get("Snowdrop material channels")
+        shader = next(
+            (node for node in nodes if node.bl_idname == "ShaderNodeBsdfPrincipled"),
+            None,
+        )
+        if diffuse is None or mask_channels is None or shader is None:
+            return False
+        existing_nodes = {node.as_pointer() for node in nodes}
+        if "afop_banshee_original_pipeline_missing" not in material:
+            base_links = list(shader.inputs["Base Color"].links)
+            material["afop_banshee_original_pipeline_missing"] = True
+            material["afop_banshee_original_base_node"] = (
+                base_links[0].from_node.name if base_links else ""
+            )
+            material["afop_banshee_original_base_socket"] = (
+                base_links[0].from_socket.name if base_links else ""
+            )
+            material["afop_banshee_original_pattern_coat"] = str(
+                material.get("afop_pattern_coat", "")
+            )
+        if pattern is None:
+            pattern = _new_image_node(
+                nodes, image, "Wildlife Pattern Coat", -520, 520
+            )
+        else:
+            pattern.image = image
+        pattern_channels = _separate_node(
+            nodes, links, pattern.outputs["Color"],
+            "Pattern R/G masks, B/A coat ramps", -280, 520,
+        )
+        coat1_output = _five_color_ramp(
+            nodes, links, pattern_channels.outputs["Blue"], colors[:5],
+            "Wildlife Coat 1 palette", 0, 600,
+        )
+        coat2_output = _five_color_ramp(
+            nodes, links, pattern.outputs["Alpha"], colors[5:],
+            "Wildlife Coat 2 palette", 0, 380,
+        )
+        pattern1 = _pattern_component(
+            nodes, links, pattern_channels.outputs["Red"],
+            control.level1, control.invert1, "Wildlife pattern 1", 230, 620,
+        )
+        pattern2 = _pattern_component(
+            nodes, links, pattern_channels.outputs["Green"],
+            control.level2, control.invert2, "Wildlife pattern 2", 230, 400,
+        )
+        pattern_add = _math_node(nodes, "ADD", "Combine wildlife patterns", 760, 520)
+        links.new(pattern1, pattern_add.inputs[0])
+        links.new(pattern2, pattern_add.inputs[1])
+        pattern_clamp = _clamp_node(nodes, "Clamp wildlife pattern", 930, 520)
+        links.new(pattern_add.outputs[0], pattern_clamp.inputs["Value"])
+        coat_mix = nodes.new("ShaderNodeMixRGB")
+        coat_mix.blend_type = "MIX"
+        coat_mix.label = "Select wildlife coat"
+        coat_mix.name = coat_mix.label
+        coat_mix.location = (1100, 520)
+        links.new(pattern_clamp.outputs[0], coat_mix.inputs[0])
+        links.new(coat1_output, coat_mix.inputs[1])
+        links.new(coat2_output, coat_mix.inputs[2])
+        coat_sqrt = nodes.new("ShaderNodeGamma")
+        coat_sqrt.label = "Snowdrop coat sqrt"
+        coat_sqrt.name = coat_sqrt.label
+        coat_sqrt.inputs["Gamma"].default_value = 0.5
+        coat_sqrt.location = (1280, 520)
+        diffuse_sqrt = nodes.new("ShaderNodeGamma")
+        diffuse_sqrt.label = "Snowdrop diffuse sqrt"
+        diffuse_sqrt.name = diffuse_sqrt.label
+        diffuse_sqrt.inputs["Gamma"].default_value = 0.5
+        diffuse_sqrt.location = (1280, 700)
+        links.new(coat_mix.outputs["Color"], coat_sqrt.inputs["Color"])
+        links.new(diffuse.outputs["Color"], diffuse_sqrt.inputs["Color"])
+        overlay = nodes.new("ShaderNodeMixRGB")
+        overlay.blend_type = "OVERLAY"
+        overlay.label = "Wildlife coat overlay"
+        overlay.name = overlay.label
+        overlay.location = (1470, 600)
+        links.new(mask_channels.outputs["Blue"], overlay.inputs[0])
+        links.new(diffuse_sqrt.outputs["Color"], overlay.inputs[1])
+        links.new(coat_sqrt.outputs["Color"], overlay.inputs[2])
+        square = nodes.new("ShaderNodeGamma")
+        square.label = "Snowdrop coat square"
+        square.name = square.label
+        square.inputs["Gamma"].default_value = 2.0
+        square.location = (1650, 600)
+        links.new(overlay.outputs["Color"], square.inputs["Color"])
+        for link in list(shader.inputs["Base Color"].links):
+            links.remove(link)
+        links.new(square.outputs["Color"], shader.inputs["Base Color"])
+        for node in nodes:
+            if node.as_pointer() not in existing_nodes:
+                node["afop_banshee_pattern_generated"] = True
+        coat1 = nodes.get("Wildlife Coat 1 palette")
+        coat2 = nodes.get("Wildlife Coat 2 palette")
+
+    if (
+        original_pipeline
+        and "afop_banshee_original_pipeline_missing" not in material
+        and "afop_banshee_original_colors" not in material
+    ):
+        original_colors = []
+        for ramp in (coat1, coat2):
+            for element in sorted(
+                ramp.color_ramp.elements, key=lambda item: item.position
+            ):
+                original_colors.extend(element.color[:3])
+        pattern1 = nodes.get("Wildlife pattern 1")
+        pattern2 = nodes.get("Wildlife pattern 2")
+        signed1 = nodes.get("Wildlife pattern 1 signed")
+        signed2 = nodes.get("Wildlife pattern 2 signed")
+        if (
+            len(original_colors) == 30
+            and pattern1 is not None and pattern2 is not None
+            and signed1 is not None and signed2 is not None
+        ):
+            material["afop_banshee_original_colors"] = original_colors
+            material["afop_banshee_original_control"] = [
+                signed1.inputs[1].default_value,
+                signed2.inputs[1].default_value,
+                pattern1.inputs["From Max"].default_value * 4.0,
+                pattern2.inputs["From Max"].default_value * 4.0,
+            ]
+            material["afop_banshee_original_pattern_image"] = (
+                pattern.image.name if pattern.image is not None else ""
+            )
+            material["afop_banshee_original_pattern_coat"] = str(
+                material.get("afop_pattern_coat", "")
+            )
+
+    pattern.image = image
+    if not _set_pattern_ramp(coat1, colors[:5]):
+        return False
+    if not _set_pattern_ramp(coat2, colors[5:]):
+        return False
+    if not _set_pattern_control(nodes, 1, control.level1, control.invert1):
+        return False
+    if not _set_pattern_control(nodes, 2, control.level2, control.invert2):
+        return False
+    material["afop_pattern_coat"] = logical_path
+    if "afop_pattern_coat_status" in material:
+        del material["afop_pattern_coat_status"]
+    material["afop_banshee_color_pattern"] = [
+        component for color in colors for component in color[:3]
+    ]
+    material["afop_banshee_pattern_control"] = (
+        f"{control.invert1:g},{control.invert2:g},"
+        f"{control.level1:g},{control.level2:g}"
+    )
+    return True
+
+
+def restore_banshee_pattern(material):
+    """Restore the wildlife pattern values saved before the first selection."""
+    if material is None or not material.use_nodes:
+        return False
+    nodes = material.node_tree.nodes
+    links = material.node_tree.links
+    if (
+        "afop_banshee_pattern" in material
+        and "afop_banshee_original_pipeline_missing" not in material
+        and "afop_banshee_original_colors" not in material
+    ):
+        # An earlier development build could create a coat pipeline without
+        # retaining the original Base Color connection. Recover that known
+        # layout so affected Blender files do not need to be re-imported.
+        shader = next(
+            (node for node in nodes if node.bl_idname == "ShaderNodeBsdfPrincipled"),
+            None,
+        )
+        source = nodes.get("Apply packed normal AO") or nodes.get("Diffuse / Albedo")
+        source_socket = source.outputs.get("Color") if source is not None else None
+        if shader is None or source_socket is None:
+            return False
+        for link in list(shader.inputs["Base Color"].links):
+            links.remove(link)
+        links.new(source_socket, shader.inputs["Base Color"])
+
+        generated_labels = {
+            "Pattern R/G masks, B/A coat ramps",
+            "Wildlife Coat 1 palette",
+            "Wildlife Coat 2 palette",
+            "Wildlife pattern 1",
+            "Wildlife pattern 1 signed",
+            "Wildlife pattern 1 inversion bias",
+            "Wildlife pattern 2",
+            "Wildlife pattern 2 signed",
+            "Wildlife pattern 2 inversion bias",
+            "Combine wildlife patterns",
+            "Clamp wildlife pattern",
+            "Select wildlife coat",
+            "Snowdrop coat sqrt",
+            "Snowdrop diffuse sqrt",
+            "Wildlife coat overlay",
+            "Snowdrop coat square",
+        }
+        separate = nodes.get("Pattern R/G masks, B/A coat ramps")
+        generated_pattern = (
+            separate.inputs["Color"].links[0].from_node
+            if separate is not None and separate.inputs["Color"].links else None
+        )
+        original_pattern = nodes.get("Wildlife Pattern Coat")
+        for node in list(nodes):
+            if node.label in generated_labels or (
+                node is generated_pattern and node is not original_pattern
+            ):
+                nodes.remove(node)
+        if original_pattern is not None and original_pattern.image is not None:
+            material["afop_pattern_coat"] = str(
+                original_pattern.image.get("afop_asset_path", "")
+            )
+        for key in (
+            "afop_banshee_pattern",
+            "afop_banshee_pattern_source",
+            "afop_banshee_color_pattern",
+            "afop_banshee_pattern_control",
+        ):
+            if key in material:
+                del material[key]
+        return True
+
+    if material.get("afop_banshee_original_pipeline_missing", False):
+        shader = next(
+            (node for node in nodes if node.bl_idname == "ShaderNodeBsdfPrincipled"),
+            None,
+        )
+        if shader is None:
+            return False
+        for link in list(shader.inputs["Base Color"].links):
+            links.remove(link)
+        source_name = str(material.get("afop_banshee_original_base_node", ""))
+        socket_name = str(material.get("afop_banshee_original_base_socket", ""))
+        source = nodes.get(source_name)
+        if source is not None and source.outputs.get(socket_name) is not None:
+            links.new(source.outputs[socket_name], shader.inputs["Base Color"])
+        for node in list(nodes):
+            if node.get("afop_banshee_pattern_generated", False):
+                nodes.remove(node)
+        material["afop_pattern_coat"] = str(
+            material.get("afop_banshee_original_pattern_coat", "")
+        )
+        for key in (
+            "afop_banshee_pattern",
+            "afop_banshee_pattern_source",
+            "afop_banshee_color_pattern",
+            "afop_banshee_pattern_control",
+            "afop_banshee_original_pipeline_missing",
+            "afop_banshee_original_base_node",
+            "afop_banshee_original_base_socket",
+            "afop_banshee_original_pattern_coat",
+        ):
+            if key in material:
+                del material[key]
+        return True
+
+    if "afop_banshee_original_colors" not in material:
+        return False
+    pattern = nodes.get("Wildlife Pattern Coat")
+    coat1 = nodes.get("Wildlife Coat 1 palette")
+    coat2 = nodes.get("Wildlife Coat 2 palette")
+    colors_flat = list(material["afop_banshee_original_colors"])
+    control = list(material.get("afop_banshee_original_control", ()))
+    if (
+        pattern is None or coat1 is None or coat2 is None
+        or len(colors_flat) != 30 or len(control) != 4
+    ):
+        return False
+    colors = tuple(
+        tuple(colors_flat[index:index + 3]) for index in range(0, 30, 3)
+    )
+    if not _set_pattern_ramp(coat1, colors[:5]):
+        return False
+    if not _set_pattern_ramp(coat2, colors[5:]):
+        return False
+    if not _set_pattern_control(nodes, 1, control[2], control[0]):
+        return False
+    if not _set_pattern_control(nodes, 2, control[3], control[1]):
+        return False
+    image_name = str(material.get("afop_banshee_original_pattern_image", ""))
+    if image_name and bpy.data.images.get(image_name) is not None:
+        pattern.image = bpy.data.images[image_name]
+    material["afop_pattern_coat"] = str(
+        material.get("afop_banshee_original_pattern_coat", "")
+    )
+    for key in (
+        "afop_banshee_pattern",
+        "afop_banshee_pattern_source",
+        "afop_banshee_color_pattern",
+        "afop_banshee_pattern_control",
+        "afop_banshee_original_colors",
+        "afop_banshee_original_control",
+        "afop_banshee_original_pattern_image",
+        "afop_banshee_original_pattern_coat",
+    ):
+        if key in material:
+            del material[key]
+    return True
+
+
 def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_index=0):
     """Create Principled materials and assign one to each imported MMB part."""
     assigned = 0

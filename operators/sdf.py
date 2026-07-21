@@ -13,7 +13,14 @@ import bpy
 
 from .. import addon_state, material_import
 from ..formats import mgraph, shader_schema
+from ..formats.banshee_patterns import (
+    BansheePatternData,
+    ColorPattern,
+    PatternControl,
+)
 from ..log import logger
+from ..materials.profiles import apply_banshee_pattern
+from ..materials.textures import _load_image
 from ..formats.mmb import SkeletalMeshAsset
 from ..sdf import oodle as oodle_helper
 from ..sdf import toc as sdf_toc
@@ -28,7 +35,7 @@ _OODLE_NAMES = (
     "oo2core_win64.dll",
 )
 _MAX_SEARCH_RESULTS = 500
-_INDEX_CACHE_VERSION = 4
+_INDEX_CACHE_VERSION = 5
 _ASSET_MMB = "MMB"
 _ASSET_MGRAPH = "MGRAPHOBJECT"
 _ASSET_MCOMPOUND = "MCOMPOUNDNODE"
@@ -82,12 +89,21 @@ class _SdfState:
         self.compounds: dict[str, list[_IndexedAsset]] = {}
         self.shaders: dict[str, list[_IndexedAsset]] = {}
         self.textures: dict[str, list[_IndexedAsset]] = {}
+        self.banshee_patterns: list[_IndexedAsset] = []
+        self.color_patterns: dict[str, list[_IndexedAsset]] = {}
+        self.pattern_controls: dict[str, list[_IndexedAsset]] = {}
 
 
 _state = _SdfState()
 
 _shader_schema_lock = threading.Lock()
 _shader_pin_cache = {}
+_banshee_reference_lock = threading.Lock()
+_banshee_reference_generation = -1
+_banshee_reference_paths = {}
+_banshee_member_uid_generation = -1
+_banshee_member_uid_entries = {"color": {}, "control": {}}
+_banshee_member_uid_scanned = {"color": set(), "control": set()}
 
 
 def _set_progress(generation, phase, status, progress):
@@ -289,6 +305,9 @@ def _load_archives_worker(root, generation, index_cache_dir=None, allow_rebuild=
         compounds = {}
         shaders = {}
         textures = {}
+        banshee_patterns = []
+        color_patterns = {}
+        pattern_controls = {}
         errors = []
         archive_count = len(toc_paths)
         loaded_count = 0
@@ -336,6 +355,8 @@ def _load_archives_worker(root, generation, index_cache_dir=None, allow_rebuild=
                             (
                                 ".mmb", ".mcloth", ".mgraphobject",
                                 ".mcompoundnode", ".mshader", ".dds",
+                                ".mbansheepatterndata", ".mcolorpattern",
+                                ".mpatterncontrol",
                             )
                         )
                     ]
@@ -381,6 +402,12 @@ def _load_archives_worker(root, generation, index_cache_dir=None, allow_rebuild=
                         shaders.setdefault(lower_name, []).append(indexed)
                     elif lower_name.endswith(".dds"):
                         textures.setdefault(lower_name, []).append(indexed)
+                    elif lower_name.endswith(".mbansheepatterndata"):
+                        banshee_patterns.append(indexed)
+                    elif lower_name.endswith(".mcolorpattern"):
+                        color_patterns.setdefault(lower_name, []).append(indexed)
+                    elif lower_name.endswith(".mpatterncontrol"):
+                        pattern_controls.setdefault(lower_name, []).append(indexed)
                 loaded_count += 1
             except _Cancelled:
                 raise
@@ -414,6 +441,14 @@ def _load_archives_worker(root, generation, index_cache_dir=None, allow_rebuild=
             _state.compounds = compounds
             _state.shaders = shaders
             _state.textures = textures
+            _state.banshee_patterns = sorted(
+                banshee_patterns,
+                key=lambda item: (
+                    item.asset.name.casefold(), item.archive_label.casefold()
+                ),
+            )
+            _state.color_patterns = color_patterns
+            _state.pattern_controls = pattern_controls
             _state.phase = "ready"
             _state.progress = 1.0
             if rebuilt_count:
@@ -448,6 +483,9 @@ def _load_archives_worker(root, generation, index_cache_dir=None, allow_rebuild=
             _state.compounds = {}
             _state.shaders = {}
             _state.textures = {}
+            _state.banshee_patterns = []
+            _state.color_patterns = {}
+            _state.pattern_controls = {}
             _state.phase = "error"
             _state.progress = 0.0
             _state.status = str(error)
@@ -469,6 +507,9 @@ def _finish_cached_auto_load_unavailable(
         _state.compounds = {}
         _state.shaders = {}
         _state.textures = {}
+        _state.banshee_patterns = []
+        _state.color_patterns = {}
+        _state.pattern_controls = {}
         _state.phase = "idle"
         _state.progress = 0.0
         _state.status = status
@@ -1115,6 +1156,206 @@ def _texture_entry(logical_path, preferred_archive):
     return ordered[0] if ordered else None
 
 
+def banshee_pattern_entries():
+    """Return indexed pattern manifests and the generation that owns them."""
+    with _state.lock:
+        return _state.generation, list(_state.banshee_patterns)
+
+
+def banshee_pattern_entry(identifier):
+    """Resolve a stable UI identifier to its current indexed manifest."""
+    with _state.lock:
+        entries = list(_state.banshee_patterns)
+    for entry in entries:
+        if f"{entry.cache_key}:{entry.asset.hash}" == identifier:
+            return entry
+    return None
+
+
+def banshee_pattern_member_entry(logical_path, preferred_archive, role):
+    """Resolve one manifest member, preferring the manifest's own archive."""
+    if role == "color":
+        table_name = "color_patterns"
+    elif role == "control":
+        table_name = "pattern_controls"
+    elif role == "coat":
+        return _texture_entry(logical_path, preferred_archive)
+    else:
+        return None
+    key = logical_path.replace("\\", "/").lstrip("/").casefold()
+    with _state.lock:
+        table = getattr(_state, table_name)
+        candidates = list(table.get(key, ()))
+    ordered = _prefer_archive(candidates, preferred_archive)
+    return ordered[0] if ordered else None
+
+
+def _banshee_uid_reference_paths():
+    """Build a lazy UID-to-member-path index from the pattern manifests."""
+    global _banshee_reference_generation, _banshee_reference_paths
+    with _state.lock:
+        generation = _state.generation
+        manifests = list(_state.banshee_patterns)
+    with _banshee_reference_lock:
+        if generation == _banshee_reference_generation:
+            return _banshee_reference_paths
+
+    references = {}
+    for entry in manifests:
+        try:
+            manifest = BansheePatternData.loads(entry.archive.extract(entry.asset))
+            paths = manifest.member_paths()
+            for (part, role), target_uid in manifest.reference_targets().items():
+                path = paths.get((part, role))
+                if path:
+                    references.setdefault((role, target_uid.upper()), []).append(path)
+        except Exception as error:
+            logger.debug(
+                "Could not index Banshee pattern references from %s: %s",
+                entry.asset.name,
+                error,
+            )
+    with _banshee_reference_lock:
+        if generation >= _banshee_reference_generation:
+            _banshee_reference_generation = generation
+            _banshee_reference_paths = references
+        return _banshee_reference_paths
+
+
+def _banshee_uid_member_entry(uid, role, preferred_archive):
+    global _banshee_member_uid_generation
+    global _banshee_member_uid_entries, _banshee_member_uid_scanned
+    wanted = uid.upper()
+    paths = _banshee_uid_reference_paths().get((role, uid.upper()), ())
+    for path in paths:
+        entry = banshee_pattern_member_entry(path, preferred_archive, role)
+        if entry is not None:
+            return entry
+
+    table_name = "color_patterns" if role == "color" else "pattern_controls"
+    parser = ColorPattern if role == "color" else PatternControl
+    with _state.lock:
+        generation = _state.generation
+        candidates = [
+            entry
+            for entries in getattr(_state, table_name).values()
+            for entry in entries
+        ]
+    with _banshee_reference_lock:
+        if generation != _banshee_member_uid_generation:
+            _banshee_member_uid_generation = generation
+            _banshee_member_uid_entries = {"color": {}, "control": {}}
+            _banshee_member_uid_scanned = {"color": set(), "control": set()}
+        cached = list(_banshee_member_uid_entries[role].get(wanted, ()))
+    if cached:
+        ordered = _prefer_archive(cached, preferred_archive)
+        return ordered[0] if ordered else None
+
+    for candidate in _prefer_archive(candidates, preferred_archive):
+        identity = (candidate.cache_key, candidate.asset.hash)
+        with _banshee_reference_lock:
+            if identity in _banshee_member_uid_scanned[role]:
+                continue
+            _banshee_member_uid_scanned[role].add(identity)
+        try:
+            parsed = parser.loads(candidate.archive.extract(candidate.asset))
+            parsed_uid = parsed.uid.upper()
+            with _banshee_reference_lock:
+                _banshee_member_uid_entries[role].setdefault(
+                    parsed_uid, []
+                ).append(candidate)
+            if parsed_uid == wanted:
+                return candidate
+        except Exception as error:
+            logger.debug(
+                "Could not inspect Banshee %s UID in %s: %s",
+                role,
+                candidate.asset.name,
+                error,
+            )
+    return None
+
+
+def _banshee_part_materials(skeletal_mesh, part, lod_index=0):
+    materials = []
+    seen = set()
+    for mesh in skeletal_mesh.meshes:
+        name = mesh.name.casefold()
+        matches = (
+            "head" in name
+            if part == "head"
+            else ("body" in name or "weakpoint" in name)
+        )
+        if not matches or len(mesh.lods) <= lod_index:
+            continue
+        object_name = (
+            mesh.lods[lod_index].blender_obj_name or f"{mesh.name}_LOD{lod_index}"
+        )
+        obj = bpy.data.objects.get(object_name)
+        if obj is None or obj.type != "MESH":
+            continue
+        for slot in obj.material_slots:
+            material = slot.material
+            if material is None or material.as_pointer() in seen:
+                continue
+            shader = os.path.basename(str(material.get("afop_shader", ""))).casefold()
+            if not shader.startswith("px_wildlife_skin"):
+                continue
+            seen.add(material.as_pointer())
+            materials.append(material)
+    return materials
+
+
+def _apply_detected_banshee_pattern(
+    skeletal_mesh, graph_data, preferred_archive, extracted_directory, source_path
+):
+    detected = mgraph.banshee_pattern_bindings(graph_data)
+    if not detected:
+        return 0
+    applied = 0
+    for part in ("body", "head"):
+        values = detected.get(part)
+        if not values:
+            continue
+        try:
+            color_entry = _banshee_uid_member_entry(
+                values["color_uid"], "color", preferred_archive
+            )
+            control_entry = _banshee_uid_member_entry(
+                values["control_uid"], "control", preferred_archive
+            )
+            coat_entry = banshee_pattern_member_entry(
+                values["coat"], preferred_archive, "coat"
+            )
+            if color_entry is None or control_entry is None or coat_entry is None:
+                raise LookupError("one or more referenced pattern assets were not indexed")
+            color = ColorPattern.loads(color_entry.archive.extract(color_entry.asset))
+            control = PatternControl.loads(
+                control_entry.archive.extract(control_entry.asset)
+            )
+            coat_path = values["coat"]
+            coat_disk_path = _extract_texture_to_cache(
+                coat_entry, extracted_directory
+            )
+            image = _load_image(coat_disk_path, coat_path, non_color=True)
+            colors = tuple(color.rgb(index) for index in range(10))
+            for material in _banshee_part_materials(skeletal_mesh, part):
+                if apply_banshee_pattern(
+                    material, image, colors, control, coat_path
+                ):
+                    material["afop_banshee_pattern"] = source_path
+                    material["afop_banshee_pattern_source"] = "graph UID references"
+                    applied += 1
+        except Exception as error:
+            logger.warning(
+                "Could not apply detected %s Banshee pattern from %s: %s",
+                part,
+                source_path,
+                error,
+            )
+    return applied
+
+
 def _shader_pins_for_sources(data, compound_sources, preferred_archive):
     """Read authored sampler and constant pin IDs for a source chain."""
     shader_paths = []
@@ -1328,6 +1569,44 @@ def _supplemental_material_bindings(
     return bindings
 
 
+def _complete_banshee_skin_bindings(bindings, preferred_archive):
+    """Recover layered Banshee N/M inputs from the selected diffuse family.
+
+    Character vanity graphs expose their chosen diffuse but can leave the
+    linked skin compound's normal and material samplers at flat defaults.  The
+    base Banshee graph confirms that those samplers use the matching sibling
+    textures.  Only accept siblings that are actually present in the SDF index.
+    """
+    for name, binding in bindings.items():
+        shader = os.path.basename(str(binding.get("shader", ""))).casefold()
+        part_tokens = _source_name_tokens(name)
+        if (
+            not shader.startswith("px_wildlife_skin")
+            or not part_tokens.intersection({"body", "head", "weakpoint"})
+        ):
+            continue
+        diffuse = str(binding.get("d") or "")
+        if not diffuse.casefold().endswith("_d.dds"):
+            continue
+        texture_stem = diffuse[:-6]
+        normal = str(binding.get("n") or "")
+        if (
+            not normal
+            or "/flat/" in normal.replace("\\", "/").casefold()
+            or os.path.basename(normal).casefold().startswith("sd_flat_normal")
+        ):
+            for suffix in ("_nr.dds", "_n.dds"):
+                candidate = texture_stem + suffix
+                if _texture_entry(candidate, preferred_archive) is not None:
+                    binding["n"] = candidate
+                    break
+        if not binding.get("m"):
+            candidate = texture_stem + "_m.dds"
+            if _texture_entry(candidate, preferred_archive) is not None:
+                binding["m"] = candidate
+    return bindings
+
+
 def _material_parent_graph_for_compound(entry, compound_entry):
     """Return the best MMB-related graph that instantiates a compound."""
     compound_key = compound_entry.asset.name.replace("\\", "/").lstrip("/").casefold()
@@ -1455,6 +1734,10 @@ def _import_materials_for_entry(
             bindings,
             primary_material_names=primary_material_names,
         )
+        if mgraph.banshee_pattern_bindings(binding_data):
+            bindings = _complete_banshee_skin_bindings(
+                bindings, binding_archive
+            )
     if not bindings:
         raise LookupError(f"{source_entry.asset.name} contains no usable material textures")
 
@@ -1496,6 +1779,32 @@ def _import_materials_for_entry(
         source_entry.asset.name,
         lod_index=0,
     )
+    is_banshee = (
+        "banshee" in source_entry.asset.name.casefold()
+        or any("banshee" in mesh.name.casefold() for mesh in skeletal_mesh.meshes)
+    )
+    detected_patterns = (
+        _apply_detected_banshee_pattern(
+            skeletal_mesh,
+            binding_data,
+            binding_archive,
+            extracted_directory,
+            source_entry.asset.name,
+        )
+        if is_banshee else 0
+    )
+    if detected_patterns:
+        logger.info(
+            "Applied graph-referenced Banshee pattern to %s material(s) from %s",
+            detected_patterns,
+            source_entry.asset.name,
+        )
+        scene_settings = getattr(bpy.context.scene, "SWOMT", None)
+        if scene_settings is not None:
+            scene_settings.banshee_pattern_status = (
+                f"Applied the pattern detected in "
+                f"{os.path.basename(source_entry.asset.name)}."
+            )
     return assigned, len(texture_files), missing, failed, source_entry.asset.name
 
 

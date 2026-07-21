@@ -152,6 +152,7 @@ def _resolve_asset_name(new_path, old_asset):
 def _auto_load_mmb(self, context):
     path = bpy.path.abspath(self.AssetPath) if self.AssetPath else ""
     old_asset = addon_state.asset
+    self["banshee_pattern_status"] = ""
 
     # Clear the parsed asset immediately so editing the path cannot leave the
     # import/export controls for the previously loaded MMB active.
@@ -363,6 +364,11 @@ def _set_export_path(self, value):
     self["ExportPath"] = value
 
 
+def _banshee_pattern_items(self, context):
+    from .operators.patterns import pattern_enum_items
+    return pattern_enum_items(self, context)
+
+
 class SWOMTSettings(bpy.types.PropertyGroup):
     AssetPath: bpy.props.StringProperty(name="Asset Path", update=_auto_load_mmb)
     ExportPath: bpy.props.StringProperty(
@@ -470,6 +476,15 @@ class SWOMTSettings(bpy.types.PropertyGroup):
             "to imported LOD0 render meshes; CLOTH_SIM meshes are excluded"
         ),
         default=False,
+    )
+    banshee_pattern: bpy.props.EnumProperty(
+        name="Pattern",
+        description="Choose a Banshee colour pattern from the loaded game assets",
+        items=_banshee_pattern_items,
+        options={'SKIP_SAVE'},
+    )
+    banshee_pattern_status: bpy.props.StringProperty(
+        options={'HIDDEN', 'SKIP_SAVE'},
     )
     overwrite_existing: bpy.props.BoolProperty(
         name="Overwrite existing file",

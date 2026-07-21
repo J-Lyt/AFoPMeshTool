@@ -26,35 +26,43 @@ Based on the work by [AlexP0](https://github.com/AlexP0) for [SWOutlawsMeshTool]
 
 Exports are written as `*_MOD.mmb` by default, with a paired `.mcloth` when one
 exists. Enable **Overwrite existing file** only when you intend to replace the
-selected output.
+imported `.mmb` file.
 
 ## Loading assets from the game files
 
 The add-on can search and extract assets directly from the game's SDF archives.
-Default game and extraction folders can be saved in the add-on preferences.
+Default game and extraction folders can be set in the add-on preferences.
 
 1. Expand **Load from Game Files**.
-2. Select the AFoP game folder containing the `.sdftoc` and `.sdfdata` files.
+2. Select the AFoP game root folder. e.g. `"...\Ubisoft\AFOP"`
 3. Wait for the archive index to load.
 4. Choose which asset types to search. **MMB** is enabled by default;
    **MGraph** and **MCompoundNode** are optional.
-5. Choose which archives to include. **Rogue**, **DLC1**, **DLC2**, and
+5. Choose which archives are include when searching. **Rogue**, **DLC1**, **DLC2**, and
    **DLC3** are all enabled by default.
 6. Search for and select an asset, then load or import it.
 
-Broad searches initially show up to 500 matches. Use **Show All** beside the
-result notice to display every match for the current search.
+Broad searches initially show up to 500 matches. Use the **Show All** button beside the
+notice to display every match for the current search.
 
-Selecting an MGraph or MCompoundNode imports its referenced MMB files. 
+Selecting an MGraph or MCompoundNode will import its referenced MMB files. 
 
 Enable **Import Materials and Textures** to extract the associated textures and build
-Blender materials. When several material sources are available, the importer
+Blender materials. When several material sources are available (MGraphs/MCompoundNode), the importer
 allows the source to be selected.
+
+When a Banshee MMB is loaded, a **Banshee Pattern** menu is shown. Select
+one of the color patterns and click **Apply Pattern** to update the imported 
+body, head, and body-linked weakpoint materials. Use **Remove Pattern** to restore 
+their originally imported pattern settings.
+
+When a selected MGraph directly references Banshee colour and control files,
+that pattern is applied automatically during import.
 
 ## Extracted files and archive cache
 
 Extracted `.mmb`, `.mcloth`, and `.dds` files are stored under **Extracted
-Files**. Archive indices are cached and reused automatically. Reload the SDF
+Files**. The archive index is cached and reused automatically. Reload the SDF
 archives after clearing the cache or changing the installed game data.
 
 Reading the archives requires an Oodle runtime. The add-on uses a compatible

@@ -4,6 +4,7 @@ import bpy
 
 from . import addon_state, bl_info, updater
 from .operators import sdf as operators_sdf
+from .operators import patterns as operators_patterns
 from .settings import _vert_count_changed
 
 
@@ -210,6 +211,30 @@ class SWOMTPanel(bpy.types.Panel):
         if addon_state.asset:
             row.label(text=addon_state.asset.name)
             row.operator("object.rename_mmb_file", text="", icon="GREASEPENCIL")
+            if operators_patterns.is_banshee_asset(addon_state.asset):
+                pattern_box = layout.box()
+                pattern_box.label(text="Banshee Pattern", icon="COLOR")
+                pattern_box.prop(SWOMT, "banshee_pattern", text="")
+                action_row = pattern_box.row(align=True)
+                apply_button = action_row.row(align=True)
+                apply_button.enabled = (
+                    SWOMT.banshee_pattern != operators_patterns._EMPTY_PATTERN
+                    and operators_sdf.get_ui_status()["phase"] == "ready"
+                )
+                apply_button.operator(
+                    "object.apply_banshee_pattern",
+                    text="Apply Pattern",
+                    icon="CHECKMARK",
+                )
+                remove_button = action_row.row(align=True)
+                remove_button.enabled = operators_patterns.has_applied_pattern()
+                remove_button.operator(
+                    "object.remove_banshee_pattern",
+                    text="Remove Pattern",
+                    icon="REMOVE",
+                )
+                if SWOMT.banshee_pattern_status:
+                    pattern_box.label(text=SWOMT.banshee_pattern_status, icon="INFO")
             layout.separator()
             layout.label(text="Import", icon='IMPORT')
             imp_row = layout.row(align=True)
