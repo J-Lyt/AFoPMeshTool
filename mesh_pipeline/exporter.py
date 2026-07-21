@@ -1645,10 +1645,11 @@ class BlenderMeshExporter:
                             offset = element['offset']
                             row[offset:offset + len(packed_weights)] = (
                                 packed_weights)
-                elif source_index is None:
+                else:
                     raise ValueError(
-                        f"'{mesh.name}' vertex {vertex_index} has no usable bone "
-                        "weights or source row")
+                        f"'{mesh.name}' LOD{lod_index} has vertices with no bone "
+                        "weights. Assign bone weights to all vertices before "
+                        "exporting.")
 
             file.write(row)
 
