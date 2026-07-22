@@ -583,8 +583,8 @@ class SkeletalMeshAsset(Asset):
             self.name_length = 0        # original byte count of the name field (from the uint16 prefix)
             self.mesh_bounds_offset = 0 # 48-byte AABB/radius block after the mesh name
             self.pending_rename_new = ""  # staged mesh rename — applied to _MOD copy on next export
-            self.zeroed_out_in_session = False # True if mesh was zeroed out this session
-            self.zeroed_out_in_mmb = False     # True if mesh was zeroed out in the mmb
+            self.removed_in_session = False # True if the mesh was made faceless this session
+            self.removed_in_mmb = False     # True if the MMB already has no live faces
             self.lod_count = 0
             self.lod_info_type = 0
             self.lods = []

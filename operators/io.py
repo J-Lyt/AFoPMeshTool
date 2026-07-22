@@ -353,6 +353,25 @@ class ExportAllLODs(bpy.types.Operator):
                 if export_data != orig_data:
                     bpy.data.meshes.remove(export_data)
 
+        # A pending removal deliberately has no Blender object. Still create a
+        # mod copy so the header patch below can make it faceless even when the
+        # asset contains no other imported meshes.
+        if not exported_any:
+            removed = {
+                mesh.index: -1 for mesh in addon_state.asset.meshes
+                if mesh.removed_in_session
+            }
+            if removed:
+                try:
+                    BME._write_mod_file(
+                        edited_lod_index_per_mesh=removed,
+                        out_path=mod_file)
+                    exported_any = True
+                    exported_mesh_indices.update(removed)
+                except Exception as e:
+                    self.report({'ERROR'}, f"Mesh removal export failed: {e}")
+                    return {'CANCELLED'}
+
         if not exported_any:
             self.report({'WARNING'}, "No LOD objects found in scene to export.")
             return {'CANCELLED'}

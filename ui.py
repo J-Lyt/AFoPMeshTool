@@ -308,18 +308,18 @@ class SWOMTPanel(bpy.types.Panel):
                 rename_op = name_row.operator("object.rename_mesh", text="", icon="GREASEPENCIL")
                 rename_op.mesh_index = mi
                 remove_row = name_row.row()
-                remove_row.enabled = not (m.zeroed_out_in_session or m.zeroed_out_in_mmb)
+                remove_row.enabled = not (m.removed_in_session or m.removed_in_mmb)
                 remove_op = remove_row.operator("object.remove_mesh", text="", icon="X")
                 remove_op.mesh_index = mi
                 revert_row = name_row.row()
-                revert_row.enabled = m.zeroed_out_in_session
+                revert_row.enabled = m.removed_in_session
                 revert_op = revert_row.operator("object.revert_mesh", text="", icon="LOOP_BACK")
                 revert_op.mesh_index = mi
                 if expanded:
                     for li,l in enumerate(m.lods):
                         row = mesh_box.row()
                         icon = "CON_SIZELIKE"
-                        if m.zeroed_out_in_session or m.zeroed_out_in_mmb:
+                        if m.removed_in_session or m.removed_in_mmb:
                             icon = "STRIP_COLOR_01"
                         row.label(text=f"LOD{li} - {l.vertex_count}", icon=icon)
                         lod_import_button = row.operator("object.import_lod")
@@ -327,7 +327,9 @@ class SWOMTPanel(bpy.types.Panel):
                         lod_import_button.mesh_index = mi
                         obj_name = l.blender_obj_name if l.blender_obj_name else f"{m.name}_LOD{li}"
                         lod_export_row = row.row()
-                        lod_export_row.enabled = bpy.data.objects.get(obj_name) is not None
+                        lod_export_row.enabled = (
+                            bpy.data.objects.get(obj_name) is not None
+                            or m.removed_in_session)
                         lod_export_button = lod_export_row.operator("object.export_lod")
                         lod_export_button.lod_index = li
                         lod_export_button.mesh_index = mi

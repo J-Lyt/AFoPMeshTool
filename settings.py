@@ -119,7 +119,7 @@ def _on_load_post(filepath, *args, **kwargs):
                     else:
                         sk_mesh.name = full_stem
                     addon_state.asset = sk_mesh
-                _check_vert_pos_mmb(sk_mesh, path)
+                _check_removed_meshes_mmb(sk_mesh, path)
                 logger.info("Loaded %s from %s", sk_mesh.name, path)
             except Exception as e:
                 logger.warning("Failed to load %s: %s", path, e)
@@ -168,7 +168,7 @@ def _auto_load_mmb(self, context):
             sk_mesh.parse(file)
             sk_mesh.name = new_name
             addon_state.asset = sk_mesh
-        _check_vert_pos_mmb(sk_mesh, path)
+        _check_removed_meshes_mmb(sk_mesh, path)
     except Exception as e:
         logger.warning("MMB auto-load failed: %s", e)
     finally:
@@ -193,10 +193,10 @@ def _vert_count_changed():
                 return True
     return False
 
-def _check_vert_pos_mmb(sk_mesh, path: str):
+def _check_removed_meshes_mmb(sk_mesh, path: str):
     """
-    Read LOD0 vertex positions for each mesh directly from the MMB file. (We assume that LODs 1-3 are zeroed)
-    If all positions for LOD0 are zero, zeroed_out_in_mmb = True
+    Mark meshes whose LODs are already faceless. Legacy exports that removed a
+    mesh by zeroing every LOD0 position are still recognised as removed.
     """
     try:
         merged = get_merged_mmb(path)
@@ -206,6 +206,10 @@ def _check_vert_pos_mmb(sk_mesh, path: str):
 
     for mesh in sk_mesh.meshes:
         if not mesh.lods:
+            continue
+        populated_lods = [lod for lod in mesh.lods if lod.vertex_count > 0]
+        if populated_lods and all(lod.index_count == 0 for lod in populated_lods):
+            mesh.removed_in_mmb = True
             continue
         lod = mesh.lods[0]
         if lod.vertex_count == 0:
@@ -221,7 +225,7 @@ def _check_vert_pos_mmb(sk_mesh, path: str):
             logger.warning("Could not inspect vertex positions for %s: %s", mesh.name, e)
             continue
 
-        mesh.zeroed_out_in_mmb = is_zeroed
+        mesh.removed_in_mmb = is_zeroed
 
 def _on_compute_normals_on_export_update(self, context):
     """Auto-enable export_normals when compute_normals_on_export is checked."""

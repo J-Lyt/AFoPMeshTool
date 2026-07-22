@@ -322,6 +322,75 @@ def _regenerate_meshlet_data(file_data, lod_keys):
     return bytearray(rebuilt)
 
 
+def _orphan_mesh_faces_data(file_data, mesh_index):
+    """Make every LOD of one mesh faceless without changing its vertex slots.
+
+    Primary index bytes remain in their original blocks as inert trailer data;
+    only the live index counts and aggregate typed-payload totals are cleared.
+    Any secondary meshlet sections are removed so no duplicate geometry remains
+    drawable through that path.
+    """
+    source = bytes(file_data)
+    parsed = SkeletalMeshAsset()
+    parsed.parse(io.BytesIO(source))
+    if not 0 <= mesh_index < len(parsed.meshes):
+        raise ValueError(f"mesh removal has invalid mesh index {mesh_index}")
+
+    mesh = parsed.meshes[mesh_index]
+    out = bytearray(source)
+    removed_indices = 0
+    removed_index_bytes = 0
+    for lod in mesh.lods:
+        removed_indices += lod.index_count
+        width = lod.index_width_bytes
+        if width not in (2, 4):
+            width = 4 if mesh.index_width_flag == 1 else 2
+        removed_index_bytes += lod.index_count * width
+        so = lod.start_offset
+        fo = lod.lod_field_offset
+        out[so + fo + 4:so + fo + 8] = pack('<I', 0)
+
+    if removed_indices:
+        _patch_mesh_tail_delta(
+            out, mesh,
+            index_delta=-removed_indices,
+            data_delta=-removed_index_bytes)
+
+    if mesh.lod_info_type == 2:
+        empty = {
+            'section': b'',
+            'meshlet_count': 0,
+            'duplicated_vertex_count': 0,
+            'triangle_count': 0,
+            'vertex_stride': 0,
+            'normal_stride': 0,
+        }
+        regenerated = {}
+        for lod in mesh.lods:
+            descriptor_offset = lod.start_offset + lod.lod_field_offset + 36
+            fields = unpack(
+                '<7I', source[descriptor_offset:descriptor_offset + 28])
+            if fields[6] > 0:
+                regenerated[(mesh_index, lod.index)] = empty
+        if regenerated:
+            out = bytearray(meshlet_codec.rebuild_region(
+                bytes(out), parsed, regenerated))
+
+    validated = SkeletalMeshAsset()
+    validated.parse(io.BytesIO(bytes(out)))
+    removed_mesh = validated.meshes[mesh_index]
+    if any(lod.index_count != 0 for lod in removed_mesh.lods):
+        raise ValueError(f"'{mesh.name}' face removal failed validation")
+    if removed_mesh.lod_info_type == 2:
+        meshlet_codec.validate_region(bytes(out), validated)
+        for lod in removed_mesh.lods:
+            descriptor_offset = lod.start_offset + lod.lod_field_offset + 36
+            if unpack('<7I', out[descriptor_offset:descriptor_offset + 28])[6] != 0:
+                raise ValueError(
+                    f"'{mesh.name}' LOD{lod.index} retained meshlet geometry")
+    return bytes(out), validated
+
+
 class BlenderMeshExporter:
     _compute_normals_for_object = staticmethod(compute_normals_for_object)
     find_object_by_name = staticmethod(find_object_by_name)
@@ -627,7 +696,7 @@ class BlenderMeshExporter:
             if obj is None:
                 continue
             if len(obj.data.vertices) == 0:
-                continue  # zero-vert mesh - auto-zero section will zero positions in file_data
+                continue  # no exportable geometry; staged removal is applied later
 
             new_vert_count  = len(obj.data.vertices)
             new_index_count = len(obj.data.polygons) * 3
@@ -1214,7 +1283,7 @@ class BlenderMeshExporter:
     def _apply_header_patches(file_path: str, mesh, skeletal_mesh: SkeletalMeshAsset, operator=None):
         """
         Apply all staged header-level patches to an already-written mod file:
-        bone remaps, bone additions, mesh rename, and zero-out.
+        bone remaps, bone additions, mesh rename, and mesh removal.
         """
         # --- Bone remaps ---
         if mesh.pending_bone_remaps:
@@ -1293,14 +1362,25 @@ class BlenderMeshExporter:
             mesh.bone_table_end_offset = insert_at + inserted_bytes
             mesh.pending_bone_additions = []
 
-        # Zero out all LODs
-        if mesh.zeroed_out_in_session:
-            with open(file_path, 'rb+') as f:
-                for lod in mesh.lods:
-                    for v in range(lod.vertex_count):
-                        f.seek(lod.data_offset + v * mesh.vertex_stride)
-                        lod.write_vertex_position(
-                            f, pos=(0.0, 0.0, 0.0), scale=1)
+        # Remove every live face while retaining the original vertex and normal
+        # rows as inert slots, matching the cloth render orphan layout.
+        if mesh.removed_in_session:
+            with open(file_path, 'rb') as f:
+                file_data = f.read()
+            file_data, parsed = _orphan_mesh_faces_data(
+                file_data, mesh.index)
+            temporary_path = file_path + '.remove_tmp'
+            try:
+                with open(temporary_path, 'wb') as f:
+                    f.write(file_data)
+                os.replace(temporary_path, file_path)
+            finally:
+                try:
+                    if os.path.exists(temporary_path):
+                        os.remove(temporary_path)
+                except OSError:
+                    pass
+            _sync_asset_layout(parsed)
 
         # Mesh name rename
         if mesh.pending_rename_new:

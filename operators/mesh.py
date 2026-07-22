@@ -184,7 +184,7 @@ class GenerateLODs(bpy.types.Operator):
         return {'FINISHED'}
 
 class RemoveMesh(bpy.types.Operator):
-    """Zero out all vertex positions for all LODs of this mesh."""
+    """Remove every face while preserving the original vertex slots."""
     bl_idname = "object.remove_mesh"
     bl_label = "Remove Mesh"
 
@@ -196,7 +196,7 @@ class RemoveMesh(bpy.types.Operator):
 
     def execute(self, context):
         mesh = addon_state.asset.meshes[self.mesh_index]
-        mesh.zeroed_out_in_session = True
+        mesh.removed_in_session = True
 
         # Remove any already-imported Blender objects in the viewport
         for li, lod in enumerate(mesh.lods):
@@ -205,11 +205,14 @@ class RemoveMesh(bpy.types.Operator):
             if obj is not None:
                 bpy.data.objects.remove(obj, do_unlink=True)
 
-        self.report({'INFO'}, f"'{mesh.name}' ({len(mesh.lods)} LOD(s)) will have their vertex positions zeroed out on Export.")
+        self.report(
+            {'INFO'},
+            f"'{mesh.name}' ({len(mesh.lods)} LOD(s)) will be exported "
+            "without faces; its original vertex slots will be preserved.")
         return {'FINISHED'}
 
 class RevertMesh(bpy.types.Operator):
-    """Revert vertex positions for all LODs of this mesh."""
+    """Cancel a pending face removal for all LODs of this mesh."""
     bl_idname = "object.revert_mesh"
     bl_label = "Revert Mesh"
 
@@ -222,8 +225,8 @@ class RevertMesh(bpy.types.Operator):
     def execute(self, context):
         mesh = addon_state.asset.meshes[self.mesh_index]
 
-        if not mesh.zeroed_out_in_session:
-            self.report({'WARNING'}, "Mesh was not zeroed out in this session.")
+        if not mesh.removed_in_session:
+            self.report({'WARNING'}, "Mesh was not removed in this session.")
             return {'CANCELLED'}
 
         # Remove any already-imported Blender objects in the viewport
@@ -233,8 +236,10 @@ class RevertMesh(bpy.types.Operator):
             if obj is not None:
                 bpy.data.objects.remove(obj, do_unlink=True)
 
-        mesh.zeroed_out_in_session = False
-        self.report({'INFO'}, f"Reverted '{mesh.name}' ({len(mesh.lods)} LOD(s)) to original positions.")
+        mesh.removed_in_session = False
+        self.report(
+            {'INFO'},
+            f"Cancelled removal of '{mesh.name}' ({len(mesh.lods)} LOD(s)).")
         return {'FINISHED'}
 
 def _scale_uvs_uv_items(self, context):
