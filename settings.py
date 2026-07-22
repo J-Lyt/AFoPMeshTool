@@ -471,8 +471,8 @@ class SWOMTSettings(bpy.types.PropertyGroup):
     )
     sdf_import_materials: bpy.props.BoolProperty(
         name="Import Materials and Textures",
-        default=False,
         description="Extract referenced textures, and assign Blender materials to imported meshes",
+        default=True,
     )
     banshee_pattern: bpy.props.EnumProperty(
         name="Pattern",

@@ -33,6 +33,13 @@ class SWOMTPanel(bpy.types.Panel):
     bl_region_type = "WINDOW"
     bl_context = "scene"
 
+    def draw_header_preset(self, _context):
+        self.layout.operator(
+            "object.check_for_updates",
+            text="",
+            icon="FILE_REFRESH",
+        )
+        self.layout.separator(factor=0.5)
 
     def draw(self,context):
         SWOMT = context.scene.SWOMT
@@ -40,33 +47,39 @@ class SWOMTPanel(bpy.types.Panel):
         layout = self.layout
 
         # Update status bar
-        if updater._update_status is None and updater._update_error is None:
-            row = layout.row()
-            row.operator("object.check_for_updates", text="Check for Updates", icon="FILE_REFRESH")
-        elif updater._update_error:
-            row = layout.row()
-            row.label(text=f"Update check failed", icon="ERROR")
-            row.operator("object.check_for_updates", text="Retry", icon="FILE_REFRESH")
-        elif updater._update_status == "up_to_date":
-            row = layout.row()
+        show_up_to_date = (
+            updater._update_status == "up_to_date"
+            and updater._update_check_was_manual
+        )
+        update_available = updater._update_status not in (None, "up_to_date")
+        if updater._update_error:
+            row = layout.row(align=True)
+            row.alignment = "LEFT"
+            row.label(text="Update check failed", icon="ERROR")
+            row.operator("object.dismiss_update_status", text="", icon="X")
+        elif show_up_to_date:
+            row = layout.row(align=True)
+            row.alignment = "LEFT"
             row.label(text="Tool is up to date", icon="CHECKMARK")
-            row.operator("object.check_for_updates", text="", icon="FILE_REFRESH")
-        else:
+            row.operator("object.dismiss_update_status", text="", icon="X")
+        elif update_available:
             # update available
             box = layout.box()
             box.label(text=f"Update available: {updater._update_status}", icon="INFO")
             row = box.row()
             row.operator("object.apply_update", text="Update Now", icon="IMPORT")
-            row.operator("object.check_for_updates", text="", icon="FILE_REFRESH")
 
-        layout.separator()
+        if updater._update_error or show_up_to_date or update_available:
+            layout.separator()
         row = layout.row(align=True)
-        row.prop(SWOMT, "AssetPath", text="Asset Path")
+        row.prop(SWOMT, "AssetPath", text="MMB File")
         row.operator("object.browse_mmb_file", text="", icon="FILE_FOLDER")
         export_path_row = layout.row(align=True)
-        export_path_row.prop(SWOMT, "ExportPath", text="Export Path")
+        export_path_row.prop(SWOMT, "ExportPath", text="Export Folder")
         export_path_row.operator("object.browse_export_directory", text="", icon="FILE_FOLDER")
-        layout.prop(SWOMT, "overwrite_existing")
+        overwrite_row = layout.row(align=True)
+        overwrite_row.alignment = "LEFT"
+        overwrite_row.prop(SWOMT, "overwrite_existing")
 
         sdf_box = layout.box()
         header = sdf_box.row()
@@ -174,12 +187,6 @@ class SWOMTPanel(bpy.types.Panel):
                         selected_item is not None
                         and selected_item.asset_type == operators_sdf._ASSET_MMB
                     )
-                    load_button = action_row.row(align=True)
-                    load_button.enabled = selected_is_mmb
-                    load_op = load_button.operator(
-                        "object.import_sdf_mmb", text="Load Selected"
-                    )
-                    load_op.import_lod0 = False
                     import_label = (
                         "Import Selected"
                         if selected_is_mmb
@@ -189,15 +196,15 @@ class SWOMTPanel(bpy.types.Panel):
                         "object.import_sdf_mmb", text=import_label, icon="IMPORT"
                     )
                     import_op.import_lod0 = True
-                    option_split = action_column.split(factor=0.5)
-                    option_split.column()
-                    option_column = option_split.column()
-                    option_column.prop(SWOMT, "sdf_load_as_asset", text="Load as Asset")
-                    action_column.prop(
-                        SWOMT,
-                        "sdf_import_materials",
-                        text="Import Materials and Textures",
+                    action_column.prop(SWOMT, "sdf_load_as_asset", text="Load as Asset")
+                    action_column.prop(SWOMT, "sdf_import_materials", text="Import Materials and Textures",
                     )
+                    load_button = action_row.row(align=True)
+                    load_button.enabled = selected_is_mmb
+                    load_op = load_button.operator(
+                        "object.import_sdf_mmb", text="Load Selected"
+                    )
+                    load_op.import_lod0 = False
             else:
                 sdf_box.label(text=status["status"], icon="INFO")
 

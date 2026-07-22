@@ -53,6 +53,7 @@ UPDATE_FILES = CODE_FILES
 
 _update_status = None
 _update_error = None
+_update_check_was_manual = False
 
 
 def _plugin_dir():
@@ -99,7 +100,9 @@ def _check_update_thread():
                       if remote > local else "up_to_date")
 
 
-def start_update_check():
+def start_update_check(*, manual=False):
+    global _update_check_was_manual
+    _update_check_was_manual = manual
     threading.Thread(target=_check_update_thread, daemon=True).start()
 
 
@@ -167,8 +170,22 @@ class CheckForUpdates(bpy.types.Operator):
         global _update_status, _update_error
         _update_status = None
         _update_error = None
-        start_update_check()
+        start_update_check(manual=True)
         self.report({"INFO"}, "Checking for updates...")
+        return {"FINISHED"}
+
+
+class DismissUpdateStatus(bpy.types.Operator):
+    """Dismiss the current update-check status."""
+
+    bl_idname = "object.dismiss_update_status"
+    bl_label = "Dismiss Update Status"
+
+    def execute(self, context):
+        global _update_status, _update_error, _update_check_was_manual
+        _update_status = None
+        _update_error = None
+        _update_check_was_manual = False
         return {"FINISHED"}
 
 
@@ -197,4 +214,4 @@ class ApplyUpdate(bpy.types.Operator):
         return {"FINISHED"}
 
 
-CLASSES = (CheckForUpdates, ApplyUpdate)
+CLASSES = (CheckForUpdates, DismissUpdateStatus, ApplyUpdate)
