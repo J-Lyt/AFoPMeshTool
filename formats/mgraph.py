@@ -793,6 +793,191 @@ def _forwarded_compound_role_textures(
     return result
 
 
+def _compound_input_default_values(node):
+    """Return authored defaults for one decoded CompoundInputs node."""
+    defaults = node.get("defaults") if isinstance(node, dict) else None
+    if not isinstance(defaults, dict):
+        return {}
+    result = {}
+
+    def visit(value):
+        if isinstance(value, dict):
+            nodes = value.get("nodesById")
+            connections = value.get("connectionsById")
+            if isinstance(nodes, dict) and isinstance(connections, (dict, list)):
+                connection_values = (
+                    list(connections.values()) if isinstance(connections, dict)
+                    else connections
+                )
+                default_nodes = {
+                    node_id
+                    for node_id, candidate in nodes.items()
+                    if isinstance(candidate, dict)
+                    and candidate.get("type") == "internal:CompoundDefaults"
+                }
+                for connection in connection_values:
+                    if not (
+                        isinstance(connection, list)
+                        and len(connection) == 4
+                        and connection[2] in default_nodes
+                    ):
+                        continue
+                    source = nodes.get(connection[0])
+                    if (
+                        isinstance(source, dict)
+                        and source.get("type") == "native:Constant"
+                    ):
+                        result.setdefault(connection[3], source.get("value"))
+            for item in value.values():
+                visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    visit(defaults)
+    return result
+
+
+def _compound_instance_constant_inputs(data):
+    """Return authored constants connected to exposed compound-instance pins."""
+    try:
+        tree = _bv2_plain(_Bv2Decoder(data).root())
+    except (IndexError, KeyError, TypeError, ValueError):
+        return {}
+    result = {}
+
+    def visit(value):
+        if isinstance(value, dict):
+            nodes = value.get("nodesById")
+            connections = value.get("connectionsById")
+            if isinstance(nodes, dict) and isinstance(connections, (dict, list)):
+                connection_values = (
+                    list(connections.values()) if isinstance(connections, dict)
+                    else connections
+                )
+                for node_id, node in nodes.items():
+                    if (
+                        not isinstance(node, dict)
+                        or node.get("type") != "internal:Compound"
+                    ):
+                        continue
+                    filename = node.get("filename")
+                    if not isinstance(filename, str):
+                        continue
+                    key = filename.replace("\\", "/").lstrip("/").casefold()
+                    pins = result.setdefault(key, {})
+                    for connection in connection_values:
+                        if not (
+                            isinstance(connection, list)
+                            and len(connection) == 4
+                            and connection[2] == node_id
+                        ):
+                            continue
+                        source = nodes.get(connection[0])
+                        if (
+                            isinstance(source, dict)
+                            and source.get("type") == "native:Constant"
+                        ):
+                            pins.setdefault(connection[3], source.get("value"))
+            for item in value.values():
+                visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    visit(tree)
+    return result
+
+
+def _forwarded_compound_parameters(
+    data, compound_sources, shader_parameter_pins=None,
+):
+    """Resolve parent graph constants through a compound material interface."""
+    instance_inputs = _compound_instance_constant_inputs(data)
+    if not instance_inputs or not shader_parameter_pins:
+        return {}
+    result = {}
+
+    for logical_path, compound_data in (compound_sources or {}).items():
+        key = logical_path.replace("\\", "/").lstrip("/").casefold()
+        forwarded = instance_inputs.get(key)
+        if not forwarded:
+            continue
+        try:
+            tree = _bv2_plain(_Bv2Decoder(compound_data).root())
+        except (IndexError, KeyError, TypeError, ValueError):
+            continue
+
+        def visit(value):
+            if isinstance(value, dict):
+                nodes = value.get("nodesById")
+                connections = value.get("connectionsById")
+                if isinstance(nodes, dict) and isinstance(
+                    connections, (dict, list)
+                ):
+                    connection_values = (
+                        list(connections.values())
+                        if isinstance(connections, dict)
+                        else connections
+                    )
+                    for node_id, node in nodes.items():
+                        if not isinstance(node, dict):
+                            continue
+                        mesh_name = node.get("MeshName")
+                        shader = node.get("ShaderFile")
+                        if not (
+                            isinstance(mesh_name, str)
+                            and isinstance(shader, str)
+                        ):
+                            continue
+                        shader_key = (
+                            shader.replace("\\", "/").lstrip("/").casefold()
+                        )
+                        shader_name = os.path.basename(shader_key)
+                        pin_fields = shader_parameter_pins.get(shader_key)
+                        if pin_fields is None:
+                            pin_fields = shader_parameter_pins.get(shader_name)
+                        if not pin_fields:
+                            continue
+                        parameters = {}
+                        for connection in connection_values:
+                            if not (
+                                isinstance(connection, list)
+                                and len(connection) == 4
+                                and connection[2] == node_id
+                                and connection[3] - 10000 in pin_fields
+                            ):
+                                continue
+                            source = nodes.get(connection[0])
+                            if (
+                                not isinstance(source, dict)
+                                or source.get("type")
+                                != "internal:CompoundInputs"
+                            ):
+                                continue
+                            if connection[1] not in forwarded:
+                                continue
+                            field = pin_fields[connection[3] - 10000]
+                            parameters[field] = forwarded[connection[1]]
+                        if parameters:
+                            keys = {
+                                mesh_name.casefold(),
+                                mesh_name.rsplit("-", 1)[-1].casefold(),
+                            }
+                            for material_key in keys:
+                                result.setdefault(material_key, {}).update(
+                                    parameters
+                                )
+                for item in value.values():
+                    visit(item)
+            elif isinstance(value, list):
+                for item in value:
+                    visit(item)
+
+        visit(tree)
+    return result
+
+
 def _connected_material_parameters(data, shader_parameter_pins=None):
     """Return authored native constants using dynamically parsed shader pins."""
     if not shader_parameter_pins:
@@ -836,13 +1021,20 @@ def _connected_material_parameters(data, shader_parameter_pins=None):
                         ):
                             continue
                         source = nodes.get(connection[0])
-                        if not (
-                            isinstance(source, dict)
-                            and source.get("type") == "native:Constant"
-                        ):
+                        if not isinstance(source, dict):
+                            continue
+                        if source.get("type") == "native:Constant":
+                            parameter_value = source.get("value")
+                        elif source.get("type") == "internal:CompoundInputs":
+                            parameter_value = _compound_input_default_values(
+                                source
+                            ).get(connection[1])
+                            if parameter_value is None:
+                                continue
+                        else:
                             continue
                         field = pin_fields[connection[3] - 10000]
-                        parameters.setdefault(field, source.get("value"))
+                        parameters.setdefault(field, parameter_value)
                     if parameters:
                         keys = {
                             mesh_name.casefold(),
@@ -1437,7 +1629,7 @@ def _apply_wildlife_part_aliases(names, bindings):
     skin_sources = []
     for index, name in enumerate(names):
         key = name.casefold()
-        if key.endswith(("_weakpoint", "_armor")):
+        if key.endswith("_armor") or "_weakpoint" in key:
             continue
         binding = bindings.get(name)
         shader_name = os.path.basename((binding or {}).get("shader", "")).casefold()
@@ -1454,10 +1646,13 @@ def _apply_wildlife_part_aliases(names, bindings):
             if source is not None:
                 bindings[target_name] = dict(source[1])
             continue
-        if not target_key.endswith("_weakpoint"):
+        if "_weakpoint" not in target_key:
             continue
 
-        base_key = target_key[:-10]
+        if target_key.endswith("_weakpoint"):
+            base_key = target_key[:-10]
+        else:
+            base_key = target_key.split("_weakpoint", 1)[0].rstrip("_")
         source = source_by_key.get(base_key)
         if source is None:
             target_tokens = _tokens(base_key)
@@ -1562,6 +1757,10 @@ def material_bindings(
         data, compound_sources, shader_role_pins
     ).items():
         connected_role_textures.setdefault(name, {}).update(roles)
+    for name, parameters in _forwarded_compound_parameters(
+        data, compound_sources, shader_parameter_pins
+    ).items():
+        connected_parameters.setdefault(name, {}).update(parameters)
     emissive_parameters = (
         _emissive_parameters(data)
         if any(
@@ -2015,6 +2214,16 @@ def material_bindings(
             "aux": auxiliary,
             "parameters": authored_parameters,
         }
+        if (
+            name.casefold() == "hammerhead_body2"
+            and diffuse
+            and os.path.basename(diffuse).casefold()
+            == "wildlife_hammerhead_01_head_d.dds"
+        ):
+            # The head color texture's alpha is not a translucent surface
+            # mask for this body section. Blender's default Straight handling
+            # makes otherwise solid patches disappear.
+            binding["diffuse_alpha_mode"] = "NONE"
         if _is_wildlife_bio_shader(shader):
             bio = wildlife_bio_parameters.get(name.casefold())
             if bio is None and name.casefold().endswith("_part"):

@@ -76,6 +76,8 @@ def _material_profile_registry_case():
         "px_character_navi_face.mshader": {"navi_skin", "navi_face"},
         "px_hair2_3color_tousle.mshader": {"hair"},
         "px_wildlife_skin.mshader": {"wildlife_skin"},
+        "px_wildlife_fur.mshader": {"wildlife_fur"},
+        "px_glass_simple.mshader": {"glass_simple"},
         "px_dlc3_medusa_skin.mshader": {"medusa_skin"},
         "px_basic_rustymetal_static.mshader": {"rusty_metal"},
         "px_character_gear_vhq.mshader": {"character_gear_vhq"},
@@ -83,6 +85,7 @@ def _material_profile_registry_case():
             "rusty_metal_vcoverlay"
         },
         "px_dlc3_vegetation_static.mshader": {"vegetation"},
+        "px_character_eye_shadow.mshader": {"eye_shadow"},
     }
     for shader_name, expected in expected_traits.items():
         actual = registry.profile_traits(shader_name)
@@ -107,6 +110,39 @@ def _material_profile_registry_case():
             "textures/hair_ao.dds",
         ),
         "hair auxiliary textures are not routed by the registered profile",
+    )
+
+    eye_shadow_binding = {
+        "shader": "blue/shaders/PX_Character_Eye_Shadow.mshader",
+        "aux": {"Mask": "textures/p_eyeshadow_01_m.dds"},
+    }
+    check(
+        material_import.supported_auxiliary_paths(eye_shadow_binding)
+        == ("textures/p_eyeshadow_01_m.dds",),
+        "eye-shadow mask is not routed by the registered profile",
+    )
+
+    wildlife_fur_binding = {
+        "shader": "blue/shaders/PX_Wildlife_Fur.mshader",
+        "aux": {
+            "PatternCoat": "textures/fur_pc.dds",
+            "DetailNormal": "textures/fur_nr.dds",
+            "AO": "textures/fur_ao.dds",
+        },
+    }
+    check(
+        material_import.supported_auxiliary_paths(wildlife_fur_binding)
+        == tuple(wildlife_fur_binding["aux"].values()),
+        "wildlife-fur coat, strand, and AO textures are not all requested",
+    )
+    glass_binding = {
+        "shader": "blue/shaders/PX_Glass_Simple.mshader",
+        "aux": {"DetailNormal": "textures/glass_detail_n.dds"},
+    }
+    check(
+        material_import.supported_auxiliary_paths(glass_binding)
+        == ("textures/glass_detail_n.dds",),
+        "simple-glass detail normal is not requested",
     )
 
     rusty_binding = {
@@ -466,6 +502,68 @@ def _binding_resolution_cases():
             "greenmoss_clusters_a_lod0": {"d": "textures/moss_d.dds"},
         }
         check(resolved == expected, f"unexpected compound binding result: {resolved!r}")
+
+        trees[b"compound-default-parameters"] = {
+            "nodesById": {
+                1: {
+                    "type": "internal:CompoundInputs",
+                    "defaults": {
+                        "nodesById": {
+                            10: {"type": "internal:CompoundDefaults"},
+                            11: {
+                                "type": "native:Constant",
+                                "value": [0.1, 0.2, 0.3],
+                            },
+                        },
+                        "connectionsById": {1: [11, 0, 10, 102]},
+                    },
+                },
+                2: {
+                    "MeshName": "fur",
+                    "ShaderFile": "blue/shaders/PX_Wildlife_Fur.mshader",
+                },
+            },
+            "connectionsById": {1: [1, 102, 2, 10133]},
+        }
+        resolved = mgraph._connected_material_parameters(
+            b"compound-default-parameters",
+            {"px_wildlife_fur.mshader": {133: "myCoat1Color1"}},
+        )
+        check(
+            resolved == {"fur": {"myCoat1Color1": [0.1, 0.2, 0.3]}},
+            f"compound-input material defaults were not resolved: {resolved!r}",
+        )
+
+        parameter_path = "blue/graphs/wildlife_variant.mcompoundnode"
+        trees[b"parameter-parent"] = {
+            "nodesById": {
+                1: {
+                    "type": "native:Constant",
+                    "value": [0.7, 0.4, 0.2],
+                },
+                2: {"type": "internal:Compound", "filename": parameter_path},
+            },
+            "connectionsById": {1: [1, 0, 2, 102]},
+        }
+        trees[b"parameter-compound"] = {
+            "nodesById": {
+                1: {"type": "internal:CompoundInputs"},
+                2: {
+                    "MeshName": "fur",
+                    "ShaderFile": "blue/shaders/PX_Wildlife_Fur.mshader",
+                },
+            },
+            "connectionsById": {1: [1, 102, 2, 10133]},
+        }
+        resolved = mgraph._forwarded_compound_parameters(
+            b"parameter-parent",
+            {parameter_path: b"parameter-compound"},
+            {"px_wildlife_fur.mshader": {133: "myCoat1Color1"}},
+        )
+        check(
+            resolved == {"fur": {"myCoat1Color1": [0.7, 0.4, 0.2]}},
+            f"parent compound parameter overrides were not resolved: {resolved!r}",
+        )
     finally:
         mgraph._Bv2Decoder = original_decoder
         mgraph._bv2_plain = original_plain
@@ -854,6 +952,9 @@ def _wildlife_gameplay_part_alias_case():
         "creature_head",
         "creature_head_armor",
         "creature_head_weakpoint",
+        "body",
+        "landbat_weakpoint_ear_big_L",
+        "landbat_weakpoint_ear_big_R",
     ]
     bindings = {
         names[0]: dict(body),
@@ -862,6 +963,9 @@ def _wildlife_gameplay_part_alias_case():
         names[3]: dict(head),
         names[4]: dict(wrong),
         names[5]: dict(wrong),
+        names[6]: dict(body),
+        names[7]: dict(wrong),
+        names[8]: dict(wrong),
     }
     mgraph._apply_wildlife_part_aliases(names, bindings)
 
@@ -869,6 +973,10 @@ def _wildlife_gameplay_part_alias_case():
     check(bindings[names[2]] == body, "Armored Prey weakpoint did not inherit its body binding")
     check(bindings[names[4]] == head, "part-specific armor did not inherit its base binding")
     check(bindings[names[5]] == head, "part-specific weakpoint did not inherit its base binding")
+    check(
+        bindings[names[7]] == body and bindings[names[8]] == body,
+        "embedded wildlife weakpoint names did not inherit the body binding",
+    )
 
 
 def _named_mask_and_piercing_binding_case():
@@ -908,6 +1016,9 @@ def _named_mask_and_piercing_binding_case():
 def _supplemental_graph_override_case():
     glass_name = "g_hmn_mask_01_Glass"
     mask_name = "g_hmn_mask_01_Mask"
+    wildlife_name = "wl_thanator_01_body_low"
+    wildlife_head_name = "wl_thanator_01_head_low"
+    weakpoint_name = "thanator_weakpoint"
     source_data = mgraph.MAGIC + b"cus-03-mask"
 
     class FakeArchive:
@@ -948,6 +1059,35 @@ def _supplemental_graph_override_case():
             "n": "textures/g_hmn_mask_01_n.dds",
             "m": "textures/g_hmn_mask_01_m.dds",
         },
+        wildlife_name: {
+            "shader": "blue/shaders/PX_Wildlife_Skin.mshader",
+            "d": "textures/wildlife_thanator_01_body_d.dds",
+            "n": "textures/wildlife_thanator_01_body_nr.dds",
+            "m": "textures/wildlife_thanator_01_body_m.dds",
+            "aux": {
+                "PatternCoat": "textures/wildlife_thanator_01_body_pc.dds",
+                "DetailNormalMask":
+                    "textures/wildlife_thanator_01_body_dn_mask.dds",
+            },
+        },
+        wildlife_head_name: {
+            "shader": "blue/shaders/PX_Wildlife_Skin.mshader",
+            "d": "textures/wildlife_thanator_01_head_d.dds",
+            "n": "textures/wildlife_thanator_01_head_nr.dds",
+            "m": "textures/wildlife_thanator_01_head_m.dds",
+            "aux": {
+                "PatternCoat": "textures/wildlife_thanator_01_head_pc.dds",
+                "DetailNormalMask":
+                    "textures/wildlife_thanator_01_head_dn_mask.dds",
+            },
+        },
+        weakpoint_name: {
+            "shader": "blue/shaders/PX_Wildlife_Skin.mshader",
+            "d": "textures/standard_thanator_body_d.dds",
+            "n": "textures/standard_thanator_body_n.dds",
+            "m": "textures/standard_thanator_body_m.dds",
+            "aux": {"PatternCoat": "textures/standard_thanator_body_pc.dds"},
+        },
     }
     bindings = {
         name: {
@@ -958,6 +1098,39 @@ def _supplemental_graph_override_case():
         }
         for name in expected
     }
+    bindings[wildlife_name] = {
+        "shader": expected[wildlife_name]["shader"],
+        "d": None,
+        "n": expected[wildlife_name]["n"],
+        "m": None,
+        "aux": {
+            "DetailNormalMask":
+                expected[wildlife_name]["aux"]["DetailNormalMask"],
+        },
+        "parameters": {"myCoat1Color1": (0.8, 0.2, 0.1)},
+    }
+    bindings[wildlife_head_name] = {
+        "shader": expected[wildlife_head_name]["shader"],
+        "d": expected[wildlife_head_name]["d"],
+        "n": expected[wildlife_head_name]["n"],
+        "m": expected[wildlife_head_name]["m"],
+        "aux": {
+            "DetailNormalMask":
+                expected[wildlife_head_name]["aux"]["DetailNormalMask"],
+        },
+        "parameters": {
+            "myCoat1Color1": (0.05, 0.1, 0.2),
+            "myInvertPattern1": 0,
+        },
+    }
+    hybrid_weakpoint = {
+        "shader": expected[weakpoint_name]["shader"],
+        "d": "textures/hybrid_thanator_body_d.dds",
+        "n": "textures/hybrid_thanator_body_n.dds",
+        "m": "textures/hybrid_thanator_body_m.dds",
+        "aux": {"PatternCoat": "textures/hybrid_thanator_body_pc.dds"},
+    }
+    bindings[weakpoint_name] = dict(hybrid_weakpoint)
     replacements = {
         "compound": operators_sdf._referenced_compound_data,
         "pins": operators_sdf._shader_pins_for_sources,
@@ -978,6 +1151,9 @@ def _supplemental_graph_override_case():
         mgraph._graph_materials = lambda _data: [
             (glass_name, expected[glass_name]["shader"]),
             (mask_name, expected[mask_name]["shader"]),
+            (wildlife_name, expected[wildlife_name]["shader"]),
+            (wildlife_head_name, expected[wildlife_head_name]["shader"]),
+            (weakpoint_name, expected[weakpoint_name]["shader"]),
         ]
         mgraph.material_bindings = (
             lambda _data, names, **_kwargs: {
@@ -989,7 +1165,10 @@ def _supplemental_graph_override_case():
             primary,
             list(expected),
             bindings,
-            primary_material_names={"Lowerbody", "Upperbody", "Female_Body"},
+            primary_material_names={
+                "Lowerbody", "Upperbody", "Female_Body",
+                wildlife_name, wildlife_head_name,
+            },
         )
     finally:
         with operators_sdf._state.lock:
@@ -1002,6 +1181,34 @@ def _supplemental_graph_override_case():
 
     check(result[glass_name] == expected[glass_name], "mask glass sibling graph was not authoritative")
     check(result[mask_name] == expected[mask_name], "mask body sibling graph was not authoritative")
+    wildlife = result[wildlife_name]
+    check(
+        wildlife["d"] == expected[wildlife_name]["d"]
+        and wildlife["n"] == expected[wildlife_name]["n"]
+        and wildlife["m"] == expected[wildlife_name]["m"]
+        and wildlife["aux"]["PatternCoat"]
+        == expected[wildlife_name]["aux"]["PatternCoat"],
+        "incomplete wildlife skin did not recover its base graph textures",
+    )
+    check(
+        wildlife["parameters"]["myCoat1Color1"] == (0.8, 0.2, 0.1),
+        "wildlife base-texture fallback replaced selected graph parameters",
+    )
+    wildlife_head = result[wildlife_head_name]
+    check(
+        wildlife_head["aux"]["PatternCoat"]
+        == expected[wildlife_head_name]["aux"]["PatternCoat"],
+        "wildlife head did not recover its missing base pattern coat",
+    )
+    check(
+        wildlife_head["parameters"]["myCoat1Color1"] == (0.05, 0.1, 0.2)
+        and wildlife_head["d"] == expected[wildlife_head_name]["d"],
+        "wildlife head pattern fallback replaced selected graph shading",
+    )
+    check(
+        result[weakpoint_name] == hybrid_weakpoint,
+        "supplemental graph replaced an inherited wildlife weakpoint material",
+    )
 
 
 def _banshee_layered_texture_fallback_case():
@@ -1095,6 +1302,113 @@ def _constants_case(directory, source_png):
     check(
         material.get("afop_alpha_source") == "diffuse+transmission-opacity",
         "constants alpha did not preserve authored transmission opacity",
+    )
+
+
+def _eye_shadow_case(directory, source_png):
+    mask_path = "textures/p_eyeshadow_01_m.dds"
+    binding = {
+        "shader": "blue/shaders/PX_Character_Eye_Shadow.mshader",
+        "aux": {"Mask": mask_path},
+        "parameters": {"myAlphaMultiply": 0.7},
+    }
+    material = _assign(binding, directory, source_png, "eyeshell")
+    _assert_profile(material, "eye_shadow_mask")
+    check(
+        material_audit._runtime_profile(binding["shader"])
+        == ("eye_shadow", "specialized"),
+        "standalone audit does not recognize the eye-shadow profile",
+    )
+    shader = _principled(material)
+    _assert_linked(shader.inputs["Base Color"], "eye-shadow base color")
+    _assert_linked(shader.inputs["Alpha"], "eye-shadow opacity")
+    check(
+        shader.inputs["Base Color"].links[0].from_node.name
+        == "Authored eye-shadow color",
+        "eye-shadow base color is not the authored black overlay",
+    )
+    check(
+        shader.inputs["Alpha"].links[0].from_node.name == "Eye shadow opacity",
+        "eye-shadow mask and authored multiplier are not driving opacity",
+    )
+    check(
+        material.node_tree.nodes.get("Eye Shadow Mask") is not None
+        and material.get("afop_eye_shadow_mask") == mask_path,
+        "eye-shadow mask texture was not imported",
+    )
+    check(
+        material.get("afop_alpha_source") == "eye-shadow-mask-red"
+        and abs(material.get("afop_alpha_multiplier", 0.0) - 0.7) < 1e-6,
+        "eye-shadow opacity metadata is incomplete",
+    )
+
+
+def _glass_simple_case(directory, source_png):
+    binding = {
+        "shader": "blue/shaders/PX_Glass_Simple.mshader",
+        "d": "textures/default_grey_d.dds",
+        "n": "textures/flat_normal_n.dds",
+        "m": "textures/default_rough_plastic_m.dds",
+        "aux": {"DetailNormal": "textures/glass_detail_n.dds"},
+        "parameters": {
+            "myColorAdd": (0.01, 0.02, 0.03),
+            "myColorOverlay": (0.06, 0.02, 0.003),
+            "myAlphaOffset": -0.68,
+            "myRoughnessOffset": -1.0,
+            "myColorAndMaterialTiling": (2.0, 3.0),
+            "myNormalTiling": (4.0, 5.0),
+            "myDetailTiling": (15.0, 15.0),
+            "myNormalStrength": 0.75,
+        },
+    }
+    material = _assign(binding, directory, source_png, "Cornea")
+    _assert_profile(material, "glass_simple_static")
+    check(
+        material_audit._runtime_profile(binding["shader"])
+        == ("glass_simple", "specialized"),
+        "standalone audit does not recognize the simple-glass profile",
+    )
+    shader = _principled(material)
+    _assert_linked(shader.inputs["Base Color"], "simple-glass color")
+    _assert_linked(shader.inputs["Alpha"], "simple-glass alpha")
+    _assert_linked(shader.inputs["Roughness"], "simple-glass roughness")
+    check(
+        shader.inputs["Base Color"].links[0].from_node.name
+        == "Simple Glass Snowdrop overlay",
+        "simple glass does not apply its authored color overlay",
+    )
+    check(
+        shader.inputs["Alpha"].links[0].from_node.name
+        == "Clamp Simple Glass alpha"
+        and material.get("afop_alpha_source") == "diffuse+alpha-offset",
+        "simple glass does not apply its authored alpha offset",
+    )
+    check(
+        shader.inputs["Roughness"].links[0].from_node.name
+        == "Clamp Simple Glass roughness",
+        "simple glass does not apply its authored roughness offset",
+    )
+    check(
+        material.node_tree.nodes.get("Simple Glass detail normal (RNM)")
+        is not None,
+        "simple-glass detail normal was not reconstructed",
+    )
+
+
+def _opaque_wildlife_diffuse_case(directory, source_png):
+    binding = {
+        "shader": "blue/shaders/PX_Wildlife_Skin.mshader",
+        "d": "textures/wildlife_hammerhead_01_head_d.dds",
+        "n": "textures/wildlife_hammerhead_01_head_nr.dds",
+        "m": "textures/wildlife_hammerhead_01_head_m.dds",
+        "diffuse_alpha_mode": "NONE",
+        "parameters": {},
+    }
+    material = _assign(binding, directory, source_png, "HammerHead_body2")
+    image = material.node_tree.nodes["Diffuse / Albedo"].image
+    check(
+        image.alpha_mode == "NONE",
+        "opaque wildlife body section still interprets diffuse alpha",
     )
 
 
@@ -1501,6 +1815,80 @@ def _wildlife_skin_case(directory, source_png):
     )
 
 
+def _wildlife_fur_case(directory, source_png):
+    parameters = {
+        "myInvertPattern1": 0.0,
+        "myInvertPattern2": -1.0,
+        "myPattern1LevelControl": 2.0,
+        "myPattern2LevelControl": 0.0,
+        "myRoughnessContrastBrightness": (-0.8, 1.0),
+        "myDitherAlpha": 1.0,
+        "myBioColor1": (0.0, 0.01, 0.03),
+        "myBioColor2": (0.0, 0.04, 0.16),
+        "myBioColor3": (0.0, 0.08, 0.24),
+        "myBioColor4": (0.03, 0.15, 0.31),
+    }
+    for coat in (1, 2):
+        for index in range(1, 6):
+            parameters[f"myCoat{coat}Color{index}"] = (
+                0.04 * index,
+                0.03 * coat,
+                0.08 * index,
+            )
+    binding = {
+        "shader": "blue/shaders/PX_Wildlife_Fur.mshader",
+        "d": "textures/wildlife_fur_d.dds",
+        "n": "textures/wildlife_fur_n.dds",
+        "m": "textures/wildlife_fur_m.dds",
+        "aux": {
+            "PatternCoat": "textures/wildlife_fur_pc.dds",
+            "DetailNormal": "textures/wildlife_fur_nr.dds",
+            "AO": "textures/wildlife_fur_ao.dds",
+        },
+        "parameters": parameters,
+    }
+    material = _assign(binding, directory, source_png, part_suffix="Fur")
+    _assert_profile(material, "wildlife_fur_static_clean")
+    shader = _principled(material)
+    check(
+        not shader.inputs["Metallic"].links,
+        "wildlife fur incorrectly treats its roughness mask as metalness",
+    )
+    _assert_linked(shader.inputs["Roughness"], "wildlife fur roughness")
+    check(
+        shader.inputs["Roughness"].links[0].from_node.name
+        == "Clamp wildlife fur roughness",
+        "wildlife fur does not use its authored base/detail roughness formula",
+    )
+    _assert_linked(shader.inputs["Alpha"], "wildlife fur strand opacity")
+    alpha_link = shader.inputs["Alpha"].links[0]
+    check(
+        alpha_link.from_node.name
+        == "Wildlife Fur Detail Normal (XY / roughness / opacity)"
+        and alpha_link.from_socket.name == "Alpha"
+        and material.get("afop_alpha_source") == "wildlife-fur-detail-alpha",
+        "wildlife fur opacity did not come from DetailNormal alpha",
+    )
+    check(
+        material.node_tree.nodes.get("Wildlife Coat 1 palette") is not None
+        and material.node_tree.nodes.get("Wildlife coat overlay") is not None,
+        "wildlife fur coat colours were not reconstructed",
+    )
+    check(
+        material.get("afop_detail_normal")
+        == "textures/wildlife_fur_nr.dds"
+        and material.get("afop_fur_ao") == "textures/wildlife_fur_ao.dds",
+        "wildlife fur detail-normal or UV2 AO was not retained",
+    )
+    emission = shader.inputs.get("Emission Color") or shader.inputs.get("Emission")
+    check(emission is not None, "Principled emission input is unavailable")
+    _assert_linked(emission, "wildlife fur bioluminescence")
+    check(
+        material.get("afop_bio_preview") == "night",
+        "wildlife fur night bioluminescence preview is missing",
+    )
+
+
 def _banshee_auto_pattern_case(directory, source_png):
     binding = {
         "shader": "blue/shaders/PX_Wildlife_Skin.mshader",
@@ -1782,6 +2170,8 @@ def _audit_profile_case():
         "PX_TerrainBlend.mshader": ("terrain_runtime", "specialized"),
         "PX_Basic_MossPatch.mshader": ("moss_patch", "specialized"),
         "PX_Wildlife_Gear.mshader": ("wildlife_gear", "specialized"),
+        "PX_Wildlife_Fur.mshader": ("wildlife_fur", "specialized"),
+        "PX_Glass_Simple.mshader": ("glass_simple", "specialized"),
         "PX_Character_Gear_VHQ.mshader": (
             "character_gear_vhq", "specialized"
         ),
@@ -1921,12 +2311,16 @@ def main():
                 lambda: _cloth_sim_case(directory, source_png),
             ),
             ("constants cutout profile", lambda: _constants_case(directory, source_png)),
+            ("character eye-shadow mask", lambda: _eye_shadow_case(directory, source_png)),
+            ("simple glass shader reconstruction", lambda: _glass_simple_case(directory, source_png)),
+            ("opaque wildlife diffuse alpha", lambda: _opaque_wildlife_diffuse_case(directory, source_png)),
             ("human skin profile", lambda: _human_skin_case(directory, source_png)),
             ("character gear VHQ regions", lambda: _character_gear_vhq_case(directory, source_png)),
             ("DLC3 rusty-metal vertex-overlay profile", lambda: _rusty_metal_vcoverlay_case(directory, source_png)),
             ("additional character skin variants", lambda: _character_skin_variant_case(directory, source_png)),
             ("hair cutout profile", lambda: _hair_case(directory, source_png)),
             ("wildlife skin and bioluminescence", lambda: _wildlife_skin_case(directory, source_png)),
+            ("wildlife fur coat and strand shading", lambda: _wildlife_fur_case(directory, source_png)),
             ("automatic Banshee graph pattern", lambda: _banshee_auto_pattern_case(directory, source_png)),
             ("Medusa skin and bioluminescence", lambda: _medusa_case(directory, source_png)),
             ("natural-rock procedural lookup", lambda: _rock_case(directory, source_png)),

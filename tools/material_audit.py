@@ -50,6 +50,10 @@ def _runtime_profile(shader_path):
         return "navi_skin", "specialized"
     if name.startswith("px_wildlife_skin"):
         return "wildlife_skin", "specialized"
+    if name.startswith("px_wildlife_fur"):
+        return "wildlife_fur", "specialized"
+    if name == "px_glass_simple.mshader":
+        return "glass_simple", "specialized"
     if name.startswith("px_dlc3_medusa_skin"):
         return "medusa_skin", "specialized"
     if name == "px_wildlife_eye.mshader":
@@ -58,6 +62,8 @@ def _runtime_profile(shader_path):
         return "eye_parallax", "specialized"
     if name == "px_character_eye_shell.mshader":
         return "eye_shell", "specialized"
+    if name == "px_character_eye_shadow.mshader":
+        return "eye_shadow", "specialized"
     if name == "px_constants.mshader":
         return "constants", "specialized"
     if name in {
@@ -124,8 +130,8 @@ def _sampler_blender_mapping(sampler, profile, support):
     if role == "detail_normal":
         if profile in {
             "basic_emissive", "navi_skin", "wildlife_skin", "medusa_skin",
-            "rusty_metal", "rusty_metal_vcoverlay", "vegetation",
-            "basic_blend", "wildlife_gear",
+            "wildlife_fur", "rusty_metal", "rusty_metal_vcoverlay", "vegetation",
+            "basic_blend", "wildlife_gear", "glass_simple",
         }:
             return "Tiled RNM detail-normal layer", "connected"
         return "Generic tiled RNM detail-normal layer", "connected_preview"
@@ -137,10 +143,16 @@ def _sampler_blender_mapping(sampler, profile, support):
         "patterncoat", "detailnormalmask",
     }:
         return "Wildlife coat/detail-mask profile", "connected"
+    if profile == "wildlife_fur" and role in {
+        "patterncoat", "detail_normal", "ao",
+    }:
+        return "Wildlife fur coat/strand profile", "connected"
     if profile in {"wildlife_eye", "eye_parallax"} and role == "height":
         return "Bump approximation of Snowdrop parallax", "connected_preview"
     if profile == "eye_shell" and role == "normaltexture":
         return "Authored eye-shell normal", "connected"
+    if profile == "eye_shadow" and role == "mask":
+        return "Black eye-shadow opacity x authored multiplier", "connected"
     if profile == "human_skin" and role == "bioluminescence":
         return "Human-skin static night emission", "connected_preview"
     if profile == "human_skin" and role.startswith(("wrinklenormal", "wrinklemask")):

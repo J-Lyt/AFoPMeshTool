@@ -78,6 +78,8 @@ PROFILE_REGISTRY = (
     MaterialProfile("navi_detail", NAVI_DETAIL_SHADERS),
     MaterialProfile("navi_face", NAVI_FACE_DETAIL_SHADERS),
     MaterialProfile("wildlife_skin", prefixes=("px_wildlife_skin",)),
+    MaterialProfile("wildlife_fur", prefixes=("px_wildlife_fur",)),
+    MaterialProfile("glass_simple", frozenset({"px_glass_simple.mshader"})),
     MaterialProfile("medusa_skin", prefixes=("px_dlc3_medusa_skin",)),
     MaterialProfile(
         "dragonfly_wing", frozenset({"px_wildlife_dragonflywing.mshader"})
@@ -89,6 +91,9 @@ PROFILE_REGISTRY = (
     ),
     MaterialProfile(
         "eye_shell", frozenset({"px_character_eye_shell.mshader"})
+    ),
+    MaterialProfile(
+        "eye_shadow", frozenset({"px_character_eye_shadow.mshader"})
     ),
     MaterialProfile("human_skin", HUMAN_SKIN_SHADERS),
     MaterialProfile("hair", HAIR_SHADERS),
@@ -139,10 +144,20 @@ def supported_auxiliary_paths(binding):
             auxiliary.get("DetailNormal1"), auxiliary.get("DetailNormal2"),
             auxiliary.get("DetailNormal3"),
         )
+    elif "wildlife_fur" in traits:
+        paths = (
+            auxiliary.get("PatternCoat"),
+            auxiliary.get("DetailNormal"),
+            auxiliary.get("AO"),
+        )
+    elif "glass_simple" in traits:
+        paths = (auxiliary.get("DetailNormal"),)
     elif "eye_parallax" in traits:
         paths = (auxiliary.get("Height"),)
     elif "eye_shell" in traits:
         paths = (auxiliary.get("NormalTexture"),)
+    elif "eye_shadow" in traits:
+        paths = (auxiliary.get("Mask"),)
     elif "human_skin" in traits:
         paths = (
             auxiliary.get("Bioluminescence"), auxiliary.get("WrinkleNormal1"),

@@ -1487,7 +1487,7 @@ def _supplemental_material_bindings(
     bindings,
     primary_material_names=None,
 ):
-    """Fill composite-placement gaps from a strongly related species graph."""
+    """Fill material gaps from a strongly related graph for the same MMB."""
     primary_keys = {
         name.casefold()
         for name in (
@@ -1496,15 +1496,57 @@ def _supplemental_material_bindings(
             else primary_material_names
         )
     }
+
+    def complete_wildlife_gameplay_alias(name):
+        binding = bindings.get(name, {})
+        shader = os.path.basename(str(binding.get("shader", ""))).casefold()
+        key = name.casefold()
+        return (
+            ("_weakpoint" in key or key.endswith("_armor"))
+            and shader.startswith("px_wildlife_skin")
+            and all(binding.get(role) for role in ("d", "n", "m"))
+        )
+
     unresolved = {
         name.casefold(): name
         for name in material_names
         if (
             not bindings.get(name, {}).get("shader")
-            or name.casefold() not in primary_keys
+            or (
+                name.casefold() not in primary_keys
+                and not complete_wildlife_gameplay_alias(name)
+            )
         )
     }
-    if not unresolved:
+    pattern_required = {
+        name.casefold()
+        for name in material_names
+        if (
+            os.path.basename(
+                str(bindings.get(name, {}).get("shader", ""))
+            ).casefold().startswith("px_wildlife_skin")
+            and not bindings.get(name, {}).get("aux", {}).get("PatternCoat")
+            and any(
+                field.startswith(("myCoat1Color", "myCoat2Color"))
+                for field in bindings.get(name, {}).get("parameters", {})
+            )
+        )
+    }
+    incomplete_wildlife = {
+        name.casefold(): name
+        for name in material_names
+        if (
+            os.path.basename(
+                str(bindings.get(name, {}).get("shader", ""))
+            ).casefold().startswith("px_wildlife_skin")
+            and (
+                not bindings.get(name, {}).get("d")
+                or not bindings.get(name, {}).get("m")
+                or name.casefold() in pattern_required
+            )
+        )
+    }
+    if not unresolved and not incomplete_wildlife:
         return bindings
 
     for _name_score, _affinity, candidate in _ranked_material_graph_candidates(entry):
@@ -1518,13 +1560,14 @@ def _supplemental_material_bindings(
                 name.casefold(): name for name, _shader in mgraph._graph_materials(data)
             }
             exact = set(unresolved) & set(source_materials)
+            incomplete_exact = set(incomplete_wildlife) & set(source_materials)
 
             graph_stem = os.path.splitext(os.path.basename(candidate.asset.name))[0].casefold()
             species_aliases = {
                 key for key in unresolved
                 if key in _source_name_tokens(graph_stem) and "body" in source_materials
             }
-            if not exact and not species_aliases:
+            if not exact and not incomplete_exact and not species_aliases:
                 continue
 
             compound_sources = _referenced_compound_data(data, candidate.archive)
@@ -1543,6 +1586,33 @@ def _supplemental_material_bindings(
                 if supplemental.get(name, {}).get("shader"):
                     bindings[name] = supplemental[name]
                     unresolved.pop(key, None)
+            for key in incomplete_exact:
+                name = incomplete_wildlife[key]
+                target = bindings.get(name, {})
+                source = supplemental.get(name, {})
+                target_shader = os.path.basename(
+                    str(target.get("shader", ""))
+                ).casefold()
+                source_shader = os.path.basename(
+                    str(source.get("shader", ""))
+                ).casefold()
+                if not source_shader or source_shader != target_shader:
+                    continue
+                for role in ("d", "n", "m"):
+                    if not target.get(role) and source.get(role):
+                        target[role] = source[role]
+                target_auxiliary = target.setdefault("aux", {})
+                for role, path in source.get("aux", {}).items():
+                    target_auxiliary.setdefault(role, path)
+                if (
+                    target.get("d")
+                    and target.get("m")
+                    and (
+                        key not in pattern_required
+                        or target_auxiliary.get("PatternCoat")
+                    )
+                ):
+                    incomplete_wildlife.pop(key, None)
             body_name = source_materials.get("body")
             if body_name is not None:
                 body_binding = mgraph.material_bindings(
@@ -1558,7 +1628,7 @@ def _supplemental_material_bindings(
                         if name is not None:
                             bindings[name] = dict(body_binding)
                             unresolved.pop(key, None)
-            if not unresolved:
+            if not unresolved and not incomplete_wildlife:
                 break
         except Exception as error:
             logger.debug(

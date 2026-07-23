@@ -383,11 +383,14 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
         is_navi_skin = "navi_skin" in traits
         is_navi_detail = "navi_detail" in traits
         is_wildlife_skin = "wildlife_skin" in traits
+        is_wildlife_fur = "wildlife_fur" in traits
+        is_glass_simple = "glass_simple" in traits
         is_medusa_skin = "medusa_skin" in traits
         is_dragonfly_wing = "dragonfly_wing" in traits
         is_wildlife_eye = "wildlife_eye" in traits
         is_eye_parallax = "eye_parallax" in traits
         is_eye_shell = "eye_shell" in traits
+        is_eye_shadow = "eye_shadow" in traits
         is_human_skin = "human_skin" in traits
         is_hair = "hair" in traits
         is_natural_rock = "natural_rock" in traits
@@ -452,16 +455,23 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
             material["afop_roughness"] = float(authored_roughness)
 
         surface_uv_output = None
+        normal_uv_output = None
         base_color_override = None
         profile_alpha_output = None
         profile_alpha_source = None
-        if is_basic_emissive or is_rustymetal or is_moss_patch:
+        if is_basic_emissive or is_rustymetal or is_moss_patch or is_glass_simple:
             uv_tiling = _vector2_parameter(
                 parameters.get(
                     "myUVTiling"
                     if is_basic_emissive
                     else (
-                        "myTiling" if is_rustymetal else "myTilingX"
+                        "myTiling"
+                        if is_rustymetal
+                        else (
+                            "myColorAndMaterialTiling"
+                            if is_glass_simple
+                            else "myTilingX"
+                        )
                     )
                 ),
                 (1.0, 1.0),
@@ -478,7 +488,11 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
             texture_coordinates.label = (
                 "Basic Emissive UV"
                 if is_basic_emissive
-                else ("Rusty Metal UV" if is_rustymetal else "Moss Patch UV")
+                else (
+                    "Rusty Metal UV"
+                    if is_rustymetal
+                    else ("Simple Glass UV" if is_glass_simple else "Moss Patch UV")
+                )
             )
             texture_coordinates.name = texture_coordinates.label
             texture_coordinates.location = (-1050, 410)
@@ -487,7 +501,15 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
             uv_scale.label = (
                 "Basic Emissive UV tiling"
                 if is_basic_emissive
-                else ("Rusty Metal UV tiling" if is_rustymetal else "Moss Patch UV tiling")
+                else (
+                    "Rusty Metal UV tiling"
+                    if is_rustymetal
+                    else (
+                        "Simple Glass color/material UV tiling"
+                        if is_glass_simple
+                        else "Moss Patch UV tiling"
+                    )
+                )
             )
             uv_scale.name = uv_scale.label
             uv_scale.location = (-850, 410)
@@ -497,7 +519,15 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
             uv_add.label = (
                 "Basic Emissive UV offset"
                 if is_basic_emissive
-                else ("Rusty Metal UV offset" if is_rustymetal else "Moss Patch UV offset")
+                else (
+                    "Rusty Metal UV offset"
+                    if is_rustymetal
+                    else (
+                        "Simple Glass UV offset"
+                        if is_glass_simple
+                        else "Moss Patch UV offset"
+                    )
+                )
             )
             uv_add.name = uv_add.label
             uv_add.location = (-650, 410)
@@ -507,6 +537,21 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
             surface_uv_output = uv_add.outputs["Vector"]
             material["afop_uv_tiling"] = list(uv_tiling)
             material["afop_uv_offset"] = list(uv_offset)
+            if is_glass_simple:
+                normal_tiling = _vector2_parameter(
+                    parameters.get("myNormalTiling"), (1.0, 1.0)
+                )
+                normal_scale = nodes.new("ShaderNodeVectorMath")
+                normal_scale.operation = "MULTIPLY"
+                normal_scale.label = "Simple Glass normal UV tiling"
+                normal_scale.name = normal_scale.label
+                normal_scale.location = (-650, -30)
+                normal_scale.inputs[1].default_value = (*normal_tiling, 1.0)
+                links.new(
+                    texture_coordinates.outputs["UV"], normal_scale.inputs[0]
+                )
+                normal_uv_output = normal_scale.outputs["Vector"]
+                material["afop_normal_tiling"] = list(normal_tiling)
 
         diffuse_path = binding.get("d")
         if is_rustymetal_vcoverlay:
@@ -518,7 +563,10 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
                 disk_path,
                 diffuse_path,
                 non_color=False,
-                alpha_mode="NONE" if is_character_gear_vhq else None,
+                alpha_mode=(
+                    binding.get("diffuse_alpha_mode")
+                    or ("NONE" if is_character_gear_vhq else None)
+                ),
             )
             node = _new_image_node(nodes, image, "Diffuse / Albedo", -440, 180)
             if surface_uv_output is not None:
@@ -547,7 +595,7 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
             normal_path = profile_auxiliary.get("DetailNormal1") or normal_path
         detail_path = profile_auxiliary.get("DetailNormal")
         use_detail_normal = bool(
-            (is_navi_detail or is_basic_emissive)
+            (is_navi_detail or is_basic_emissive or is_glass_simple)
             and detail_path
             and detail_path.casefold() in texture_files
             and binding.get("m")
@@ -562,7 +610,9 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
             image = _load_image(disk_path, normal_path, non_color=True)
             node = _new_image_node(nodes, image, "Normal (packed)", -440, -80)
             normal_texture_node = node
-            if surface_uv_output is not None:
+            if normal_uv_output is not None:
+                links.new(normal_uv_output, node.inputs["Vector"])
+            elif surface_uv_output is not None:
                 links.new(surface_uv_output, node.inputs["Vector"])
             elif is_rustymetal_vcoverlay:
                 detail_uv = nodes.new("ShaderNodeUVMap")
@@ -655,11 +705,11 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
             mask_separate.name = "Snowdrop material channels"
             mask_separate.location = (-195, -340)
             links.new(mask.outputs["Color"], mask_separate.inputs["Color"])
-            if is_wildlife_skin:
+            if is_wildlife_skin or is_wildlife_fur:
                 # PX_Wildlife_Skin fixes metalness at zero and builds its
-                # roughness from Material.R (plus effects Blender does not
-                # reproduce). G/B/A are wildlife pattern/bio masks, not the
-                # standard Principled material channels.
+                # roughness from Material.R. PX_Wildlife_Fur adds its detail
+                # normal's B channel. G/B/A are wildlife effect, coat, and bio
+                # masks rather than standard Principled material channels.
                 mask_separate.label = "R: Roughness  G/B/A: Wildlife masks"
                 links.new(mask_separate.outputs["Red"], shader.inputs["Roughness"])
             elif is_medusa_skin:
@@ -705,6 +755,27 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
                     coat_roughness = shader.inputs.get("Coat Roughness")
                     if coat_roughness is not None:
                         links.new(ao_output, coat_roughness)
+            elif is_glass_simple:
+                mask_separate.label = "R: Metal  G: Roughness  B: Detail mask"
+                links.new(mask_separate.outputs["Red"], shader.inputs["Metallic"])
+                roughness_add = _math_node(
+                    nodes,
+                    "ADD",
+                    "Simple Glass roughness offset",
+                    55,
+                    -340,
+                    _float_parameter(parameters.get("myRoughnessOffset"), 0.0),
+                )
+                links.new(
+                    mask_separate.outputs["Green"], roughness_add.inputs[0]
+                )
+                roughness_clamp = _clamp_node(
+                    nodes, "Clamp Simple Glass roughness", 235, -340
+                )
+                links.new(
+                    roughness_add.outputs[0], roughness_clamp.inputs["Value"]
+                )
+                roughness_output = roughness_clamp.outputs["Result"]
             elif is_rustymetal_vcoverlay:
                 # This texture drives the shader's procedural rust, scratch,
                 # dirt, and paint stages. It is not Snowdrop's usual packed
@@ -734,7 +805,15 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
             disk_path = texture_files[detail_path.casefold()]
             image = _load_image(disk_path, detail_path, non_color=True)
             detail_node = _new_image_node(
-                nodes, image, "Navi Detail Normal (packed)", -440, -720
+                nodes,
+                image,
+                (
+                    "Simple Glass Detail Normal (packed)"
+                    if is_glass_simple
+                    else "Navi Detail Normal (packed)"
+                ),
+                -440,
+                -720,
             )
             texture_coordinates = nodes.new("ShaderNodeTexCoord")
             texture_coordinates.label = "Detail normal UV"
@@ -760,7 +839,7 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
 
             detail_strength = (
                 1.0
-                if is_basic_emissive
+                if is_basic_emissive or is_glass_simple
                 else parameters.get("myDetailStrength", 0.5)
             )
             if not isinstance(detail_strength, (int, float)):
@@ -771,7 +850,11 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
             detail_group.label = (
                 "Basic Emissive detail normal (RNM)"
                 if is_basic_emissive
-                else "Navi detail normal (RNM)"
+                else (
+                    "Simple Glass detail normal (RNM)"
+                    if is_glass_simple
+                    else "Navi detail normal (RNM)"
+                )
             )
             detail_group.name = detail_group.label
             detail_group.location = (1505, -300)
@@ -856,6 +939,63 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
             material["afop_shader_profile"] = "rusty_metal_static"
             material["afop_profile_limit"] = (
                 "Rust/scratch/dirt weather functions require engine scan masks"
+            )
+
+        if is_glass_simple and diffuse_node is not None:
+            color_add = nodes.new("ShaderNodeRGB")
+            color_add.label = "Simple Glass authored color add"
+            color_add.name = color_add.label
+            color_add.location = (-195, 340)
+            color_add.outputs[0].default_value = (
+                *_color_parameter(parameters.get("myColorAdd"), (0.0,) * 3),
+                1.0,
+            )
+            add_color = nodes.new("ShaderNodeMixRGB")
+            add_color.blend_type = "ADD"
+            add_color.inputs[0].default_value = 1.0
+            add_color.label = "Simple Glass color add"
+            add_color.name = add_color.label
+            add_color.location = (55, 340)
+            links.new(diffuse_node.outputs["Color"], add_color.inputs[1])
+            links.new(color_add.outputs[0], add_color.inputs[2])
+
+            color_overlay = nodes.new("ShaderNodeRGB")
+            color_overlay.label = "Simple Glass authored color overlay"
+            color_overlay.name = color_overlay.label
+            color_overlay.location = (235, 460)
+            color_overlay.outputs[0].default_value = (
+                *_color_parameter(parameters.get("myColorOverlay"), (0.5,) * 3),
+                1.0,
+            )
+            overlay = nodes.new("ShaderNodeMixRGB")
+            overlay.blend_type = "OVERLAY"
+            overlay.inputs[0].default_value = 1.0
+            overlay.label = "Simple Glass Snowdrop overlay"
+            overlay.name = overlay.label
+            overlay.location = (475, 340)
+            links.new(add_color.outputs["Color"], overlay.inputs[1])
+            links.new(color_overlay.outputs[0], overlay.inputs[2])
+            base_color_override = overlay.outputs["Color"]
+
+            alpha_add = _math_node(
+                nodes,
+                "ADD",
+                "Simple Glass alpha offset",
+                55,
+                -520,
+                _float_parameter(parameters.get("myAlphaOffset"), 0.0),
+            )
+            links.new(diffuse_node.outputs["Alpha"], alpha_add.inputs[0])
+            alpha_clamp = _clamp_node(
+                nodes, "Clamp Simple Glass alpha", 235, -520
+            )
+            links.new(alpha_add.outputs[0], alpha_clamp.inputs["Value"])
+            profile_alpha_output = alpha_clamp.outputs["Result"]
+            profile_alpha_source = "diffuse+alpha-offset"
+            shader.inputs["IOR"].default_value = 1.33
+            material["afop_shader_profile"] = "glass_simple_static"
+            material["afop_alpha_offset"] = _float_parameter(
+                parameters.get("myAlphaOffset"), 0.0
             )
 
         if is_rustymetal_vcoverlay:
@@ -1877,6 +2017,365 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
             )
 
         if (
+            is_wildlife_fur
+            and normal_texture_node is not None
+            and normal is not None
+            and mask_node is not None
+            and mask_separate is not None
+            and diffuse_node is not None
+        ):
+            auxiliary = binding.get("aux", {})
+            detail_path = auxiliary.get("DetailNormal")
+            detail = _aux_image_node(
+                nodes,
+                links,
+                texture_files,
+                detail_path,
+                "Wildlife Fur Detail Normal (XY / roughness / opacity)",
+                -520,
+                -760,
+                tiling=(1.0, 1.0),
+                uv_map="UVMap_1",
+            )
+            detail_channels = (
+                _separate_node(
+                    nodes,
+                    links,
+                    detail.outputs["Color"],
+                    "Fur detail R/G normal, B roughness, A opacity",
+                    -280,
+                    -760,
+                )
+                if detail is not None
+                else None
+            )
+            if detail is not None and detail_channels is not None:
+                full_detail = nodes.new("ShaderNodeValue")
+                full_detail.label = "Wildlife fur detail enabled"
+                full_detail.name = full_detail.label
+                full_detail.outputs[0].default_value = 1.0
+                detail_layer = _packed_detail_layer(
+                    nodes,
+                    links,
+                    normal_texture_node.outputs["Color"],
+                    normal_texture_node.outputs["Alpha"],
+                    detail,
+                    detail_channels.outputs["Red"],
+                    full_detail.outputs[0],
+                    1.0,
+                    "Wildlife fur detail normal (RNM)",
+                    1450,
+                    -300,
+                )
+                for link in list(normal.inputs["Color"].links):
+                    links.remove(link)
+                links.new(detail_layer.outputs["Normal Color"], normal.inputs["Color"])
+
+                roughness_delta = _math_node(
+                    nodes,
+                    "SUBTRACT",
+                    "Fur detail roughness - 0.5",
+                    55,
+                    -620,
+                    0.5,
+                )
+                links.new(detail_channels.outputs["Blue"], roughness_delta.inputs[0])
+                roughness_add = _math_node(
+                    nodes,
+                    "ADD",
+                    "Fur base + detail roughness",
+                    225,
+                    -620,
+                )
+                links.new(mask_separate.outputs["Red"], roughness_add.inputs[0])
+                links.new(roughness_delta.outputs[0], roughness_add.inputs[1])
+                contrast, brightness = _vector2_parameter(
+                    parameters.get("myRoughnessContrastBrightness"),
+                    (-0.8, 1.0),
+                )
+                roughness_brightness = _math_node(
+                    nodes,
+                    "MULTIPLY",
+                    "Fur roughness brightness",
+                    395,
+                    -620,
+                    brightness,
+                )
+                links.new(
+                    roughness_add.outputs[0], roughness_brightness.inputs[0]
+                )
+                roughness_center = _math_node(
+                    nodes,
+                    "SUBTRACT",
+                    "Center fur roughness",
+                    565,
+                    -620,
+                    0.5,
+                )
+                links.new(
+                    roughness_brightness.outputs[0], roughness_center.inputs[0]
+                )
+                roughness_contrast = _math_node(
+                    nodes,
+                    "MULTIPLY",
+                    "Fur roughness contrast",
+                    735,
+                    -620,
+                    contrast,
+                )
+                links.new(
+                    roughness_center.outputs[0], roughness_contrast.inputs[0]
+                )
+                roughness_restore = _math_node(
+                    nodes,
+                    "ADD",
+                    "Restore fur roughness midpoint",
+                    905,
+                    -620,
+                    0.5,
+                )
+                links.new(
+                    roughness_contrast.outputs[0], roughness_restore.inputs[0]
+                )
+                roughness_clamp = _clamp_node(
+                    nodes, "Clamp wildlife fur roughness", 1075, -620
+                )
+                links.new(
+                    roughness_restore.outputs[0], roughness_clamp.inputs["Value"]
+                )
+                for link in list(shader.inputs["Roughness"].links):
+                    links.remove(link)
+                links.new(
+                    roughness_clamp.outputs["Result"], shader.inputs["Roughness"]
+                )
+
+                dither_alpha = max(
+                    0.0,
+                    _float_parameter(parameters.get("myDitherAlpha"), 1.0),
+                )
+                if abs(dither_alpha - 1.0) < 1e-6:
+                    profile_alpha_output = detail.outputs["Alpha"]
+                else:
+                    alpha_scale = _math_node(
+                        nodes,
+                        "MULTIPLY",
+                        "Fur strand opacity x authored dither",
+                        55,
+                        -540,
+                        dither_alpha,
+                    )
+                    links.new(detail.outputs["Alpha"], alpha_scale.inputs[0])
+                    profile_alpha_output = alpha_scale.outputs[0]
+                profile_alpha_source = "wildlife-fur-detail-alpha"
+                material["afop_detail_normal"] = detail_path
+
+            ao_path = auxiliary.get("AO")
+            explicit_ao = _aux_image_node(
+                nodes,
+                links,
+                texture_files,
+                ao_path,
+                "Wildlife Fur UV2 AO",
+                -520,
+                -1010,
+                tiling=(1.0, 1.0),
+                uv_map="UVMap_2",
+            )
+            if explicit_ao is not None:
+                explicit_ao_channels = _separate_node(
+                    nodes,
+                    links,
+                    explicit_ao.outputs["Color"],
+                    "Wildlife fur AO channels",
+                    -280,
+                    -1010,
+                )
+                if ao_output is None:
+                    ao_output = explicit_ao_channels.outputs["Red"]
+                else:
+                    minimum_ao = _math_node(
+                        nodes,
+                        "MINIMUM",
+                        "Minimum base / UV2 fur AO",
+                        55,
+                        -1010,
+                    )
+                    links.new(ao_output, minimum_ao.inputs[0])
+                    links.new(
+                        explicit_ao_channels.outputs["Red"],
+                        minimum_ao.inputs[1],
+                    )
+                    ao_output = minimum_ao.outputs[0]
+                material["afop_fur_ao"] = ao_path
+
+            pattern_path = auxiliary.get("PatternCoat")
+            pattern = _aux_image_node(
+                nodes,
+                links,
+                texture_files,
+                pattern_path,
+                "Wildlife Pattern Coat",
+                -520,
+                520,
+                non_color=True,
+            )
+            has_authored_coat = any(
+                f"myCoat{coat}Color{index}" in parameters
+                for coat in (1, 2)
+                for index in range(1, 6)
+            )
+            if pattern is not None and has_authored_coat:
+                pattern_channels = _separate_node(
+                    nodes,
+                    links,
+                    pattern.outputs["Color"],
+                    "Pattern R/G masks, B/A coat ramps",
+                    -280,
+                    520,
+                )
+                coat1 = _five_color_ramp(
+                    nodes,
+                    links,
+                    pattern_channels.outputs["Blue"],
+                    tuple(
+                        _color_parameter(
+                            parameters.get(f"myCoat1Color{index}")
+                        )
+                        for index in range(1, 6)
+                    ),
+                    "Wildlife Coat 1 palette",
+                    0,
+                    600,
+                )
+                coat2 = _five_color_ramp(
+                    nodes,
+                    links,
+                    pattern.outputs["Alpha"],
+                    tuple(
+                        _color_parameter(
+                            parameters.get(f"myCoat2Color{index}")
+                        )
+                        for index in range(1, 6)
+                    ),
+                    "Wildlife Coat 2 palette",
+                    0,
+                    380,
+                )
+                pattern1 = _pattern_component(
+                    nodes,
+                    links,
+                    pattern_channels.outputs["Red"],
+                    _float_parameter(
+                        parameters.get("myPattern1LevelControl"), 0.0
+                    ),
+                    _float_parameter(parameters.get("myInvertPattern1"), 0.0),
+                    "Wildlife pattern 1",
+                    230,
+                    620,
+                )
+                pattern2 = _pattern_component(
+                    nodes,
+                    links,
+                    pattern_channels.outputs["Green"],
+                    _float_parameter(
+                        parameters.get("myPattern2LevelControl"), 0.0
+                    ),
+                    _float_parameter(parameters.get("myInvertPattern2"), -0.3),
+                    "Wildlife pattern 2",
+                    230,
+                    400,
+                )
+                pattern_add = _math_node(
+                    nodes, "ADD", "Combine wildlife patterns", 760, 520
+                )
+                links.new(pattern1, pattern_add.inputs[0])
+                links.new(pattern2, pattern_add.inputs[1])
+                pattern_clamp = _clamp_node(
+                    nodes, "Clamp wildlife pattern", 930, 520
+                )
+                links.new(pattern_add.outputs[0], pattern_clamp.inputs["Value"])
+                coat_mix = nodes.new("ShaderNodeMixRGB")
+                coat_mix.label = "Select wildlife coat"
+                coat_mix.name = coat_mix.label
+                coat_mix.location = (1100, 520)
+                links.new(pattern_clamp.outputs[0], coat_mix.inputs[0])
+                links.new(coat1, coat_mix.inputs[1])
+                links.new(coat2, coat_mix.inputs[2])
+                coat_sqrt = nodes.new("ShaderNodeGamma")
+                coat_sqrt.label = "Snowdrop coat sqrt"
+                coat_sqrt.inputs["Gamma"].default_value = 0.5
+                coat_sqrt.location = (1280, 520)
+                diffuse_sqrt = nodes.new("ShaderNodeGamma")
+                diffuse_sqrt.label = "Snowdrop diffuse sqrt"
+                diffuse_sqrt.inputs["Gamma"].default_value = 0.5
+                diffuse_sqrt.location = (1280, 700)
+                links.new(coat_mix.outputs["Color"], coat_sqrt.inputs["Color"])
+                links.new(
+                    diffuse_node.outputs["Color"], diffuse_sqrt.inputs["Color"]
+                )
+                coat_overlay = nodes.new("ShaderNodeMixRGB")
+                coat_overlay.blend_type = "OVERLAY"
+                coat_overlay.label = "Wildlife coat overlay"
+                coat_overlay.name = coat_overlay.label
+                coat_overlay.location = (1470, 600)
+                links.new(mask_separate.outputs["Blue"], coat_overlay.inputs[0])
+                links.new(
+                    diffuse_sqrt.outputs["Color"], coat_overlay.inputs[1]
+                )
+                links.new(coat_sqrt.outputs["Color"], coat_overlay.inputs[2])
+                coat_square = nodes.new("ShaderNodeGamma")
+                coat_square.label = "Snowdrop coat square"
+                coat_square.inputs["Gamma"].default_value = 2.0
+                coat_square.location = (1650, 600)
+                links.new(
+                    coat_overlay.outputs["Color"], coat_square.inputs["Color"]
+                )
+                base_color_override = coat_square.outputs["Color"]
+                material["afop_pattern_coat"] = pattern_path
+            elif pattern is not None:
+                material["afop_pattern_coat"] = pattern_path
+                material["afop_pattern_coat_status"] = (
+                    "Texture imported; coat constants were not resolved, so diffuse was retained"
+                )
+
+            bio_colors = [
+                _color_parameter(parameters.get(f"myBioColor{index}"))
+                for index in range(1, 5)
+            ]
+            if mask_node is not None and any(
+                f"myBioColor{index}" in parameters for index in range(1, 5)
+            ):
+                bio_ramp = _five_color_ramp(
+                    nodes,
+                    links,
+                    mask_node.outputs["Alpha"],
+                    ((0.0, 0.0, 0.0), *bio_colors),
+                    "Wildlife fur bioluminescence (night preview)",
+                    820,
+                    -430,
+                )
+                emission_input = (
+                    shader.inputs.get("Emission Color")
+                    or shader.inputs.get("Emission")
+                )
+                if emission_input is not None:
+                    links.new(bio_ramp, emission_input)
+                emission_strength = shader.inputs.get("Emission Strength")
+                if emission_strength is not None:
+                    emission_strength.default_value = 0.1
+                material["afop_bio_palette"] = [
+                    component
+                    for color in ((0.0, 0.0, 0.0), *bio_colors)
+                    for component in color
+                ]
+                material["afop_bio_preview"] = "night"
+
+            material["afop_shader_profile"] = "wildlife_fur_static_clean"
+            material["afop_profile_limit"] = (
+                "Static clean/night preview; dither, weather and wounds are engine-driven"
+            )
+
+        if (
             is_medusa_skin
             and normal_texture_node is not None
             and normal is not None
@@ -2058,6 +2557,51 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
             )
             material["afop_profile_limit"] = (
                 "Snowdrop iterative view-dependent parallax is represented as bump"
+            )
+
+        if is_eye_shadow:
+            shadow_mask_path = profile_auxiliary.get("Mask")
+            shadow_mask = _aux_image_node(
+                nodes, links, texture_files, shadow_mask_path,
+                "Eye Shadow Mask", -520, 180,
+            )
+            shadow_color = nodes.new("ShaderNodeRGB")
+            shadow_color.label = "Authored eye-shadow color"
+            shadow_color.name = shadow_color.label
+            shadow_color.location = (1200, 260)
+            shadow_color.outputs[0].default_value = (0.0, 0.0, 0.0, 1.0)
+            links.new(shadow_color.outputs[0], shader.inputs["Base Color"])
+            if shadow_mask is not None:
+                shadow_channels = _separate_node(
+                    nodes, links, shadow_mask.outputs["Color"],
+                    "Eye Shadow Mask channels", -280, 180,
+                )
+                alpha_multiplier = max(
+                    0.0,
+                    min(
+                        1.0,
+                        _float_parameter(
+                            parameters.get("myAlphaMultiply"), 0.5
+                        ),
+                    ),
+                )
+                shadow_alpha = _math_node(
+                    nodes, "MULTIPLY", "Eye shadow opacity",
+                    120, 80, alpha_multiplier,
+                )
+                links.new(
+                    shadow_channels.outputs["Red"], shadow_alpha.inputs[0]
+                )
+                profile_alpha_output = shadow_alpha.outputs[0]
+                profile_alpha_source = "eye-shadow-mask-red"
+                material["afop_eye_shadow_mask"] = shadow_mask_path
+                material["afop_alpha_multiplier"] = alpha_multiplier
+            shader.inputs["Metallic"].default_value = 0.0
+            shader.inputs["Roughness"].default_value = 1.0
+            material["afop_shader_profile"] = "eye_shadow_mask"
+            material["afop_profile_limit"] = (
+                "Snowdrop eye-shadow blending is represented as a black "
+                "transparent overlay"
             )
 
         if is_eye_shell:
@@ -3321,6 +3865,7 @@ def assign_materials(skeletal_mesh, bindings, texture_files, source_path, lod_in
             or is_rustymetal_vcoverlay
             or is_navi_skin
             or is_wildlife_skin
+            or is_wildlife_fur
             or is_medusa_skin
             or is_vegetation
             or is_basic_blend
