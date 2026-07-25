@@ -3,7 +3,7 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, KickingWriter, SaintBaron",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 109),
+    "version": (0, 1, 115),
     "blender": (5, 0, 0),
     "description": "Import and Export meshes from AFoP .mmb files.",
     "category": "Import-Export",
@@ -48,6 +48,7 @@ _REQUIRED_SPLIT_MODULES = (
     "formats/meshlet.py",
     "formats/mgraph.py",
     "formats/mmb.py",
+    "formats/mreflex.py",
     "formats/shader_schema.py",
     "log.py",
     "material_import.py",
@@ -68,6 +69,7 @@ _REQUIRED_SPLIT_MODULES = (
     "operators/io.py",
     "operators/mesh.py",
     "operators/patterns.py",
+    "operators/reflex.py",
     "operators/sdf.py",
     "sdf/__init__.py",
     "sdf/oodle.py",
@@ -142,6 +144,7 @@ from .operators import files as operators_files
 from .operators import io as operators_io
 from .operators import mesh as operators_mesh
 from .operators import patterns as operators_patterns
+from .operators import reflex as operators_reflex
 from .operators import sdf as operators_sdf
 from . import settings
 from . import ui
@@ -153,6 +156,7 @@ from . import updater
 classes = (
     settings.AFOPPreferences,
     settings.SDFAssetListItem,
+    settings.MReflexNodeSettings,
     settings.SWOMTSettings,
     operators_io.BrowseMMBFile,
     operators_io.BrowseExportDirectory,
@@ -174,6 +178,9 @@ classes = (
     operators_sdf.ImportSDFMMB,
     operators_patterns.ApplyBansheePattern,
     operators_patterns.RemoveBansheePattern,
+    operators_reflex.BrowseMReflexFile,
+    operators_reflex.ReloadMReflex,
+    operators_reflex.SaveMReflex,
     operators_bones.RemapMeshBone,
     operators_bones.AddMeshBone,
     operators_bones.MergeSkeletons,
@@ -183,6 +190,7 @@ classes = (
     updater.DismissUpdateStatus,
     updater.ApplyUpdate,
     ui.SDFArchiveFilterPopover,
+    ui.MReflexNodeList,
     ui.SWOMTPanel,
     operators_io.LoadMMB,
     operators_io.ImportLOD,

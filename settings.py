@@ -9,6 +9,14 @@ from . import addon_state
 from .mesh_pipeline.files import _strip_mod_suffix, get_merged_mmb
 from .log import logger, set_debug
 from .formats.mmb import SkeletalMeshAsset
+from .formats.mreflex import (
+    BoneCandidate,
+    match_dangle_nodes,
+    paired_mreflex_path,
+    read_dangle_nodes,
+    read_transform_anchors,
+    reflect_x_basis,
+)
 
 
 _sdf_search_generation = 0
@@ -97,6 +105,95 @@ def apply_debug_logging_preference():
         set_debug(preferences.debug_logging)
 
 
+def _weighted_bone_indices(sk_mesh, mmb_path):
+    """Return skeleton indices that receive a non-zero LOD0 vertex weight."""
+    weighted = set()
+    merged = get_merged_mmb(mmb_path)
+    for mesh in sk_mesh.meshes:
+        if not mesh.lods or mesh.lods[0].vertex_count == 0:
+            continue
+        slots = list(mesh.mesh_bones.keys())
+        if not slots:
+            continue
+        try:
+            raw_mesh = mesh.extract_mesh_file(merged)
+            for vertex_weights in mesh.lods[0].get_bone_weights(raw_mesh):
+                for slot, weight in vertex_weights.items():
+                    if weight > 0.0 and 0 <= slot < len(slots):
+                        weighted.add(slots[slot])
+        except Exception as error:
+            logger.warning(
+                "Could not inspect bone weights for %s: %s", mesh.name, error)
+    return weighted
+
+
+def _load_mreflex_into_settings(settings, mmb_path, sk_mesh, reflex_path=""):
+    """Load a paired MReflex and conservatively label its kind-10 nodes."""
+    settings.reflex_nodes.clear()
+    settings.reflex_node_index = 0
+    path = os.path.abspath(reflex_path) if reflex_path else paired_mreflex_path(mmb_path)
+    settings["ReflexPath"] = path
+    if not path or not os.path.isfile(path):
+        settings["reflex_status"] = "No paired .mreflex found"
+        return False
+
+    try:
+        with open(path, "rb") as stream:
+            reflex_data = stream.read()
+        nodes = read_dangle_nodes(reflex_data)
+        matches = {}
+        if nodes:
+            anchors = read_transform_anchors(reflex_data, nodes)
+            weighted = _weighted_bone_indices(sk_mesh, mmb_path)
+            bones = []
+            for index, bone in enumerate(sk_mesh.bones):
+                local_matrix = tuple(
+                    float(bone.matrix[row][column])
+                    for row in range(4) for column in range(4)
+                )
+                bones.append(BoneCandidate(
+                    index=index,
+                    name=bone.name,
+                    parent_index=bone.parent_index,
+                    reflex_matrix=reflect_x_basis(local_matrix),
+                ))
+            matches = match_dangle_nodes(
+                nodes, bones, weighted, anchors=anchors)
+
+        for node in nodes:
+            item = settings.reflex_nodes.add()
+            item.record_index = node.record_index
+            item.node_id = f"{node.node_id:08X}"
+            item.parent_id = f"{node.parent_id:08X}"
+            match = matches.get(node.record_index)
+            if match is not None:
+                item.bone_name = match.bone_name
+                item.match_status = "MATCHED"
+                item.match_error = match.error
+            else:
+                item.bone_name = ""
+                item.match_status = "UNMATCHED"
+                item.match_error = -1.0
+            item.gravity = node.gravity
+            item.weight = node.weight
+            item.spring = node.spring
+            item.damping = node.damping
+            item.limit_1, item.limit_2, item.limit_3, item.limit_4 = node.limits
+
+        if not nodes:
+            settings["reflex_status"] = (
+                "Valid .mreflex; no kind-10 dangle nodes")
+        else:
+            settings["reflex_status"] = (
+                f"{len(nodes)} dangle nodes; {len(matches)} uniquely matched")
+        logger.info("Loaded MReflex %s (%s)", path, settings.reflex_status)
+        return True
+    except Exception as error:
+        settings["reflex_status"] = f"MReflex load failed: {error}"
+        logger.warning("MReflex load failed for %s: %s", path, error)
+        return False
+
+
 @bpy.app.handlers.persistent
 def _on_load_post(filepath, *args, **kwargs):
     """Resets the asset when a .blend file is loaded, then re-loads it from the AssetPath if the file still exists."""
@@ -120,6 +217,7 @@ def _on_load_post(filepath, *args, **kwargs):
                         sk_mesh.name = full_stem
                     addon_state.asset = sk_mesh
                 _check_removed_meshes_mmb(sk_mesh, path)
+                _load_mreflex_into_settings(scene.SWOMT, path, sk_mesh)
                 logger.info("Loaded %s from %s", sk_mesh.name, path)
             except Exception as e:
                 logger.warning("Failed to load %s: %s", path, e)
@@ -153,6 +251,9 @@ def _auto_load_mmb(self, context):
     path = bpy.path.abspath(self.AssetPath) if self.AssetPath else ""
     old_asset = addon_state.asset
     self["banshee_pattern_status"] = ""
+    self.reflex_nodes.clear()
+    self["ReflexPath"] = ""
+    self["reflex_status"] = ""
 
     # Clear the parsed asset immediately so editing the path cannot leave the
     # import/export controls for the previously loaded MMB active.
@@ -169,6 +270,7 @@ def _auto_load_mmb(self, context):
             sk_mesh.name = new_name
             addon_state.asset = sk_mesh
         _check_removed_meshes_mmb(sk_mesh, path)
+        _load_mreflex_into_settings(self, path, sk_mesh)
     except Exception as e:
         logger.warning("MMB auto-load failed: %s", e)
     finally:
@@ -299,7 +401,7 @@ class AFOPPreferences(bpy.types.AddonPreferences):
     default_extracted_files_directory: bpy.props.StringProperty(
         name="Default Extracted Files",
         subtype='DIR_PATH',
-        description="Default folder for MMB, mcloth, and texture files extracted from SDF archives",
+        description="Default folder for MMB, mcloth, mreflex, and texture files extracted from SDF archives",
         default=blender_extracted_files_directory(),
     )
     debug_logging: bpy.props.BoolProperty(
@@ -335,6 +437,69 @@ class SDFAssetListItem(bpy.types.PropertyGroup):
     asset_type: bpy.props.StringProperty(options={'SKIP_SAVE'})
     archive_label: bpy.props.StringProperty(options={'SKIP_SAVE'})
     entry_id: bpy.props.IntProperty(default=-1, options={'SKIP_SAVE'})
+
+
+class MReflexNodeSettings(bpy.types.PropertyGroup):
+    """Editable values for one structurally validated kind-10 MReflex node."""
+
+    record_index: bpy.props.IntProperty(options={'HIDDEN', 'SKIP_SAVE'})
+    node_id: bpy.props.StringProperty(options={'HIDDEN', 'SKIP_SAVE'})
+    parent_id: bpy.props.StringProperty(options={'HIDDEN', 'SKIP_SAVE'})
+    bone_name: bpy.props.StringProperty(options={'HIDDEN', 'SKIP_SAVE'})
+    match_status: bpy.props.StringProperty(options={'HIDDEN', 'SKIP_SAVE'})
+    match_error: bpy.props.FloatProperty(
+        default=-1.0, options={'HIDDEN', 'SKIP_SAVE'})
+    gravity: bpy.props.FloatProperty(
+        name="Gravity",
+        description=(
+            "Strength of the constant downward acceleration.\n"
+            "At zero, displaced sections may remain raised"
+        ),
+        precision=4,
+        soft_min=0.0,
+        soft_max=98.0,
+    )
+    weight: bpy.props.FloatProperty(
+        name="Force Response",
+        description=(
+            "How strongly wind and other external forces move the node.\n"
+            "Zero prevents dynamic movement; one gives maximum response.\n"
+            "Stored in the raw field previously labelled Weight"
+        ),
+        precision=4,
+        soft_min=0.0,
+        soft_max=1.0,
+    )
+    spring: bpy.props.FloatProperty(
+        name="Stiffness",
+        description=(
+            "How strongly the node resists bending and returns toward its "
+            "rest orientation.\n"
+            "Very low values can cause continuous movement or twitching"
+        ),
+        precision=5,
+        soft_min=0.0,
+        soft_max=10.0,
+    )
+    damping: bpy.props.FloatProperty(
+        name="Motion Retention",
+        description=(
+            "How much movement is retained.\n"
+            "Lower values suppress movement more strongly; higher values "
+            "allow motion to continue"
+        ),
+        precision=5,
+        soft_min=0.0,
+        soft_max=1.0,
+    )
+    limit_1: bpy.props.FloatProperty(
+        name="Limit 1", subtype='ANGLE', precision=2)
+    limit_2: bpy.props.FloatProperty(
+        name="Limit 2", subtype='ANGLE', precision=2)
+    limit_3: bpy.props.FloatProperty(
+        name="Limit 3", subtype='ANGLE', precision=2)
+    limit_4: bpy.props.FloatProperty(
+        name="Limit 4", subtype='ANGLE', precision=2)
 
 
 def _get_sdf_game_directory(self):
@@ -379,9 +544,25 @@ class SWOMTSettings(bpy.types.PropertyGroup):
         update=_auto_load_mmb,
     )
     ExportPath: bpy.props.StringProperty(
-        name="Folder where MMB and MCloth files are exported",
+        name="Folder where MMB, MCloth, and MReflex files are exported",
         get=_get_export_path,
         set=_set_export_path,
+    )
+    ReflexPath: bpy.props.StringProperty(
+        name="MReflex File",
+        description="Dangle-bone physics file paired with the loaded MMB",
+    )
+    reflex_nodes: bpy.props.CollectionProperty(
+        type=MReflexNodeSettings,
+        options={'SKIP_SAVE'},
+    )
+    reflex_node_index: bpy.props.IntProperty(
+        default=0, min=0, options={'SKIP_SAVE'})
+    reflex_status: bpy.props.StringProperty(
+        options={'HIDDEN', 'SKIP_SAVE'})
+    reflex_expanded: bpy.props.BoolProperty(
+        name="Dangle Physics",
+        default=False,
     )
     sdf_browser_expanded: bpy.props.BoolProperty(
         name="Load from Game Files",
@@ -395,7 +576,7 @@ class SWOMTSettings(bpy.types.PropertyGroup):
     )
     sdf_extracted_directory: bpy.props.StringProperty(
         name="Extracted Files",
-        description="Folder for MMB, MCloth, and Texture files extracted from SDF archives",
+        description="Folder for MMB, MCloth, MReflex, and Texture files extracted from SDF archives",
         get=_get_sdf_extracted_directory,
         set=_set_sdf_extracted_directory,
     )
@@ -490,7 +671,7 @@ class SWOMTSettings(bpy.types.PropertyGroup):
     overwrite_existing: bpy.props.BoolProperty(
         name="Overwrite existing file",
         default=False,
-        description="Overwrite the loaded MMB instead of creating a new _MOD file",
+        description="Overwrite loaded files instead of creating protected _MOD files",
     )
     mesh_expanded: bpy.props.BoolVectorProperty(size=32, default=tuple([False]*32))
     bone_slots_expanded: bpy.props.BoolVectorProperty(size=32, default=tuple([False]*32))
@@ -547,4 +728,9 @@ class SWOMTSettings(bpy.types.PropertyGroup):
         default=True,
     )
 
-CLASSES = (AFOPPreferences, SDFAssetListItem, SWOMTSettings)
+CLASSES = (
+    AFOPPreferences,
+    SDFAssetListItem,
+    MReflexNodeSettings,
+    SWOMTSettings,
+)

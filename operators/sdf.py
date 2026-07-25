@@ -35,7 +35,7 @@ _OODLE_NAMES = (
     "oo2core_win64.dll",
 )
 _MAX_SEARCH_RESULTS = 500
-_INDEX_CACHE_VERSION = 5
+_INDEX_CACHE_VERSION = 6
 _ASSET_MMB = "MMB"
 _ASSET_MGRAPH = "MGRAPHOBJECT"
 _ASSET_MCOMPOUND = "MCOMPOUNDNODE"
@@ -353,7 +353,7 @@ def _load_archives_worker(root, generation, index_cache_dir=None, allow_rebuild=
                         asset for asset in archive.assets
                         if asset.name.casefold().endswith(
                             (
-                                ".mmb", ".mcloth", ".mgraphobject",
+                                ".mmb", ".mcloth", ".mreflex", ".mgraphobject",
                                 ".mcompoundnode", ".mshader", ".dds",
                                 ".mbansheepatterndata", ".mcolorpattern",
                                 ".mpatterncontrol",
@@ -390,7 +390,7 @@ def _load_archives_worker(root, generation, index_cache_dir=None, allow_rebuild=
                     if lower_name.endswith(".mmb"):
                         entries.append(indexed)
                         search_entries.append((_ASSET_MMB, indexed))
-                    elif lower_name.endswith(".mcloth"):
+                    elif lower_name.endswith((".mcloth", ".mreflex")):
                         sidecars.setdefault(lower_name, []).append(indexed)
                     elif lower_name.endswith(".mgraphobject"):
                         graphs.setdefault(lower_name, []).append(indexed)
@@ -776,8 +776,11 @@ def _extract_to_cache(entry, extracted_directory=None, destination=None):
     return destination, True
 
 
-def _matching_sidecar(entry):
-    sidecar_name = entry.asset.name.rsplit(".", 1)[0] + ".mcloth"
+def _matching_sidecar(entry, extension):
+    """Return the same-path sidecar, preferring the MMB's own archive."""
+    if not extension.startswith("."):
+        raise ValueError("Sidecar extension must start with '.'")
+    sidecar_name = entry.asset.name.rsplit(".", 1)[0] + extension
     with _state.lock:
         candidates = list(_state.sidecars.get(sidecar_name.casefold(), ()))
     for candidate in candidates:
@@ -1956,20 +1959,27 @@ def _process_mmb_entry(
                 entry, destination=temporary_path
             )
 
-        sidecar = _matching_sidecar(entry) if load_as_asset else None
-        if sidecar is not None:
-            mcloth_path = os.path.splitext(mmb_path)[0] + ".mcloth"
+        sidecars = (
+            (".mcloth", "mcloth"),
+            (".mreflex", "mreflex"),
+        ) if load_as_asset else ()
+        for extension, label in sidecars:
+            sidecar = _matching_sidecar(entry, extension)
+            if sidecar is None:
+                continue
+            sidecar_path = os.path.splitext(mmb_path)[0] + extension
             try:
-                _extract_to_cache(sidecar, destination=mcloth_path)
+                _extract_to_cache(sidecar, destination=sidecar_path)
             except Exception as error:
                 logger.warning(
-                    "Could not extract paired mcloth for %s: %s",
+                    "Could not extract paired %s for %s: %s",
+                    label,
                     entry.asset.name,
                     error,
                 )
                 operator.report(
                     {"WARNING"},
-                    f"MMB loaded, but paired mcloth extraction failed: {error}",
+                    f"MMB loaded, but paired {label} extraction failed: {error}",
                 )
 
         try:
@@ -2139,7 +2149,7 @@ class ClearSDFIndexCache(bpy.types.Operator):
     bl_idname = "object.clear_sdf_index_cache"
     bl_label = "Clear SDF Index Cache"
     bl_description = (
-        "Delete cached MMB, mcloth, material-graph, compound-node, shader, and texture indexes; "
+        "Delete cached MMB, mcloth, mreflex, material-graph, compound-node, shader, and texture indexes; "
         "extracted asset files are preserved"
     )
 
