@@ -70,6 +70,7 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
     with open(src_path, 'rb') as f:
         data = f.read()
     try:
+        streams, _footer_offset = mcloth.parse_streams(data)
         _stream_end, blocks = mcloth.parse_blocks(data)
     except ValueError as e:
         if operator:
@@ -78,6 +79,8 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
 
     remaps = {}
     gen_info = {} # block_name -> (obj, lod, li) for slot exports with appended verts
+    dense_unsupported = []
+    dense_unsupported_blocks = set()
     for mesh in cloth_meshes:
         for li, lod in enumerate(mesh.lods):
             obj_name = lod.blender_obj_name or f"{mesh.name}_LOD{li}"
@@ -87,8 +90,15 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
             block_name = mesh.name if li == 0 else f"{mesh.name}_LOD{li}"
             if block_name not in blocks:
                 continue
+            block = blocks[block_name]
+            original_vc = mcloth.block_vertex_count(data, block)
             slot_vc = getattr(lod, 'exported_slot_identity', 0)
             if slot_vc:
+                if block.get('dense') and slot_vc != original_vc:
+                    dense_unsupported_blocks.add(block_name)
+                    dense_unsupported.append(
+                        f"{block_name}: vertex count {original_vc}->{slot_vc}")
+                    continue
                 # Slot-preserving export: original indices stay at their
                 # original slots and every source row remains eligible.
                 remaps[block_name] = (slot_vc, block_name,
@@ -116,7 +126,25 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
             else:
                 # No mapping attribute (fully replaced mesh): fall back to identity
                 old_to_new = {i: i for i in range(new_vc)}
+            if block.get('dense') and (
+                    new_vc != original_vc
+                    or old_to_new != {i: i for i in range(original_vc)}):
+                dense_unsupported_blocks.add(block_name)
+                dense_unsupported.append(
+                    f"{block_name}: dense implicit vertex IDs changed")
+                continue
             remaps[block_name] = (new_vc, src_block, old_to_new)
+
+    if dense_unsupported:
+        detail = "; ".join(dense_unsupported)
+        logger.warning(
+            "Dense cloth topology rewrite skipped (%s). Mapping rows were "
+            "preserved and may be stale.", detail)
+        if operator:
+            operator.report(
+                {'WARNING'},
+                "Dense cloth topology/count changes are not yet supported; "
+                "affected mapping rows were preserved. See the log for details.")
 
     # Sim-section sync: BUDGET REUSE remains the preferred path. New sim verts
     # occupy reused (deleted) slots while the vanilla budget is sufficient,
@@ -429,6 +457,8 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
             _zone_moved_total = 0
             for li in range(len(new_render.lods)):
                 block_name = mesh.name if li == 0 else f"{mesh.name}_LOD{li}"
+                if block_name in dense_unsupported_blocks:
+                    continue
                 if block_name not in remaps:
                     if (sim_fix is None and _zone_lookups.get(li) is None) \
                             or block_name not in blocks:
@@ -437,11 +467,8 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                     # LOD wasn't exported: give it an identity remap so its
                     # stale rows can be fixed too.
                     _bb0 = blocks[block_name]
-                    _h0 = _bb0['chunks'][mcloth.T_HEADER][0]
-                    _vc0 = unpack('<I', data[_h0 + 8:_h0 + 12])[0]
-                    _i0, _s0 = _bb0['chunks'][mcloth.T_INDICES]
-                    _n0 = (_s0 - 8) // 4
-                    _six0 = unpack(f'<{_n0}I', data[_i0 + 8:_i0 + _s0])
+                    _vc0 = mcloth.block_vertex_count(data, _bb0)
+                    _six0 = mcloth.block_vertex_indices(data, _bb0)
                     remaps[block_name] = (_vc0, block_name,
                                           {ov: ov for ov in _six0})
                 pos = mcloth.mmb_lod_float_positions(new_bytes, new_render, li)
@@ -486,9 +513,7 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                                     v not in _reused_v for v in sim_tris[t])}
                                if _reused_v else _valid_t)
                     _bb = blocks[block_name]
-                    _i3, _s3 = _bb['chunks'][mcloth.T_INDICES]
-                    _nB = (_s3 - 8) // 4
-                    _six = unpack(f'<{_nB}I', data[_i3 + 8:_i3 + _s3])
+                    _six = mcloth.block_vertex_indices(data, _bb)
                     _t3 = _bb['chunks'][mcloth.T_TRI][0] + 8
                     _o2n = remaps[block_name][2]
                     _ntb = mcloth.mmb_lod_normals_tangents(new_bytes, new_render, li)
@@ -563,9 +588,7 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                                                         new_render, li)
                 if _opos is not None and _ntb2 is not None:
                     _bb2 = blocks[block_name]
-                    _i4, _s4 = _bb2['chunks'][mcloth.T_INDICES]
-                    _n4 = (_s4 - 8) // 4
-                    _six2 = unpack(f'<{_n4}I', data[_i4 + 8:_i4 + _s4])
+                    _six2 = mcloth.block_vertex_indices(data, _bb2)
                     _t4 = _bb2['chunks'][mcloth.T_TRI][0] + 8
                     _o2n2 = remaps[block_name][2]
                     _done = dict(computed.get(block_name, []))
@@ -638,9 +661,7 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
 
                 def _tri_map(bname):
                     bb = blocks[bname]
-                    i3, s3 = bb['chunks'][mcloth.T_INDICES]
-                    nB = (s3 - 8) // 4
-                    six = unpack(f'<{nB}I', data[i3 + 8:i3 + s3])
+                    six = mcloth.block_vertex_indices(data, bb)
                     t3 = bb['chunks'][mcloth.T_TRI][0] + 8
                     return {ov: unpack('<H', data[t3 + r * 2:t3 + r * 2 + 2])[0]
                             for r, ov in enumerate(six)}
@@ -818,6 +839,103 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                 operator.report({'INFO'},
                     f"Cloth zones re-assigned {_zone_moved_total} render "
                     f"row(s) across LODs.")
+
+        # CROSS-STREAM SIM ATTACHMENTS: a mapping block named for a different
+        # _CLOTH_SIM mesh makes that target SIM ride the current stream's
+        # driver fabric. Count-preserving target moves can use the same
+        # row-value pipeline as render moves. Topology/count edits remain
+        # deliberately gated until this attachment path is validated in-game.
+        _attachment_warnings = []
+        _new_meshes = {m.name: m for m in new_asset.meshes}
+        for _aname, _ablock in blocks.items():
+            if not _aname.endswith('_CLOTH_SIM') \
+                    or _aname not in _new_meshes:
+                continue
+            _asi = _ablock.get('stream_index')
+            if _asi is None or _asi >= len(streams):
+                continue
+            _driver_name = mcloth.stream_sim_name(streams[_asi])
+            if not _driver_name or _driver_name == _aname:
+                continue
+
+            if (_aname in sim_args or _aname in sim_reuse_args
+                    or _driver_name in sim_args
+                    or _driver_name in sim_reuse_args):
+                _attachment_warnings.append(
+                    f"{_aname} attached to {_driver_name}: topology/reuse edit")
+                continue
+
+            _move_info = sim_move_args.get(_aname)
+            if not _move_info:
+                continue
+            _target_pos, _target_moved = _move_info
+            _target_mesh = _new_meshes[_aname]
+            _driver_mesh = _new_meshes.get(_driver_name)
+            if _driver_mesh is None or not _driver_mesh.lods:
+                _attachment_warnings.append(
+                    f"{_aname}: driver mesh {_driver_name} is unavailable")
+                continue
+            _driver_pos = mcloth.mmb_lod_float_positions(
+                new_bytes, _driver_mesh, 0)
+            _driver_tris = mcloth.mmb_lod_u16_tris(
+                new_bytes, _driver_mesh, 0)
+            _target_nt = mcloth.mmb_lod_normals_tangents(
+                new_bytes, _target_mesh, 0)
+            _avc = mcloth.block_vertex_count(data, _ablock)
+            if (_driver_pos is None or _driver_tris is None
+                    or _target_nt is None or len(_target_pos) != _avc):
+                _attachment_warnings.append(
+                    f"{_aname}: dense attachment geometry/count mismatch")
+                continue
+
+            _aids = mcloth.block_vertex_indices(data, _ablock)
+            _a_o2n = {v: v for v in _aids}
+            _atri_off = _ablock['chunks'][mcloth.T_TRI][0] + 8
+            _arows = {}
+            for _arow, _av in enumerate(_aids):
+                if _av not in _target_moved or _av >= len(_target_pos) \
+                        or _av >= len(_target_nt):
+                    continue
+                _ati = unpack(
+                    '<H', data[_atri_off + _arow * 2:
+                               _atri_off + _arow * 2 + 2])[0]
+                if _ati >= len(_driver_tris):
+                    continue
+                _ap = _target_pos[_av]
+                _an, _at = _target_nt[_av]
+                _avals = mcloth.compute_row_values(
+                    _driver_pos, _driver_tris, _ati, _ap, _an, _at)
+                if _avals is not None and not mcloth.bary_within(_avals):
+                    _ati2 = mcloth.nearest_tri(
+                        _driver_pos, _driver_tris, _ap)
+                    if _ati2 is not None and _ati2 != _ati:
+                        _avals2 = mcloth.compute_row_values(
+                            _driver_pos, _driver_tris, _ati2,
+                            _ap, _an, _at)
+                        if _avals2 is not None:
+                            _avals = _avals2
+                if _avals is not None:
+                    _a_o2n.pop(_av, None)
+                    _arows[_av] = _avals
+
+            if _arows:
+                remaps[_aname] = (_avc, _aname, _a_o2n)
+                rebind[_aname] = (
+                    _driver_pos, _driver_tris, _target_pos)
+                computed[_aname] = sorted(_arows.items())
+                logger.info(
+                    "%s: recomputed %d count-preserving attachment row(s) "
+                    "against %s", _aname, len(_arows), _driver_name)
+
+        if _attachment_warnings:
+            logger.warning(
+                "Cloth attachment rewrite skipped for unsupported edits: %s",
+                "; ".join(_attachment_warnings))
+            if operator:
+                operator.report(
+                    {'WARNING'},
+                    "A dense/SIM attachment has a topology or count change; "
+                    "its mapping was preserved and may be stale.")
     except Exception as e:
         logger.exception("mcloth geometry pass was skipped: %s", e)
         rebind = {}

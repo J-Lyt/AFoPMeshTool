@@ -9,9 +9,10 @@
 # sim-mesh triangle. Container: u32 magic 205, u32 stream_count, then that many
 # records [u32 stream_size+8, u32 1, u32 stream_size, flat ECD7 chunk stream].
 # A small file-level footer follows the last record. Each stream owns one
-# sparse <base>_CLOTH_RENDER LOD family and the matching <base>_CLOTH_SIM
-# section. Multi-stream rewrites route render and sim edits independently and
-# rebuild every changed stream record size while preserving the global footer.
+# <base>_CLOTH_RENDER LOD family and the matching <base>_CLOTH_SIM section.
+# Render mappings may be sparse (explicit 0x113e vertex IDs) or dense (B=0,
+# implicit IDs 0..vc-1). Multi-stream rewrites route render, attachment, and
+# sim edits independently while preserving the global footer.
 #
 # Per render LOD the stream contains, in order:
 #   ecd71116 header : u32 render_vc, u32 A, u8 1, u32 B, u8 1, 5 zero bytes.
@@ -368,6 +369,8 @@ def parse_streams(data):
             raise ValueError("mcloth stream size exceeds file size")
 
         blocks = _parse_blocks_range(data, stream_start, stream_end)
+        for block in blocks.values():
+            block['stream_index'] = stream_index
         streams.append({'header': pos, 'start': stream_start,
                         'end': stream_end, 'blocks': blocks})
         pos = stream_end
@@ -375,11 +378,11 @@ def parse_streams(data):
 
 
 def _stream_sim_name(stream):
-    """Infer the SIM mesh owned by a stream from its sparse render blocks.
+    """Infer the SIM mesh owned by a stream from its render mapping blocks.
 
-    Some multi-stream files contain a dense ``*_CLOTH_SIM`` descriptor for the
-    following stream inside the preceding stream. Sparse render blocks are the
-    reliable ownership key because their names map directly to MMB mesh pairs.
+    Some multi-stream files contain ``*_CLOTH_SIM`` attachment descriptors for
+    another stream. Only ``*_CLOTH_RENDER`` names identify the fabric owned by
+    this stream; the mapping may use either sparse or dense row indexing.
     """
     bases = {
         name.split('_CLOTH_RENDER', 1)[0]
@@ -391,8 +394,13 @@ def _stream_sim_name(stream):
     return None
 
 
+def stream_sim_name(stream):
+    """Public ownership helper for Blender-side attachment orchestration."""
+    return _stream_sim_name(stream)
+
+
 def _blocks_by_name(streams):
-    """Merge sparse render blocks and reject ambiguous duplicate names."""
+    """Merge render/attachment blocks and reject ambiguous duplicate names."""
     blocks = {}
     for stream in streams:
         for name, block in stream['blocks'].items():
@@ -414,7 +422,7 @@ def _stream_for_sim(streams, sim_name):
 
 
 def _parse_blocks_range(data, stream_start, stream_end):
-    """Render mapping blocks within one already-validated chunk stream."""
+    """Sparse and dense mapping blocks in one validated chunk stream."""
     blocks = {}
     cur = None
     off = stream_start
@@ -426,13 +434,26 @@ def _parse_blocks_range(data, stream_start, stream_end):
             raise ValueError(f"Bad mcloth chunk at offset {off}")
         t = tag & 0xFFFF
         if t == T_HEADER:
-            cur = {'order': [], 'chunks': {}}
+            cur = {'order': [], 'chunks': {}, 'dense': False}
         if cur is not None:
             cur['order'].append((tag, off, size))
             cur['chunks'][t] = (off, size)
-            if t == T_INDICES:
-                noff, nsize = cur['chunks'][T_NAME]
-                name = data[noff + 8:noff + nsize].split(b'\0')[0].decode('latin-1')
+            if t == T_NAME:
+                name = data[off + 8:off + size].split(b'\0')[0].decode(
+                    'latin-1')
+                cur['name'] = name
+                hoff, hsize = cur['chunks'][T_HEADER]
+                hp = data[hoff + 8:hoff + hsize]
+                if len(hp) >= 13 and unpack('<I', hp[9:13])[0] == 0:
+                    cur['dense'] = True
+                    blocks[name] = cur
+                    cur = None
+            elif t == T_INDICES:
+                name = cur.get('name')
+                if name is None:
+                    raise ValueError(
+                        f"Mapping block at offset {cur['order'][0][1]} "
+                        "has indices before its name")
                 blocks[name] = cur
                 cur = None
         off += size
@@ -440,13 +461,38 @@ def _parse_blocks_range(data, stream_start, stream_end):
 
 
 def parse_blocks(data):
-    """Parse sparse render blocks across every .mcloth stream.
+    """Parse sparse and dense mapping blocks across every .mcloth stream.
 
     Returns ``(footer_offset, blocks)``. Block names must be globally unique so
     callers can safely use the mesh/LOD name as their rewrite key.
     """
     streams, footer_offset = parse_streams(data)
     return footer_offset, _blocks_by_name(streams)
+
+
+def block_vertex_count(data, block):
+    """Serialized vertex count from a mapping block's 0x1116 header."""
+    hoff, hsize = block['chunks'][T_HEADER]
+    if hsize < 12:
+        raise ValueError("Truncated mcloth mapping header")
+    return unpack('<I', data[hoff + 8:hoff + 12])[0]
+
+
+def block_row_count(data, block):
+    """Effective mapping-row count for a sparse or dense block."""
+    if block.get('dense'):
+        return block_vertex_count(data, block)
+    ioff, isize = block['chunks'][T_INDICES]
+    return (isize - 8) // 4
+
+
+def block_vertex_indices(data, block):
+    """Mapped vertex IDs in row order (implicit 0..vc-1 when dense)."""
+    count = block_row_count(data, block)
+    if block.get('dense'):
+        return tuple(range(count))
+    ioff, isize = block['chunks'][T_INDICES]
+    return unpack(f'<{count}I', data[ioff + 8:ioff + isize])
 
 
 def rebind_heights(data, srcb, rows, sim_verts, sim_tris, new_pos):
@@ -501,8 +547,20 @@ def _patched_header(data, tgt, new_vc, new_A, new_B):
     tp = bytearray(data[thoff + 8:thoff + thsize])
     tp[0:4] = pack('<I', new_vc)
     tp[4:8] = pack('<I', new_A)
-    tp[9:13] = pack('<I', new_B)
+    # Dense blocks serialize B=0 and imply one row for every vertex.
+    tp[9:13] = pack('<I', 0 if tgt.get('dense') else new_B)
     return bytes(tp)
+
+
+def _validate_dense_output(tgt, new_vc, rows, block_name):
+    """Dense output must remain count-preserving with implicit identity IDs."""
+    if not tgt.get('dense'):
+        return
+    row_ids = [nv for nv, _value in rows]
+    if len(row_ids) != new_vc or row_ids != list(range(new_vc)):
+        raise ValueError(
+            f"Dense mapping '{block_name}' requires count-preserving "
+            "implicit vertex IDs")
 
 
 def _build_single(data, blocks, tgt, block_name, new_vc, source, rebind):
@@ -511,9 +569,8 @@ def _build_single(data, blocks, tgt, block_name, new_vc, source, rebind):
     src_name, old_to_new = source
     srcb = blocks[src_name]
 
-    soff, ssize = srcb['chunks'][T_INDICES]
-    src_B = (ssize - 8) // 4
-    src_idx = unpack(f'<{src_B}I', data[soff + 8:soff + ssize])
+    src_idx = block_vertex_indices(data, srcb)
+    src_B = len(src_idx)
 
     # rows: (new render-vertex index, row index in the source tables)
     rows = []
@@ -523,6 +580,7 @@ def _build_single(data, blocks, tgt, block_name, new_vc, source, rebind):
             rows.append((nv, r))
     rows.sort()
     new_B = len(rows)
+    _validate_dense_output(tgt, new_vc, rows, block_name)
     # identity: same block, every row kept with its original index and order
     identity = (src_name == block_name and new_B == src_B
                 and all(nv == src_idx[r] for nv, r in rows))
@@ -585,14 +643,19 @@ def _build_values(data, blocks, tgt, block_name, new_vc, source, computed,
     src_name, old_to_new = source
     srcb = blocks[src_name]
 
-    soff, ssize = srcb['chunks'][T_INDICES]
-    src_B = (ssize - 8) // 4
-    src_idx = unpack(f'<{src_B}I', data[soff + 8:soff + ssize])
+    src_idx = block_vertex_indices(data, srcb)
+    src_B = len(src_idx)
 
     # scales + table offsets of the source block
     scales = {}
     offs = {}
-    for sc_tag, tb_tag, lanes in VALUE_TABLES:
+    active_tables = [
+        (sc_tag, tb_tag, lanes)
+        for sc_tag, tb_tag, lanes in VALUE_TABLES
+        if sc_tag in srcb['chunks'] and tb_tag in srcb['chunks']
+        and sc_tag in tgt['chunks'] and tb_tag in tgt['chunks']
+    ]
+    for sc_tag, tb_tag, lanes in active_tables:
         so, _ss = srcb['chunks'][sc_tag]
         s, mn, _mx = unpack('<fff', data[so + 8:so + 20])
         scales[tb_tag] = (s, mn)
@@ -607,7 +670,7 @@ def _build_values(data, blocks, tgt, block_name, new_vc, source, computed,
             continue
         ti = unpack('<H', data[tri_off + r * 2:tri_off + r * 2 + 2])[0]
         vals = {'tri': ti}
-        for sc_tag, tb_tag, lanes in VALUE_TABLES:
+        for sc_tag, tb_tag, lanes in active_tables:
             s, mn = scales[tb_tag]
             vals[tb_tag] = tuple(mn + x * s
                                  for x in read_row_bytes(data, offs[tb_tag], r, lanes))
@@ -615,6 +678,7 @@ def _build_values(data, blocks, tgt, block_name, new_vc, source, computed,
     rowvals.extend(computed)
     rowvals.sort(key=lambda rv: rv[0])
     new_B = len(rowvals)
+    _validate_dense_output(tgt, new_vc, rowvals, block_name)
 
     # fresh heights from the exported positions when geometry is available
     if rebind and block_name in rebind:
@@ -622,13 +686,13 @@ def _build_values(data, blocks, tgt, block_name, new_vc, source, computed,
         for nv, vals in rowvals:
             if vals['tri'] < len(sim_tris) and nv < len(new_pos):
                 h = _perp_height(sim_verts, sim_tris[vals['tri']], new_pos[nv])
-                if h is not None:
+                if h is not None and 0x1126 in vals:
                     vals[0x1126] = (h,)
 
     # requantize under fresh per-table ranges (scale = range/254.5)
     table_payloads = {}
     scale_payloads = {}
-    for sc_tag, tb_tag, lanes in VALUE_TABLES:
+    for sc_tag, tb_tag, lanes in active_tables:
         flat = [x for _nv, vals in rowvals for x in vals[tb_tag]]
         mn = min(flat) if flat else 0.0
         mx = max(flat) if flat else 0.0
@@ -659,9 +723,17 @@ def _build_values(data, blocks, tgt, block_name, new_vc, source, computed,
         elif t in scale_payloads:
             payload = scale_payloads[t]
         elif t in DUP_TABLES:
-            payload = table_payloads[DUP_TABLES[t]]
+            source_tag = DUP_TABLES[t]
+            if source_tag in table_payloads:
+                payload = table_payloads[source_tag]
+            else:
+                payload = data[off + 8:off + size]
         elif t in DUP_SCALES:
-            payload = scale_payloads[DUP_SCALES[t]]
+            source_tag = DUP_SCALES[t]
+            if source_tag in scale_payloads:
+                payload = scale_payloads[source_tag]
+            else:
+                payload = data[off + 8:off + size]
         else:
             payload = data[off + 8:off + size]
         pieces.append(pack('<II', tag, 8 + len(payload)) + payload)
@@ -1550,7 +1622,8 @@ def _sim_reuse_overrides(data, stream_start, stream_end, new_pos,
     #     are donor-transferred with slack) and a u16 anchor table (a
     #     DUPLICATE of 0x112a spanning two windows, self-index padding).
     #     Left stale, these tether a reused slot to its DELETED position. ---
-    if restl_pay is not None and s3 is not None and 0x112a in orig:
+    if (restl_pay is not None and s3 is not None
+            and len(orig.get(0x112a, b'')) >= V * 2):
         c16 = (V + 15) // 16 * 16
         base = sum((c + 15) // 16 * 16 for c in s3)
         if base < len(restl_pay) and (len(restl_pay) - base) % c16 == 0:
@@ -1743,7 +1816,7 @@ def _sim_move_overrides(data, stream_start, stream_end, new_pos, moved):
 
         # tether trailer: recompute the decoded 1.25*euclid radius window for
         # verts that moved (or whose anchor moved); anchors themselves stay.
-        if 0x112a in orig:
+        if len(orig.get(0x112a, b'')) >= V * 2:
             c16 = (V + 15) // 16 * 16
             base = sum((c + 15) // 16 * 16 for c in s3)
             if base < len(restl_pay) and (len(restl_pay) - base) % c16 == 0:
@@ -1966,9 +2039,9 @@ def rewrite(data, remaps, rebind=None, computed=None, sim=None, sim_free=False,
         stream_index = block_stream[block_name]
         spans_by_stream[stream_index].append(
             (start, last_off + last_size, pieces))
-        # old B of the TARGET block for reporting
-        toff2, tsize2 = tgt['chunks'][T_INDICES]
-        stats[block_name] = ((tsize2 - 8) // 4, new_B)
+        # Effective old row count of the target block for reporting. Dense
+        # blocks serialize B=0 but implicitly contain one row per vertex.
+        stats[block_name] = (block_row_count(data, tgt), new_B)
 
     out = bytearray(data[:8])
     for stream_index, stream in enumerate(streams):
