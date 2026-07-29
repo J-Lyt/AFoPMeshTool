@@ -28,7 +28,7 @@ except ImportError:
         mcloth = None
         logger.warning("mcloth.py is unavailable; cloth export is disabled: %s", error)
 
-def _sim_free_slot_flags(orig_vc):
+def _sim_free_slot_flags(orig_vc, sim_name=None):
     """[bool]*orig_vc: True where the source .mcloth marks the sim vert FREE
     (simulating). Used to hand reused slots to new verts free-first. None when
     the mcloth is unavailable."""
@@ -38,20 +38,7 @@ def _sim_free_slot_flags(orig_vc):
             return None
         with open(src, 'rb') as f:
             d = f.read()
-        streams, _footer_offset = mcloth.parse_streams(d)
-        if len(streams) != 1:
-            return None
-        off = streams[0]['start']
-        stream_end = streams[0]['end']
-        while off + 8 <= stream_end:
-            tag, size = unpack('<II', d[off:off + 8])
-            if (tag & 0xFFFF) == mcloth.T_SIM_REST:
-                pay = d[off + 8:off + size]
-                if len(pay) >= orig_vc * 16:
-                    return [unpack('<f', pay[i*16+12:i*16+16])[0] == 0.0
-                            for i in range(orig_vc)]
-                return None
-            off += size
+        return mcloth.sim_free_flags(d, orig_vc, sim_name)
     except Exception:
         logger.debug("Could not read cloth free-slot flags", exc_info=True)
     return None
@@ -153,22 +140,21 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
         logger.warning("Moved-vertex baseline is unavailable: %s", _se)
         _src_asset = None
 
-    sim_arg = None
-    sim_reuse_arg = None
-    sim_move_arg = None  # (new_sim_positions, moved_slot_set) for a sim move
-    sim_fix = None # (valid_tri_set_or_None, reused_vert_set) for render-row fix
+    sim_args = {}
+    sim_reuse_args = {}
+    sim_move_args = {}  # sim_name -> (new_sim_positions, moved_slot_set)
+    sim_fixes = {}  # sim_name -> (valid_tri_set_or_None, reused_vert_set)
     try:
         with open(out_mmb_path, 'rb') as f:
             _nb = f.read()
         _na = SkeletalMeshAsset()
         _na.parse(io.BytesIO(_nb))
         _sims = [m for m in _na.meshes if m.name.endswith('_CLOTH_SIM')]
-        if len(_sims) == 1:
-            _sm = _sims[0]
+        for _sm in _sims:
             _sp = mcloth.mmb_lod_float_positions(_nb, _sm, 0)
             _st = mcloth.mmb_lod_u16_tris(_nb, _sm, 0)
             _mem = next((m for m in addon_state.asset.meshes
-                         if m.name.endswith('_CLOTH_SIM') and m.lods), None)
+                         if m.name == _sm.name and m.lods), None)
             _reused = (getattr(_mem.lods[0], 'exported_sim_reused', set())
                        if _mem else set())
             _valid = (getattr(_mem.lods[0], 'exported_sim_valid_tris', None)
@@ -177,7 +163,17 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
             # vert slots join the exclusion set so unzoned vanilla rows never
             # silently re-attach onto appended sim (same policy as reuse
             # mode; riding new sim is a zone opt-in).
-            _ovc0, _otc0 = mcloth.sim_counts(data)
+            _ovc0, _otc0 = mcloth.sim_counts(data, _sm.name)
+            if _ovc0 is None:
+                logger.warning(
+                    "%s has no uniquely matched mcloth stream; sim rewrite skipped",
+                    _sm.name)
+                if operator:
+                    operator.report(
+                        {'WARNING'},
+                        f"{_sm.name} has no uniquely matched mcloth stream; "
+                        "its SIM section was not rewritten.")
+                continue
             _appended_v = (set(range(_ovc0, len(_sp)))
                            if _sp is not None and _ovc0 is not None
                            and len(_sp) > _ovc0 else set())
@@ -199,7 +195,8 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
             # sim was exported this session, re-attach or release them below.
             if _st is not None and _valid is not None and (
                     _reused or _appended_v or len(_valid) < len(_st)):
-                sim_fix = (set(_valid), set(_reused) | _appended_v)
+                sim_fixes[_sm.name] = (
+                    set(_valid), set(_reused) | _appended_v)
             _counts_changed = (_sp is not None and _st is not None
                                and (_ovc0 is None or len(_sp) != _ovc0
                                     or len(_st) != _otc0))
@@ -208,40 +205,38 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
                 # Growth can include moved original slots as well as appended
                 # ones.  Pass the current mesh's live triangle slots so the
                 # fabric cooker excludes preserved phantom faces.
-                sim_arg = (_sp, _tb,
-                           set(_valid) if _valid is not None else None)
+                sim_args[_sm.name] = (
+                    _sp, _tb, set(_valid) if _valid is not None else None)
                 logger.info(
                     "SIM topology-growth path: %s->%d vertices, "
                     "%s->%d triangles",
                     _ovc0, len(_sp), _otc0, len(_st))
                 if operator:
                     operator.report({'INFO'},
-                        f"_CLOTH_SIM topology grew to {len(_sp)} vertices and "
+                        f"{_sm.name} topology grew to {len(_sp)} vertices and "
                         f"{len(_st)} triangles.")
             elif _sp is not None and _st is not None and _reused:
                 _tb = b''.join(pack('<HHH', *t) for t in _st)
-                sim_reuse_arg = (_sp, _tb, set(_reused))
+                sim_reuse_args[_sm.name] = (_sp, _tb, set(_reused))
                 logger.debug(
                     "Sim budget reuse: %d slot(s) rewritten in place",
                     len(_reused))
                 if operator:
                     operator.report({'INFO'},
-                        f"New _CLOTH_SIM vertices reuse {len(_reused)} deleted "
+                        f"New {_sm.name} vertices reuse {len(_reused)} deleted "
                         f"slot(s); constraints rewritten in place.")
             elif _sp is not None and _st is not None:
                 if _moved:
-                    sim_move_arg = (_sp, _moved)
+                    sim_move_args[_sm.name] = (_sp, _moved)
                     logger.debug(
                         "Sim move: refreshing rest state for %d moved vertex(s)",
                         len(_moved))
-        elif len(_sims) > 1:
-            logger.warning(
-                "Multiple _CLOTH_SIM meshes found; sim rewrite is unsupported")
     except Exception as e:
         logger.exception("Sim-section pass was skipped: %s", e)
-        sim_arg = None
-        sim_reuse_arg = None
-        sim_move_arg = None
+        sim_args = {}
+        sim_reuse_args = {}
+        sim_move_args = {}
+        sim_fixes = {}
 
     # ZONE_* vertex groups on any imported cloth object mean rows may need
     # re-assignment even without a sim/render edit.
@@ -259,8 +254,8 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
         if _zones_present:
             break
 
-    if not remaps and sim_arg is None and sim_reuse_arg is None \
-            and sim_move_arg is None and sim_fix is None \
+    if not remaps and not sim_args and not sim_reuse_args \
+            and not sim_move_args and not sim_fixes \
             and not _zones_present:
         # Nothing to remap (render unedited), no sim edit and no zone
         # assignments. Emit a verbatim copy so the exported mmb still ships
@@ -282,6 +277,7 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
         new_asset.parse(io.BytesIO(new_bytes))
         for mesh in cloth_meshes:
             sim_name = mesh.name[:-len('_RENDER')] + '_SIM'
+            sim_fix = sim_fixes.get(sim_name)
             new_render = next((m for m in new_asset.meshes if m.name == mesh.name), None)
             new_sim = next((m for m in new_asset.meshes if m.name == sim_name), None)
             if new_render is None or new_sim is None or not new_sim.lods:
@@ -843,16 +839,21 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
             logger.warning("Cloth color patch failed: %s", e)
 
     out_bytes, stats = mcloth.rewrite(data, remaps, rebind=rebind,
-                                      computed=computed, sim=sim_arg,
+                                      computed=computed, sim=sim_args,
                                       sim_free=True,
-                                      sim_reuse=sim_reuse_arg,
-                                      sim_move=sim_move_arg)
+                                      sim_reuse=sim_reuse_args,
+                                      sim_move=sim_move_args)
     out_path = os.path.splitext(out_mmb_path)[0] + '.mcloth'
     with open(out_path, 'wb') as f:
         f.write(out_bytes)
     if operator:
-        parts = ', '.join(f"{name.rsplit('_CLOTH_RENDER', 1)[-1] or 'LOD0'} {ob}->{nb}"
-                          for name, (ob, nb) in stats.items())
+        def _stat_label(name):
+            base, _sep, lod_suffix = name.partition('_CLOTH_RENDER')
+            return f"{base} {lod_suffix.lstrip('_') or 'LOD0'}"
+
+        parts = ', '.join(
+            f"{_stat_label(name)} {ob}->{nb}"
+            for name, (ob, nb) in stats.items())
         detail = f"driven verts: {parts}" if parts else "sim section updated"
         operator.report({'INFO'},
             f"Cloth mapping updated -> {os.path.basename(out_path)} ({detail})")

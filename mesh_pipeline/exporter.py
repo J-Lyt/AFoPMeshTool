@@ -751,7 +751,8 @@ class BlenderMeshExporter:
                         # once and leave the reused-slot constraints stale.
                         _orphans = [s for s in range(_orig_vc_file) if s not in _claimed]
                         if len(_extras) <= len(_orphans):
-                            _free_flags = _sim_free_slot_flags(_orig_vc_file)
+                            _free_flags = _sim_free_slot_flags(
+                                _orig_vc_file, mesh.name)
                             _orphans.sort(
                                 key=lambda s: (not _free_flags[s])
                                 if _free_flags else 0)

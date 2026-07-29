@@ -8,9 +8,10 @@
 # each cloth-driven vertex of the <name>_CLOTH_RENDER mesh is skinned onto a
 # sim-mesh triangle. Container: u32 magic 205, u32 stream_count, then that many
 # records [u32 stream_size+8, u32 1, u32 stream_size, flat ECD7 chunk stream].
-# A small file-level footer follows the last record. The rewriter currently
-# accepts one stream only; multi-stream files are detected and rejected rather
-# than partially rewriting stream 0 and misclassifying the others as a footer.
+# A small file-level footer follows the last record. Each stream owns one
+# sparse <base>_CLOTH_RENDER LOD family and the matching <base>_CLOTH_SIM
+# section. Multi-stream rewrites route render and sim edits independently and
+# rebuild every changed stream record size while preserving the global footer.
 #
 # Per render LOD the stream contains, in order:
 #   ecd71116 header : u32 render_vc, u32 A, u8 1, u32 B, u8 1, 5 zero bytes.
@@ -373,6 +374,45 @@ def parse_streams(data):
     return streams, pos
 
 
+def _stream_sim_name(stream):
+    """Infer the SIM mesh owned by a stream from its sparse render blocks.
+
+    Some multi-stream files contain a dense ``*_CLOTH_SIM`` descriptor for the
+    following stream inside the preceding stream. Sparse render blocks are the
+    reliable ownership key because their names map directly to MMB mesh pairs.
+    """
+    bases = {
+        name.split('_CLOTH_RENDER', 1)[0]
+        for name in stream['blocks']
+        if '_CLOTH_RENDER' in name
+    }
+    if len(bases) == 1:
+        return next(iter(bases)) + '_CLOTH_SIM'
+    return None
+
+
+def _blocks_by_name(streams):
+    """Merge sparse render blocks and reject ambiguous duplicate names."""
+    blocks = {}
+    for stream in streams:
+        for name, block in stream['blocks'].items():
+            if name in blocks:
+                raise ValueError(f"Duplicate mcloth render block '{name}'")
+            blocks[name] = block
+    return blocks
+
+
+def _stream_for_sim(streams, sim_name):
+    """Return the uniquely owned stream for ``sim_name``, or None."""
+    if len(streams) == 1:
+        # Preserve the historical single-stream behavior even for unusual mesh
+        # names: there is only one possible fabric section to select.
+        return streams[0]
+    matches = [stream for stream in streams
+               if _stream_sim_name(stream) == sim_name]
+    return matches[0] if len(matches) == 1 else None
+
+
 def _parse_blocks_range(data, stream_start, stream_end):
     """Render mapping blocks within one already-validated chunk stream."""
     blocks = {}
@@ -400,20 +440,13 @@ def _parse_blocks_range(data, stream_start, stream_end):
 
 
 def parse_blocks(data):
-    """Parse the render blocks of a single-stream .mcloth.
+    """Parse sparse render blocks across every .mcloth stream.
 
-    Returns ``(stream_end, blocks)`` for compatibility with existing callers.
-    Multi-stream files require a stream-name-aware rewrite and are rejected so
-    that later streams can never be mistaken for an inert footer.
+    Returns ``(footer_offset, blocks)``. Block names must be globally unique so
+    callers can safely use the mesh/LOD name as their rewrite key.
     """
-    streams, _footer_offset = parse_streams(data)
-    if len(streams) != 1:
-        raise ValueError(
-            f"Multi-stream mcloth ({len(streams)} streams) is unsupported")
-    stream = streams[0]
-    blocks = stream['blocks']
-    stream_end = stream['end']
-    return stream_end, blocks
+    streams, footer_offset = parse_streams(data)
+    return footer_offset, _blocks_by_name(streams)
 
 
 def rebind_heights(data, srcb, rows, sim_verts, sim_tris, new_pos):
@@ -1004,8 +1037,8 @@ def _grow_triangle_samples(orig, orig_tc, tris, pos, valid_tris=None):
     }
 
 
-def _sim_overrides(data, stream_end, new_pos, new_tri_bytes, valid_tris=None,
-                   free_append=False):
+def _sim_overrides(data, stream_start, stream_end, new_pos, new_tri_bytes,
+                   valid_tris=None, free_append=False):
     """Map {chunk_file_offset: full replacement chunk bytes} for the sim-section
     chunks whose contents depend on the sim vertex/triangle counts. Chunks not
     in the map are copied verbatim (including every undecoded chunk). With
@@ -1020,7 +1053,7 @@ def _sim_overrides(data, stream_end, new_pos, new_tri_bytes, valid_tris=None,
     # pre-scan: original counts + fabric chunk payloads
     orig_vc = orig_tc = None
     orig = {}
-    scan = 20
+    scan = stream_start
     while scan + 8 <= stream_end:
         tag, size = unpack('<II', data[scan:scan + 8])
         t = tag & 0xFFFF
@@ -1237,7 +1270,7 @@ def _sim_overrides(data, stream_end, new_pos, new_tri_bytes, valid_tris=None,
             orig.get(0x112a), trips_all,
             free_set=fab['free_set'] if fab else set(), moved=moved)
 
-    off = 20
+    off = stream_start
     while off + 8 <= stream_end:
         tag, size = unpack('<II', data[off:off + 8])
         t = tag & 0xFFFF
@@ -1371,7 +1404,8 @@ def _sim_overrides(data, stream_end, new_pos, new_tri_bytes, valid_tris=None,
     return ov
 
 
-def _sim_reuse_overrides(data, stream_end, new_pos, new_tri_bytes, reused):
+def _sim_reuse_overrides(data, stream_start, stream_end, new_pos,
+                         new_tri_bytes, reused):
     """
     Budget-reuse rewrite: counts and chunk sizes stay EXACTLY vanilla; only
     values change. `reused` = set of vert slots now occupied by new geometry.
@@ -1387,7 +1421,7 @@ def _sim_reuse_overrides(data, stream_end, new_pos, new_tri_bytes, reused):
     V = len(new_pos)
     ov = {}
     orig = {}
-    scan = 20
+    scan = stream_start
     while scan + 8 <= stream_end:
         tag, size = unpack('<II', data[scan:scan + 8])
         t = tag & 0xFFFF
@@ -1584,7 +1618,7 @@ def _sim_reuse_overrides(data, stream_end, new_pos, new_tri_bytes, reused):
                 u8i += 1
                 wi += 1
 
-    off = 20
+    off = stream_start
     while off + 8 <= stream_end:
         tag, size = unpack('<II', data[off:off + 8])
         t = tag & 0xFFFF
@@ -1619,7 +1653,7 @@ def _sim_reuse_overrides(data, stream_end, new_pos, new_tri_bytes, reused):
     return ov
 
 
-def _sim_move_overrides(data, stream_end, new_pos, moved):
+def _sim_move_overrides(data, stream_start, stream_end, new_pos, moved):
     """Value-refresh for a sim MOVE (topology UNCHANGED): refresh 0x110b
     positions to the moved geometry, recompute rest lengths (0x110d) for
     constraint pairs touching a moved vert (widening 0x110e ranges as needed),
@@ -1633,7 +1667,7 @@ def _sim_move_overrides(data, stream_end, new_pos, moved):
     V = len(new_pos)
     ov = {}
     orig = {}
-    scan = 20
+    scan = stream_start
     while scan + 8 <= stream_end:
         tag, size = unpack('<II', data[scan:scan + 8])
         t = tag & 0xFFFF
@@ -1754,7 +1788,7 @@ def _sim_move_overrides(data, stream_end, new_pos, moved):
                     u8i += 1
                     wi += 1
 
-    off = 20
+    off = stream_start
     while off + 8 <= stream_end:
         tag, size = unpack('<II', data[off:off + 8])
         t = tag & 0xFFFF
@@ -1777,18 +1811,28 @@ def _sim_move_overrides(data, stream_end, new_pos, moved):
     return ov
 
 
-def sim_counts(data):
+def sim_counts(data, sim_name=None):
     """(sim vertex count, sim triangle count) read from the mcloth sim count
     fields, or (None, None) when absent. Lets callers detect a sim topology
-    change (vs the exported mmb) before deciding to rewrite the sim section."""
+    change (vs the exported mmb) before deciding to rewrite the sim section.
+
+    ``sim_name`` is required for multi-stream files and selects the stream by
+    its matching sparse ``*_CLOTH_RENDER`` family.
+    """
     try:
         streams, _footer_offset = parse_streams(data)
     except ValueError:
         return None, None
-    if len(streams) != 1:
+    if sim_name is None:
+        if len(streams) != 1:
+            return None, None
+        stream = streams[0]
+    else:
+        stream = _stream_for_sim(streams, sim_name)
+    if stream is None:
         return None, None
-    stream_start = streams[0]['start']
-    stream_end = streams[0]['end']
+    stream_start = stream['start']
+    stream_end = stream['end']
     vc = tc = None
     off = stream_start
     while off + 8 <= stream_end:
@@ -1802,6 +1846,34 @@ def sim_counts(data):
     return vc, tc
 
 
+def sim_free_flags(data, orig_vc, sim_name=None):
+    """Return free/movable flags for one SIM stream's original vertex slots."""
+    try:
+        streams, _footer_offset = parse_streams(data)
+    except ValueError:
+        return None
+    if sim_name is None:
+        if len(streams) != 1:
+            return None
+        stream = streams[0]
+    else:
+        stream = _stream_for_sim(streams, sim_name)
+    if stream is None:
+        return None
+
+    off = stream['start']
+    while off + 8 <= stream['end']:
+        tag, size = unpack('<II', data[off:off + 8])
+        if (tag & 0xFFFF) == T_SIM_REST:
+            pay = data[off + 8:off + size]
+            if len(pay) < orig_vc * 16:
+                return None
+            return [unpack('<f', pay[i * 16 + 12:i * 16 + 16])[0] == 0.0
+                    for i in range(orig_vc)]
+        off += size
+    return None
+
+
 def _emit_region(data, lo, hi, overrides):
     """Copy [lo, hi) chunk by chunk, substituting any overridden chunk."""
     if not overrides:
@@ -1813,6 +1885,23 @@ def _emit_region(data, lo, hi, overrides):
         out += overrides.get(off, data[off:off + size])
         off += size
     return bytes(out)
+
+
+def _sim_update_for_stream(updates, stream_index, stream, stream_count):
+    """Resolve a legacy single tuple or a stream-aware update dictionary."""
+    if not updates:
+        return None
+    if not isinstance(updates, dict):
+        if stream_count != 1:
+            raise ValueError(
+                "Multi-stream mcloth sim updates must be keyed by SIM mesh name")
+        return updates
+    sim_name = _stream_sim_name(stream)
+    if sim_name is not None and sim_name in updates:
+        return updates[sim_name]
+    if stream_count == 1 and len(updates) == 1:
+        return next(iter(updates.values()))
+    return updates.get(stream_index)
 
 
 def rewrite(data, remaps, rebind=None, computed=None, sim=None, sim_free=False,
@@ -1830,34 +1919,39 @@ def rewrite(data, remaps, rebind=None, computed=None, sim=None, sim_free=False,
            appended vertices of a generated LOD). Blocks with computed rows go
            through the dequantize/requantize value pipeline; others keep their
            rows at byte level.
-    :param sim: optional (new_sim_positions, new_sim_tri_bytes) to refresh the
-           sim-section count fields and decoded tables after a _CLOTH_SIM edit.
+    :param sim: optional (new_sim_positions, new_sim_tri_bytes) for a
+           single-stream file, or {sim_mesh_name: tuple} for multiple streams,
+           to refresh sim-section count fields and decoded tables after edits.
            new_sim_tri_bytes is the sim triangle index buffer (u16[3] per tri).
     :param sim_free: with sim, cook constraints for appended sim verts and
            transfer each one's free/pinned class from its nearest original
            donor (also enforcing a pin per new disconnected component). When
            False, every appended vertex is pinned/kinematic.
-    :param sim_reuse: (new_sim_positions, new_sim_tri_bytes, reused_slot_set)
+    :param sim_reuse: tuple or stream-aware dict of tuples
+           (new_sim_positions, new_sim_tri_bytes, reused_slot_set).
            BUDGET-REUSE mode: counts unchanged, new verts occupy the reused
            (orphaned) slots; values rewritten in place. Takes precedence over
-           `sim` and is the engine-stable path for adding sim geometry.
-    :param sim_move: (new_sim_positions, moved_slot_set) for a MOVE (topology
-           unchanged): refresh 0x110b positions + rest lengths/tethers for the
-           moved verts. Also forces the engine to re-cook the render mapping.
+           `sim` within each stream.
+    :param sim_move: tuple or stream-aware dict of
+           (new_sim_positions, moved_slot_set) for a MOVE (topology unchanged):
+           refresh 0x110b positions + rest lengths/tethers for the moved verts.
+           Also forces the engine to re-cook that stream's render mapping.
     :return: (new file bytes, {block_name: (old_B, new_B)})
     """
-    stream_end, blocks = parse_blocks(data)
-    if sim_reuse:
-        sim_ov = _sim_reuse_overrides(data, stream_end, *sim_reuse)
-    elif sim:
-        sim_ov = _sim_overrides(data, stream_end, *sim, free_append=sim_free)
-    elif sim_move:
-        sim_ov = _sim_move_overrides(data, stream_end, *sim_move)
-    else:
-        sim_ov = {}
+    streams, footer_offset = parse_streams(data)
+    blocks = _blocks_by_name(streams)
     stats = {}
-    spans = []
+    spans_by_stream = [[] for _stream in streams]
+    block_stream = {}
+    for stream_index, stream in enumerate(streams):
+        for block_name in stream['blocks']:
+            block_stream[block_name] = stream_index
+
     for block_name, (new_vc, src_name, old_to_new) in remaps.items():
+        if block_name not in blocks:
+            continue
+        if src_name not in blocks:
+            raise ValueError(f"Missing mcloth source block '{src_name}'")
         tgt = blocks[block_name]
         extra = (computed or {}).get(block_name) or []
         if extra:
@@ -1869,23 +1963,53 @@ def rewrite(data, remaps, rebind=None, computed=None, sim=None, sim_free=False,
 
         start = tgt['order'][0][1]
         _, last_off, last_size = tgt['order'][-1]
-        spans.append((start, last_off + last_size, pieces))
+        stream_index = block_stream[block_name]
+        spans_by_stream[stream_index].append(
+            (start, last_off + last_size, pieces))
         # old B of the TARGET block for reporting
         toff2, tsize2 = tgt['chunks'][T_INDICES]
         stats[block_name] = ((tsize2 - 8) // 4, new_B)
 
-    spans.sort()
-    out = bytearray(data[0:20])
-    pos = 20
-    for start, end, rep in spans:
-        out += _emit_region(data, pos, start, sim_ov)
-        out += rep
-        pos = end
-    out += _emit_region(data, pos, stream_end, sim_ov)
-    new_stream_size = len(out) - 20
-    out[16:20] = pack('<I', new_stream_size)
-    out[8:12] = pack('<I', new_stream_size + 8)
-    out += data[stream_end:]  # footer unchanged
+    out = bytearray(data[:8])
+    for stream_index, stream in enumerate(streams):
+        stream_start = stream['start']
+        stream_end = stream['end']
+        reuse_update = _sim_update_for_stream(
+            sim_reuse, stream_index, stream, len(streams))
+        grow_update = _sim_update_for_stream(
+            sim, stream_index, stream, len(streams))
+        move_update = _sim_update_for_stream(
+            sim_move, stream_index, stream, len(streams))
+        if reuse_update:
+            sim_ov = _sim_reuse_overrides(
+                data, stream_start, stream_end, *reuse_update)
+        elif grow_update:
+            sim_ov = _sim_overrides(
+                data, stream_start, stream_end, *grow_update,
+                free_append=sim_free)
+        elif move_update:
+            sim_ov = _sim_move_overrides(
+                data, stream_start, stream_end, *move_update)
+        else:
+            sim_ov = {}
+
+        stream_out = bytearray()
+        pos = stream_start
+        spans = sorted(spans_by_stream[stream_index])
+        for start, end, rep in spans:
+            stream_out += _emit_region(data, pos, start, sim_ov)
+            stream_out += rep
+            pos = end
+        stream_out += _emit_region(data, pos, stream_end, sim_ov)
+
+        stream_header = bytearray(data[stream['header']:stream_start])
+        stream_size = len(stream_out)
+        stream_header[0:4] = pack('<I', stream_size + 8)
+        stream_header[8:12] = pack('<I', stream_size)
+        out += stream_header
+        out += stream_out
+
+    out += data[footer_offset:]  # file-level footer unchanged
     return bytes(out), stats
 
 
