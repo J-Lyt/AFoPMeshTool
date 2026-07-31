@@ -182,6 +182,9 @@ class SkeletalMeshAsset(Asset):
                 self.exported_sim_moved = set()
                 # sim tri slots present in the CURRENT mesh (excl. phantoms)
                 self.exported_sim_valid_tris = None
+                # original sim verts touching a deleted/replaced face slot;
+                # constraints around them must be recooked
+                self.exported_sim_rebuilt = set()
                 # true when this export appended beyond the source SIM budget
                 self.exported_sim_grown = False
                 # first appended slot index (== original vc) of the last slot export

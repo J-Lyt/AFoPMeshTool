@@ -47,10 +47,14 @@
 # The exporter still uses a slot-preserving layout for cloth render meshes
 # (see _write_mod_file in exporter.py) as the safest, in-game-verified path.
 
+import logging
 import math
 import os
 import re
 from struct import unpack, pack
+
+
+logger = logging.getLogger("afop_mesh_tool")
 
 T_HEADER  = 0x1116
 T_TRI     = 0x1129
@@ -146,6 +150,8 @@ T_SIM_RESTL = 0x110d                   # u8 quantized rest lengths per section
 T_SIM_QUANT = 0x110e                   # 6 x (scale,min,max) float triplets
 T_SIM_GROUPS = 0x110c                  # u32[6] constraint + particle block counts
 T_SIM_PREFIX16 = 0x1111                # u32[3] conflict-free SIMD-16 prefixes
+T_SIM_QUAD_COUNT = 0x12e1              # u32 count of u16 values in 0x12e2
+T_SIM_QUADS = 0x12e2                   # optional u16x4 authored quad records
 
 
 def _pad16(b):
@@ -542,28 +548,33 @@ def rebind_heights(data, srcb, rows, sim_verts, sim_tris, new_pos):
     return pack('<fff', s, mn, mx), hbytes
 
 
-def _patched_header(data, tgt, new_vc, new_A, new_B):
+def _patched_header(data, tgt, new_vc, new_A, new_B,
+                    promote_dense=False):
     thoff, thsize = tgt['chunks'][T_HEADER]
     tp = bytearray(data[thoff + 8:thoff + thsize])
     tp[0:4] = pack('<I', new_vc)
     tp[4:8] = pack('<I', new_A)
-    # Dense blocks serialize B=0 and imply one row for every vertex.
-    tp[9:13] = pack('<I', 0 if tgt.get('dense') else new_B)
+    # Dense blocks serialize B=0 and imply one row for every vertex. A dense
+    # cross-stream attachment may be promoted to the vanilla sparse form when
+    # its destination grows, in which case B and 0x113e become explicit.
+    tp[9:13] = pack(
+        '<I', 0 if tgt.get('dense') and not promote_dense else new_B)
     return bytes(tp)
 
 
 def _validate_dense_output(tgt, new_vc, rows, block_name):
-    """Dense output must remain count-preserving with implicit identity IDs."""
+    """Dense output must contain exactly one row for every implicit vertex ID."""
     if not tgt.get('dense'):
         return
     row_ids = [nv for nv, _value in rows]
     if len(row_ids) != new_vc or row_ids != list(range(new_vc)):
         raise ValueError(
-            f"Dense mapping '{block_name}' requires count-preserving "
-            "implicit vertex IDs")
+            f"Dense mapping '{block_name}' requires complete implicit "
+            f"vertex IDs 0..{new_vc - 1}")
 
 
-def _build_single(data, blocks, tgt, block_name, new_vc, source, rebind):
+def _build_single(data, blocks, tgt, block_name, new_vc, source, rebind,
+                  promote_dense=False):
     """Single-source block rebuild: rows are kept at byte level (blocked
     layout aware). A full-identity mapping copies table payloads verbatim."""
     src_name, old_to_new = source
@@ -593,8 +604,11 @@ def _build_single(data, blocks, tgt, block_name, new_vc, source, rebind):
                                        sim_verts, sim_tris, new_pos)
 
     new_A = _mapping_allocation_count(tgt, new_B)
+    if promote_dense and T_INDICES not in tgt['chunks']:
+        new_A += (new_B * 4 + 15) // 16
 
-    header = _patched_header(data, tgt, new_vc, new_A, new_B)
+    header = _patched_header(
+        data, tgt, new_vc, new_A, new_B, promote_dense)
 
     pieces = []
     for tag, off, size in tgt['order']:
@@ -629,11 +643,19 @@ def _build_single(data, blocks, tgt, block_name, new_vc, source, rebind):
         else:
             payload = data[off + 8:off + size]
         pieces.append(pack('<II', tag, 8 + len(payload)) + payload)
+        if t == T_NAME and promote_dense and T_INDICES not in tgt['chunks']:
+            index_payload = (
+                pack(f'<{new_B}I', *[nv for nv, _r in rows])
+                if new_B else b'')
+            index_tag = (tag & 0xFFFF0000) | T_INDICES
+            pieces.append(
+                pack('<II', index_tag, 8 + len(index_payload))
+                + index_payload)
     return b''.join(pieces), new_B
 
 
 def _build_values(data, blocks, tgt, block_name, new_vc, source, computed,
-                  rebind):
+                  rebind, promote_dense=False):
     """
     Value-pipeline block rebuild: kept rows are dequantized from the source
     block and merged with computed rows (from compute_row_values), then
@@ -707,8 +729,11 @@ def _build_values(data, blocks, tgt, block_name, new_vc, source, computed,
         scale_payloads[sc_tag] = pack('<fff', s, mn, mx)
 
     new_A = _mapping_allocation_count(tgt, new_B)
+    if promote_dense and T_INDICES not in tgt['chunks']:
+        new_A += (new_B * 4 + 15) // 16
 
-    header = _patched_header(data, tgt, new_vc, new_A, new_B)
+    header = _patched_header(
+        data, tgt, new_vc, new_A, new_B, promote_dense)
     pieces = []
     for tag, off, size in tgt['order']:
         t = tag & 0xFFFF
@@ -737,6 +762,14 @@ def _build_values(data, blocks, tgt, block_name, new_vc, source, computed,
         else:
             payload = data[off + 8:off + size]
         pieces.append(pack('<II', tag, 8 + len(payload)) + payload)
+        if t == T_NAME and promote_dense and T_INDICES not in tgt['chunks']:
+            index_payload = (
+                pack(f'<{new_B}I', *[nv for nv, _v in rowvals])
+                if new_B else b'')
+            index_tag = (tag & 0xFFFF0000) | T_INDICES
+            pieces.append(
+                pack('<II', index_tag, 8 + len(index_payload))
+                + index_payload)
     return b''.join(pieces), new_B
 
 
@@ -795,6 +828,11 @@ def cook_appended_constraints(pos, mov, tris, orig_vc, new_set=None):
     def crs(a, b): return (a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2],
                            a[0]*b[1]-a[1]*b[0])
     SV = len(pos)
+    # Slot-preserving exports keep deleted triangle slots as inert phantoms.
+    # Their retargeted indices may intentionally collapse to a line or point;
+    # they are not cloth topology and must not enter the edge/quad cooker.
+    tris = [tuple(tri) for tri in tris
+            if len(set(tri)) == 3 and all(0 <= v < SV for v in tri)]
     adj = {}
     for a, b, c in tris:
         for x, y in ((a, b), (b, c), (c, a)):
@@ -866,6 +904,152 @@ def cook_appended_constraints(pos, mov, tris, orig_vc, new_set=None):
     return [sorted(stretch), sorted(shear), sorted(bend)]
 
 
+def _quad_boundary_record(first, second):
+    """Return the consistently wound four-corner boundary of two triangles.
+
+    Adjacent, consistently wound triangles traverse their shared diagonal in
+    opposite directions. Removing that diagonal leaves the quad boundary. A
+    cyclic rotation is semantically equivalent to the stock 0x12e2 records.
+    """
+    for i in range(3):
+        u = first[i]
+        v = first[(i + 1) % 3]
+        for j in range(3):
+            if second[j] == v and second[(j + 1) % 3] == u:
+                return (first[(i + 2) % 3], v,
+                        second[(j + 2) % 3], u)
+    return None
+
+
+def _grow_quad_table(orig, orig_tc, tris, pos, valid_tris=None):
+    """Rebuild a complete vanilla 0x12e2 quad partition after growth.
+
+    Every conforming non-empty corpus record is four unique vertex IDs that
+    names exactly two adjacent SIM triangles. Some fabrics intentionally store
+    only a subset, so those remain byte-identical. When the source table covers
+    every original triangle, keep records whose two original faces survive and
+    greedily re-pair the uncovered live faces plus appended faces with the same
+    angle-based quadifier used by the constraint cooker. This also removes
+    replaced original faces that now occupy degenerate phantom slots.
+    """
+    count_pay = orig.get(T_SIM_QUAD_COUNT)
+    quad_pay = orig.get(T_SIM_QUADS)
+    old_tri_pay = orig.get(T_SIM_TRIS)
+    if count_pay is None or quad_pay is None or old_tri_pay is None:
+        return None
+    if len(count_pay) < 4:
+        raise ValueError("Truncated 0x12e1 SIM quad count")
+    value_count = unpack('<I', count_pay[:4])[0]
+    if value_count % 4 or len(quad_pay) != value_count * 2:
+        raise ValueError("Inconsistent 0x12e1/0x12e2 SIM quad table")
+    if len(old_tri_pay) < orig_tc * 6:
+        raise ValueError("SIM quad table has a truncated source triangle list")
+
+    old_tris = [unpack('<HHH', old_tri_pay[i*6:i*6+6])
+                for i in range(orig_tc)]
+    covered = []
+    records = []
+    for offset in range(0, len(quad_pay), 8):
+        quad = unpack('<4H', quad_pay[offset:offset + 8])
+        if len(set(quad)) != 4:
+            raise ValueError("0x12e2 contains a degenerate quad record")
+        qset = set(quad)
+        matches = [i for i, tri in enumerate(old_tris)
+                   if set(tri).issubset(qset)]
+        if len(matches) != 2:
+            raise ValueError("0x12e2 quad does not name exactly two triangles")
+        covered.extend(matches)
+        records.append((matches, quad_pay[offset:offset + 8]))
+    # Empty/partial authored tables carry selective membership that cannot be
+    # inferred for new faces. Only a complete source partition is extensible.
+    if sorted(covered) != list(range(orig_tc)):
+        return None
+
+    live = (set(range(len(tris))) if valid_tris is None
+            else {i for i in valid_tris if 0 <= i < len(tris)})
+    kept = []
+    kept_ids = set()
+    for matches, record in records:
+        if all(i in live for i in matches):
+            # Surviving original slots must still contain their source face.
+            # A changed live prefix needs a full authored-table recook that we
+            # cannot infer safely from this table alone.
+            if any(tuple(tris[i]) != tuple(old_tris[i]) for i in matches):
+                return None
+            kept.append(record)
+            kept_ids.update(matches)
+
+    candidates = [i for i in sorted(live - kept_ids)
+                  if len(set(tris[i])) == 3
+                  and all(0 <= v < len(pos) for v in tris[i])]
+    if len(candidates) % 2:
+        return None
+
+    def sub(a, b):
+        return (a[0]-b[0], a[1]-b[1], a[2]-b[2])
+
+    def dot(a, b):
+        return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+
+    def magnitude(v):
+        return math.sqrt(dot(v, v))
+
+    def corner_cos(origin, first, second):
+        left = sub(pos[first], pos[origin])
+        right = sub(pos[second], pos[origin])
+        return abs(dot(left, right)) / (magnitude(left) * magnitude(right)
+                                        or 1e-12)
+
+    edge_tris = {}
+    for ti in candidates:
+        a, b, c = tris[ti]
+        for x, y in ((a, b), (b, c), (c, a)):
+            edge_tris.setdefault((min(x, y), max(x, y)), []).append(ti)
+    pair_candidates = []
+    for edge, triangle_ids in edge_tris.items():
+        if len(triangle_ids) != 2:
+            continue
+        first_id, second_id = triangle_ids
+        first = tris[first_id]
+        second = tris[second_id]
+        opposite_first = next(v for v in first if v not in edge)
+        opposite_second = next(v for v in second if v not in edge)
+        a, b = edge
+        score = max(
+            corner_cos(opposite_first, b, a),
+            corner_cos(a, opposite_first, opposite_second),
+            corner_cos(opposite_second, a, b),
+            corner_cos(b, opposite_second, opposite_first),
+        )
+        record = _quad_boundary_record(first, second)
+        if record is not None:
+            pair_candidates.append(
+                (score, first_id, second_id, record))
+
+    pair_candidates.sort()
+    used = set()
+    appended = []
+    sin60 = math.sin(math.radians(60))
+    for score, first_id, second_id, record in pair_candidates:
+        if (score > sin60 or first_id in used or second_id in used):
+            continue
+        used.add(first_id)
+        used.add(second_id)
+        appended.append(record)
+    # A complete source table must remain a complete live-triangle partition.
+    # Partial pairing would silently omit simulation quads.
+    if used != set(candidates):
+        return None
+
+    new_quad_pay = b''.join(kept) + b''.join(pack('<4H', *quad)
+                                             for quad in appended)
+    new_count_pay = pack('<I', len(new_quad_pay) // 2) + count_pay[4:]
+    return {
+        T_SIM_QUAD_COUNT: new_count_pay,
+        T_SIM_QUADS: new_quad_pay,
+    }
+
+
 def _schedule_constraint_blocks(rows, movable, width=16):
     """Order ``[(pair, rest_length), ...]`` into conflict-free SIMD blocks.
 
@@ -912,6 +1096,9 @@ def _grow_tether_trailer(trailing, orig_vc, new_vc, new_pos, donors, a1_pay,
     appended verts NOT in free_set are pinned (self anchor, zero lengths).
     Original verts moved during the same growth export also get their decoded
     1.25*euclid tether radius refreshed (as in the count-preserving MOVE path).
+    Opaque/inactive windows with only one non-filler byte value keep their
+    quantization triplet and donor-copy appended rows; there is not enough
+    information to infer metric length semantics for those tables.
     The u16 table spans TWO windows and must be re-laid out as one buffer -
     naive per-window padding inserts bytes into the table's MIDDLE and
     corrupts its second half. u8 windows get a fresh quant range over
@@ -960,6 +1147,28 @@ def _grow_tether_trailer(trailing, orig_vc, new_vc, new_pos, donors, a1_pay,
             else (0.0, 0.0)
         rows = bytearray(b'\xff' * cvn)
         rows[:min(orig_vc, len(w))] = w[:orig_vc]
+        # Some streams carry an inactive/sentinel window whose real domain is
+        # only one byte value (e.g. all 0, with scale=2^20 and max=254.5*2^20).
+        # Treating that enormous scale as a measurable distance range turns
+        # appended rows into live tethers and can pull the complete fabric.
+        # With no observed variation its semantics are not inferable: preserve
+        # all original rows/triplet and transfer the donor's exact byte.
+        observed = {w[v] for v in range(min(orig_vc, len(w)))
+                    if w[v] != 255}
+        if len(observed) <= 1:
+            logger.info(
+                "Preserved opaque grown-SIM tether window %d "
+                "(single-value domain; quantization unchanged)", u8i)
+            for v in range(orig_vc, new_vc):
+                if v not in free_set:
+                    rows[v] = 0
+                    continue
+                s = donors[v - orig_vc] if v - orig_vc < len(donors) else 0
+                rows[v] = w[s] if s < len(w) else 255
+            out.append(bytes(rows))
+            u8i += 1
+            wi += 1
+            continue
         if sc > 0 and a1:
             tmoved = {v for v in range(orig_vc) if v in moved
                       or (a1[v] < orig_vc and a1[v] in moved)}
@@ -1021,7 +1230,9 @@ def _grow_triangle_samples(orig, orig_tc, tris, pos, valid_tris=None):
     samples with triangle size/shape; the weights themselves are portable to
     another triangle because they are barycentric.  For each appended triangle
     copy the complete record from the closest-shaped LIVE original triangle.
-    Existing records and the terminal 0xFFFF words stay byte-identical.
+    Live original records remain byte-identical. Replaced original face slots
+    get empty records, appended live faces inherit a nearby live record, and
+    terminal 0xFFFF words stay byte-identical.
 
     Returns replacement payloads keyed by chunk tag, or None when this optional
     table is absent/inconsistent or the source asset has no sampled triangle.
@@ -1077,12 +1288,25 @@ def _grow_triangle_samples(orig, orig_tc, tris, pos, valid_tris=None):
     if not donor_features:
         return None
 
-    body = bytearray(values_pay[:closing * 2])
+    body = bytearray()
     tail = values_pay[closing * 2:]
-    new_counts = bytearray(counts_pay)
-    new_offsets = list(offsets)
-    cursor = closing
-    for ti in range(orig_tc, len(tris)):
+    new_counts = bytearray()
+    new_offsets = []
+    cursor = 0
+    for ti in range(len(tris)):
+        if cursor > 0xFFFF:
+            raise ValueError("0x11d5 virtual-particle offsets exceed uint16")
+        new_offsets.append(cursor)
+        if valid_tris is not None and ti not in valid_tris:
+            new_counts.append(0)
+            continue
+        if ti < orig_tc:
+            count = counts[ti]
+            new_counts.append(count)
+            start = offsets[ti] * 2
+            body += values_pay[start:start + count * 2]
+            cursor += count
+            continue
         f = feature(tris[ti])
         if f is None:
             donor = donor_features[0][0]
@@ -1091,9 +1315,8 @@ def _grow_triangle_samples(orig, orig_tc, tris, pos, valid_tris=None):
                         key=lambda it: sum((it[1][j] - f[j]) ** 2
                                           for j in range(3)))[0]
         count = counts[donor]
-        if cursor > 0xFFFF or cursor + count > 0xFFFF:
+        if cursor + count > 0xFFFF:
             raise ValueError("0x11d5 virtual-particle offsets exceed uint16")
-        new_offsets.append(cursor)
         new_counts.append(count)
         start = offsets[donor] * 2
         record = values_pay[start:start + count * 2]
@@ -1110,7 +1333,7 @@ def _grow_triangle_samples(orig, orig_tc, tris, pos, valid_tris=None):
 
 
 def _sim_overrides(data, stream_start, stream_end, new_pos, new_tri_bytes,
-                   valid_tris=None, free_append=False):
+                   valid_tris=None, rebuilt_vertices=None, free_append=False):
     """Map {chunk_file_offset: full replacement chunk bytes} for the sim-section
     chunks whose contents depend on the sim vertex/triangle counts. Chunks not
     in the map are copied verbatim (including every undecoded chunk). With
@@ -1118,7 +1341,9 @@ def _sim_overrides(data, stream_start, stream_end, new_pos, new_tri_bytes,
     original donor's free/pinned class; otherwise they are pinned (kinematic).
     ``valid_tris`` is the set of triangle slots present in the edited Blender
     SIM mesh; preserved phantom slots remain serialized but are excluded from
-    constraint cooking."""
+    constraint cooking. ``rebuilt_vertices`` are original vertices touching
+    deleted/replaced face slots; their stale constraints are recooked against
+    the current live topology."""
     new_vc = len(new_pos)
     new_tc = len(new_tri_bytes) // 6
     ov = {}
@@ -1136,7 +1361,8 @@ def _sim_overrides(data, stream_start, stream_end, new_pos, new_tri_bytes,
         if t in (T_SIM_SECTS, T_SIM_PAIRS, T_SIM_RESTL, T_SIM_QUANT, T_SIM_REST,
                  T_SIM_VP_META, T_SIM_VP_COUNTS, T_SIM_VP_OFFSETS,
                  T_SIM_VP_VALUES, 0x112a,
-                 T_SIM_AUX_HEADER, T_SIM_AUX_VALUES, T_SIM_AUX_DESCS):
+                 T_SIM_AUX_HEADER, T_SIM_AUX_VALUES, T_SIM_AUX_DESCS,
+                 T_SIM_TRIS, T_SIM_QUAD_COUNT, T_SIM_QUADS):
             orig.setdefault(t, data[scan + 8:scan + size])
         scan += size
     if orig_vc is None:
@@ -1147,6 +1373,8 @@ def _sim_overrides(data, stream_start, stream_end, new_pos, new_tri_bytes,
     tris_all = [unpack('<HHH', new_tri_bytes[i * 6:i * 6 + 6])
                 for i in range(new_tc)]
     tri_samples = _grow_triangle_samples(
+        orig, orig_tc, tris_all, new_pos, valid_tris=valid_tris)
+    quad_table = _grow_quad_table(
         orig, orig_tc, tris_all, new_pos, valid_tris=valid_tris)
 
     # Growth and movement can occur in the same Blender edit.  A moved
@@ -1263,7 +1491,8 @@ def _sim_overrides(data, stream_start, stream_end, new_pos, new_tri_bytes,
                 anchor = min(appended)
             mov[anchor] = False
 
-        changed = set(range(orig_vc, new_vc)) | moved
+        changed = (set(range(orig_vc, new_vc)) | moved
+                   | set(rebuilt_vertices or ()))
         sections = cook_appended_constraints(new_pos, mov, tris, orig_vc,
                                              new_set=changed)
         free_set = {v for v in range(orig_vc, new_vc) if mov[v]}
@@ -1282,12 +1511,12 @@ def _sim_overrides(data, stream_start, stream_end, new_pos, new_tri_bytes,
             sc, mn, _mx = trip[si]
             vals = [mn + dpay[boff + k] * sc for k in range(s3[si])]
             boff += (s3[si] + 15) // 16 * 16
-            # Keep byte-proven vanilla constraints that do not touch a moved
-            # slot. Constraints touching moved originals are topology-sensitive
-            # (the old faces may now be phantoms), so replace them with the
-            # freshly cooked current-topology rows together with appended rows.
+            # Keep byte-proven vanilla constraints outside the changed
+            # neighborhood. Constraints touching moved or face-rebuilt
+            # originals are topology-sensitive, so replace them with freshly
+            # cooked current-topology rows together with appended rows.
             kept = [(p, val) for p, val in zip(old_pairs[si], vals)
-                    if p[0] not in moved and p[1] not in moved]
+                    if p[0] not in changed and p[1] not in changed]
             prs = [p for p, _val in kept] + [p for p, _l in sections[si]]
             vals = [val for _p, val in kept] + [l for _p, l in sections[si]]
             new_sects.append((prs, vals))
@@ -1371,6 +1600,9 @@ def _sim_overrides(data, stream_start, stream_end, new_pos, new_tri_bytes,
                                       fab['free_set'] if fab else None)
         elif t == T_SIM_TRIS:
             new_pay = new_tri_bytes
+        elif quad_table is not None and t in (
+                T_SIM_QUAD_COUNT, T_SIM_QUADS):
+            new_pay = quad_table[t]
         elif t in SIM_VERT_TABLES:
             # SIMD-16 tables: the engine processes the PADDING lanes too, and
             # vanilla keeps them inert (0x112a: self-index anchor = no-op;
@@ -1947,6 +2179,33 @@ def sim_free_flags(data, orig_vc, sim_name=None):
     return None
 
 
+def sim_quad_record_count(data, sim_name=None):
+    """Return the optional 0x12e2 u16x4 record count for one SIM stream."""
+    try:
+        streams, _footer_offset = parse_streams(data)
+    except ValueError:
+        return None
+    if sim_name is None:
+        if len(streams) != 1:
+            return None
+        stream = streams[0]
+    else:
+        stream = _stream_for_sim(streams, sim_name)
+    if stream is None:
+        return None
+
+    off = stream['start']
+    while off + 8 <= stream['end']:
+        tag, size = unpack('<II', data[off:off + 8])
+        if (tag & 0xFFFF) == T_SIM_QUAD_COUNT:
+            if size < 12:
+                return None
+            value_count = unpack('<I', data[off + 8:off + 12])[0]
+            return value_count // 4 if value_count % 4 == 0 else None
+        off += size
+    return None
+
+
 def _emit_region(data, lo, hi, overrides):
     """Copy [lo, hi) chunk by chunk, substituting any overridden chunk."""
     if not overrides:
@@ -1977,8 +2236,56 @@ def _sim_update_for_stream(updates, stream_index, stream, stream_count):
     return updates.get(stream_index)
 
 
+def _force_recook_overrides(data, stream_start, stream_end, overrides):
+    """Toggle the sign bit of one numerically-zero free-particle flag.
+
+    Snowdrop keys the cooked mapping cache from the SIM-section bytes. IEEE-754
+    +0.0 and -0.0 compare and calculate identically here, but their byte
+    representations differ, giving exports a reversible, geometry-neutral
+    cache-key change. Apply this after the normal SIM override is built so it
+    composes with move, reuse, and topology-growth rewrites.
+    """
+    rest_off = vc_off = None
+    off = stream_start
+    while off + 8 <= stream_end:
+        tag, size = unpack('<II', data[off:off + 8])
+        t = tag & 0xFFFF
+        if t == T_SIM_REST and rest_off is None:
+            rest_off = off
+        elif t in SIM_VC_FIELDS and vc_off is None:
+            vc_off = off
+        off += size
+    if rest_off is None or vc_off is None:
+        raise ValueError("Force Recook requires 0x1102 and 0x110b SIM chunks")
+
+    source_vc_size = unpack('<I', data[vc_off + 4:vc_off + 8])[0]
+    vc_chunk = overrides.get(
+        vc_off, data[vc_off:vc_off + source_vc_size])
+    if len(vc_chunk) < 12:
+        raise ValueError("Force Recook found a truncated SIM vertex-count chunk")
+    vertex_count = unpack('<I', vc_chunk[8:12])[0]
+
+    source_rest_size = unpack('<I', data[rest_off + 4:rest_off + 8])[0]
+    rest_chunk = bytearray(overrides.get(
+        rest_off, data[rest_off:rest_off + source_rest_size]))
+    if len(rest_chunk) < 8 + vertex_count * 16:
+        raise ValueError("Force Recook found a truncated SIM rest-position chunk")
+
+    for vertex_index in range(vertex_count):
+        flag_off = 8 + vertex_index * 16 + 12
+        bits = unpack('<I', rest_chunk[flag_off:flag_off + 4])[0]
+        if bits in (0x00000000, 0x80000000):
+            rest_chunk[flag_off:flag_off + 4] = pack(
+                '<I', bits ^ 0x80000000)
+            result = dict(overrides)
+            result[rest_off] = bytes(rest_chunk)
+            return result
+    raise ValueError("Force Recook could not find a free SIM particle")
+
+
 def rewrite(data, remaps, rebind=None, computed=None, sim=None, sim_free=False,
-            sim_reuse=None, sim_move=None):
+            sim_reuse=None, sim_move=None, force_recook=False,
+            promote_dense=None):
     """
     Rewrite the mcloth chunk stream, remapping the per-LOD driven-vertex blocks.
 
@@ -2009,6 +2316,12 @@ def rewrite(data, remaps, rebind=None, computed=None, sim=None, sim_free=False,
            (new_sim_positions, moved_slot_set) for a MOVE (topology unchanged):
            refresh 0x110b positions + rest lengths/tethers for the moved verts.
            Also forces the engine to re-cook that stream's render mapping.
+    :param force_recook: toggle a numerically-neutral +0.0/-0.0 free-particle
+           flag in every SIM stream, guaranteeing a byte-level cache-key change
+           without moving geometry.
+    :param promote_dense: optional set of dense mapping block names to emit in
+           the equivalent vanilla sparse form (explicit B and 0x113e identity
+           indices). Used for growing cross-stream SIM attachments.
     :return: (new file bytes, {block_name: (old_B, new_B)})
     """
     streams, footer_offset = parse_streams(data)
@@ -2026,13 +2339,19 @@ def rewrite(data, remaps, rebind=None, computed=None, sim=None, sim_free=False,
         if src_name not in blocks:
             raise ValueError(f"Missing mcloth source block '{src_name}'")
         tgt = blocks[block_name]
+        promote = block_name in (promote_dense or ())
+        if promote and not tgt.get('dense'):
+            raise ValueError(
+                f"Cannot promote non-dense mcloth block '{block_name}'")
         extra = (computed or {}).get(block_name) or []
         if extra:
             pieces, new_B = _build_values(data, blocks, tgt, block_name, new_vc,
-                                          (src_name, old_to_new), extra, rebind)
+                                          (src_name, old_to_new), extra, rebind,
+                                          promote)
         else:
             pieces, new_B = _build_single(data, blocks, tgt, block_name, new_vc,
-                                          (src_name, old_to_new), rebind)
+                                          (src_name, old_to_new), rebind,
+                                          promote)
 
         start = tgt['order'][0][1]
         _, last_off, last_size = tgt['order'][-1]
@@ -2065,6 +2384,9 @@ def rewrite(data, remaps, rebind=None, computed=None, sim=None, sim_free=False,
                 data, stream_start, stream_end, *move_update)
         else:
             sim_ov = {}
+        if force_recook:
+            sim_ov = _force_recook_overrides(
+                data, stream_start, stream_end, sim_ov)
 
         stream_out = bytearray()
         pos = stream_start

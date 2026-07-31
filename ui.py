@@ -289,6 +289,7 @@ class SWOMTPanel(bpy.types.Panel):
                 if addon_state.asset and any(m.name.endswith('_CLOTH_RENDER')
                                  for m in addon_state.asset.meshes):
                     box.prop(SWOMT, "cloth_donor_radius")
+                    box.prop(SWOMT, "force_cloth_recook")
 
             if forced:
                 tip_row = layout.row()
