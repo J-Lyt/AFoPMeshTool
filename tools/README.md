@@ -35,6 +35,28 @@ Blender's bundled Python executable may be used when no system Python is
 installed; this still runs as an ordinary Python process and never imports
 `bpy`.
 
+## MReflex corpus audit
+
+`audit_mreflex_corpus.py` combines same-path MMB sidecars with explicit
+MGraph/MCompound references, then runs the add-on's conservative dangle-node
+matcher over every confirmed pair. Graph evidence is ranked as longest
+same-directory stem prefix, the only same-directory MMB in the source chain,
+then the only MMB in that chain. Equal-strength conflicts remain unpaired.
+
+MMB parsing requires Blender's `mathutils`, so use the wrapper:
+
+```powershell
+& tools\audit_mreflex_corpus.ps1 `
+    -GameDirectory 'E:\Ubisoft\AFOP' `
+    -CorpusDirectory 'D:\path\to\!MREFELX' `
+    -OutputDirectory 'D:\path\to\mreflex_audit' `
+    -CacheDirectory 'D:\path\to\sdf_index_cache' `
+    -OodlePath 'D:\path\to\oo2core_9_win64.dll'
+```
+
+The audit writes `afop_mreflex_audit.json` and
+`afop_mreflex_audit.md`. The game archives and corpus files are read-only.
+
 ## Material regression harness
 
 `material_regression.py` validates material binding and Blender node creation
