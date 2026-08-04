@@ -2240,6 +2240,7 @@ def _standalone_audit_case(directory):
     toc_path.write_bytes(b"synthetic toc")
     assets = [
         SimpleNamespace(name="blue/baked/test.mmb"),
+        SimpleNamespace(name="blue/baked/test_c_root.mreflex"),
         SimpleNamespace(name="blue/graphs/test.mgraphobject"),
         SimpleNamespace(name="blue/shaders/test.mshader"),
     ]
@@ -2250,7 +2251,11 @@ def _standalone_audit_case(directory):
 
         def extract(self, asset):
             if asset.name.endswith(".mgraphobject"):
-                return mgraph.MAGIC + b"blue/baked/test.mmb\0"
+                return (
+                    mgraph.MAGIC
+                    + b"blue/baked/test.mmb\0"
+                    + b"blue/baked/test_c_root.mreflex\0"
+                )
             check(asset.name.endswith(".mshader"), "unexpected synthetic extraction")
             return b'''shaderType = "Object";
                 MR_Sampler2D Color : MR_Texture0
@@ -2283,9 +2288,52 @@ def _standalone_audit_case(directory):
     report_path = output_directory / "afop_material_audit.json"
     check(report_path.is_file(), "standalone audit did not write its JSON report")
     report = json.loads(report_path.read_text(encoding="utf-8"))
-    check(report["schema_version"] == 5, "standalone audit schema changed unexpectedly")
+    check(report["schema_version"] == 6, "standalone audit schema changed unexpectedly")
     check(report["summary"]["shaders"] == 1, "standalone audit lost shader records")
     check(report["summary"]["referenced_mmbs"] == 1, "standalone audit lost MMB paths")
+    check(
+        report["summary"]["referenced_mreflexes"] == 1,
+        "standalone audit lost MReflex paths",
+    )
+
+
+def _mreflex_graph_owner_case():
+    reflex = "blue/baked/hair/p_res_hair_06_c_head.mreflex"
+    owner, rule = mgraph.mreflex_owner(reflex, (
+        "blue/baked/hair/p_res_hair_06.mmb",
+        "blue/baked/hair/p_res_kuru_06.mmb",
+        "blue/baked/hair/p_res_hair_06_hg.mmb",
+    ))
+    check(
+        owner == "blue/baked/hair/p_res_hair_06.mmb"
+        and rule == "longest_same_directory_prefix",
+        f"unexpected longest-prefix MReflex owner: {(owner, rule)!r}",
+    )
+    owner, rule = mgraph.mreflex_owner(
+        "blue/baked/piercing_04_f.mreflex",
+        ("blue/baked/piercing_bone_04_f.mmb",),
+    )
+    check(
+        owner == "blue/baked/piercing_bone_04_f.mmb"
+        and rule == "unique_same_directory",
+        f"unexpected same-directory MReflex owner: {(owner, rule)!r}",
+    )
+    owner, rule = mgraph.mreflex_owner(
+        "blue/rigs/player_reflex.mreflex",
+        ("blue/body/player_body.mmb",),
+    )
+    check(
+        owner == "blue/body/player_body.mmb"
+        and rule == "unique_source_mmb",
+        f"unexpected single-source MReflex owner: {(owner, rule)!r}",
+    )
+    check(
+        mgraph.mreflex_owner(
+            "blue/baked/shared_reflex.mreflex",
+            ("blue/baked/shared_f.mmb", "blue/baked/shared_m.mmb"),
+        ) == (None, None),
+        "ambiguous graph-local MReflex owner was not rejected",
+    )
 
 
 def main():
@@ -2295,6 +2343,7 @@ def main():
             ("material profile registry and public facade", _material_profile_registry_case),
             ("Banshee pattern text formats", _banshee_pattern_parser_case),
             ("Banshee graph UID references", _banshee_graph_pattern_reference_case),
+            ("MReflex graph ownership tiers", _mreflex_graph_owner_case),
             ("nested material-package update install", _nested_update_install_case),
             ("direct and compound binding resolution", _binding_resolution_cases),
             ("direct-only MMB material-source discovery", _direct_material_source_discovery_case),
