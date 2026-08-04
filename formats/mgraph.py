@@ -11,6 +11,7 @@ small set of shader semantic hints.
 from __future__ import annotations
 
 import os
+from pathlib import PurePosixPath
 import re
 import struct
 
@@ -1314,6 +1315,57 @@ def referenced_meshes(data):
         seen.add(key)
         result.append(value)
     return result
+
+
+def referenced_mreflexes(data):
+    """Return distinct MReflex paths referenced by a graph source."""
+    result = []
+    seen = set()
+    for value in _pool_strings(data):
+        key = value.casefold()
+        if not key.endswith(".mreflex") or key in seen:
+            continue
+        seen.add(key)
+        result.append(value)
+    return result
+
+
+def mreflex_owner(reflex_path, mmb_paths):
+    """Return an unambiguous graph-local MMB owner and evidence rule.
+
+    Evidence is evaluated from strongest to weakest: the longest
+    same-directory MMB-stem prefix, the only same-directory MMB, then the only
+    MMB in the complete material-source chain. Equal-strength ambiguity is
+    deliberately unresolved.
+    """
+    reflex = PurePosixPath(str(reflex_path).replace("\\", "/").casefold())
+    mmbs = list(dict.fromkeys(
+        PurePosixPath(str(path).replace("\\", "/").casefold())
+        for path in mmb_paths
+    ))
+    same_directory = [mmb for mmb in mmbs if mmb.parent == reflex.parent]
+    prefixes = [
+        mmb for mmb in same_directory
+        if (
+            reflex.stem == mmb.stem
+            or reflex.stem.startswith(mmb.stem + "_")
+        )
+    ]
+    if prefixes:
+        longest = max(len(mmb.stem) for mmb in prefixes)
+        owners = {mmb for mmb in prefixes if len(mmb.stem) == longest}
+        rule = "longest_same_directory_prefix"
+    elif len(same_directory) == 1:
+        owners = set(same_directory)
+        rule = "unique_same_directory"
+    elif len(mmbs) == 1:
+        owners = set(mmbs)
+        rule = "unique_source_mmb"
+    else:
+        return None, None
+    if len(owners) != 1:
+        return None, None
+    return next(iter(owners)).as_posix(), rule
 
 
 def _player_head_sex(data, material_names):

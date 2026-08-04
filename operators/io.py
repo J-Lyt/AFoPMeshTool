@@ -33,7 +33,7 @@ class BrowseMMBFile(bpy.types.Operator):
 
 
 class BrowseExportDirectory(bpy.types.Operator):
-    """Select where MMB and MCloth files are exported."""
+    """Select where MMB, MCloth, and MReflex files are exported."""
 
     bl_idname = "object.browse_export_directory"
     bl_label = "Select Export Folder"

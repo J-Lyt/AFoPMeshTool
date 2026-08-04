@@ -18,7 +18,7 @@ from formats import mgraph
 from formats.shader_schema import parse_shader_source
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 REPORT_JSON = "afop_material_audit.json"
 SHADER_CSV = "afop_shader_inventory.csv"
 SOURCE_CSV = "afop_material_sources.csv"
@@ -312,10 +312,16 @@ def build_report(source_records, shader_records, mmb_paths, *, input_signature=N
         closure, missing_compounds = compound_closure(source)
         all_records = [source, *closure.values()]
         direct_mmbs = [_normalise_path(value) for value in mgraph.referenced_meshes(source["data"])]
+        direct_mreflexes = [
+            _normalise_path(value)
+            for value in mgraph.referenced_mreflexes(source["data"])
+        ]
         resolved_mmbs = []
+        resolved_mreflexes = []
         textures = []
         material_pairs = []
         seen_mmbs = set()
+        seen_mreflexes = set()
         seen_textures = set()
         for record in all_records:
             for value in mgraph.referenced_meshes(record["data"]):
@@ -323,6 +329,11 @@ def build_report(source_records, shader_records, mmb_paths, *, input_signature=N
                 if value.casefold() not in seen_mmbs:
                     seen_mmbs.add(value.casefold())
                     resolved_mmbs.append(value)
+            for value in mgraph.referenced_mreflexes(record["data"]):
+                value = _normalise_path(value)
+                if value.casefold() not in seen_mreflexes:
+                    seen_mreflexes.add(value.casefold())
+                    resolved_mreflexes.append(value)
             for texture in mgraph.texture_pool(record["data"]):
                 key = texture["path"].casefold()
                 if key not in seen_textures:
@@ -472,6 +483,8 @@ def build_report(source_records, shader_records, mmb_paths, *, input_signature=N
             "toc_cache_key": source.get("cache_key", ""),
             "direct_mmbs": direct_mmbs,
             "resolved_mmbs": resolved_mmbs,
+            "direct_mreflexes": direct_mreflexes,
+            "resolved_mreflexes": resolved_mreflexes,
             "direct_compounds": [
                 _normalise_path(value)
                 for value in mgraph.referenced_compounds(source["data"])
@@ -670,6 +683,10 @@ def build_report(source_records, shader_records, mmb_paths, *, input_signature=N
         "referenced_mmbs": len({
             value.casefold() for row in source_rows for value in row["resolved_mmbs"]
         }),
+        "referenced_mreflexes": len({
+            value.casefold()
+            for row in source_rows for value in row["resolved_mreflexes"]
+        }),
         "issues": len(issues),
         "issues_by_severity": {
             severity: sum(issue["severity"] == severity for issue in issues)
@@ -725,7 +742,8 @@ def write_reports(report, output_directory):
 
     source_fields = (
         "path", "kind", "archive", "toc_cache_key", "mesh_relevant",
-        "direct_mmbs", "resolved_mmbs", "direct_compounds",
+        "direct_mmbs", "resolved_mmbs", "direct_mreflexes",
+        "resolved_mreflexes", "direct_compounds",
         "resolved_compounds", "missing_compounds",
         "texture_count", "material_count",
     )
@@ -737,6 +755,8 @@ def write_reports(report, output_directory):
                 **{field: source.get(field, "") for field in source_fields[:5]},
                 "direct_mmbs": _joined(source["direct_mmbs"]),
                 "resolved_mmbs": _joined(source["resolved_mmbs"]),
+                "direct_mreflexes": _joined(source["direct_mreflexes"]),
+                "resolved_mreflexes": _joined(source["resolved_mreflexes"]),
                 "direct_compounds": _joined(source["direct_compounds"]),
                 "resolved_compounds": _joined(source["resolved_compounds"]),
                 "missing_compounds": _joined(source["missing_compounds"]),

@@ -35,7 +35,7 @@ _OODLE_NAMES = (
     "oo2core_win64.dll",
 )
 _MAX_SEARCH_RESULTS = 500
-_INDEX_CACHE_VERSION = 5
+_INDEX_CACHE_VERSION = 6
 _ASSET_MMB = "MMB"
 _ASSET_MGRAPH = "MGRAPHOBJECT"
 _ASSET_MCOMPOUND = "MCOMPOUNDNODE"
@@ -353,7 +353,7 @@ def _load_archives_worker(root, generation, index_cache_dir=None, allow_rebuild=
                         asset for asset in archive.assets
                         if asset.name.casefold().endswith(
                             (
-                                ".mmb", ".mcloth", ".mgraphobject",
+                                ".mmb", ".mcloth", ".mreflex", ".mgraphobject",
                                 ".mcompoundnode", ".mshader", ".dds",
                                 ".mbansheepatterndata", ".mcolorpattern",
                                 ".mpatterncontrol",
@@ -390,7 +390,7 @@ def _load_archives_worker(root, generation, index_cache_dir=None, allow_rebuild=
                     if lower_name.endswith(".mmb"):
                         entries.append(indexed)
                         search_entries.append((_ASSET_MMB, indexed))
-                    elif lower_name.endswith(".mcloth"):
+                    elif lower_name.endswith((".mcloth", ".mreflex")):
                         sidecars.setdefault(lower_name, []).append(indexed)
                     elif lower_name.endswith(".mgraphobject"):
                         graphs.setdefault(lower_name, []).append(indexed)
@@ -776,8 +776,11 @@ def _extract_to_cache(entry, extracted_directory=None, destination=None):
     return destination, True
 
 
-def _matching_sidecar(entry):
-    sidecar_name = entry.asset.name.rsplit(".", 1)[0] + ".mcloth"
+def _matching_sidecar(entry, extension):
+    """Return the same-path sidecar, preferring the MMB's own archive."""
+    if not extension.startswith("."):
+        raise ValueError("Sidecar extension must start with '.'")
+    sidecar_name = entry.asset.name.rsplit(".", 1)[0] + extension
     with _state.lock:
         candidates = list(_state.sidecars.get(sidecar_name.casefold(), ()))
     for candidate in candidates:
@@ -1465,6 +1468,120 @@ def _material_source_references(data, preferred_archive):
     return references, compound_sources
 
 
+def _material_source_mreflex_references(data, compound_sources):
+    """Return ordered MReflex references from a material-source chain."""
+    references = []
+    seen = set()
+    for source_data in (data, *compound_sources.values()):
+        for logical_path in mgraph.referenced_mreflexes(source_data):
+            key = logical_path.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            references.append(logical_path)
+    return references
+
+
+def _graph_referenced_mreflex(source_entry, mmb_entry):
+    """Resolve the one graph-referenced MReflex owned by an MMB reference.
+
+    The shared graph-owner resolver applies progressively weaker evidence only
+    when the stronger tier has no candidate. Equal-strength ambiguity remains
+    unresolved.
+    """
+    data = source_entry.archive.extract(source_entry.asset)
+    if data[:4] != mgraph.MAGIC:
+        raise ValueError(f"{source_entry.asset.name} is not a BV2 material source")
+    mmb_references, compound_sources = _material_source_references(
+        data, source_entry.archive)
+    reflex_references = _material_source_mreflex_references(
+        data, compound_sources)
+    target = mmb_entry.asset.name.replace("\\", "/").casefold()
+    owned = []
+    for reflex_path in reflex_references:
+        owner, _rule = mgraph.mreflex_owner(reflex_path, mmb_references)
+        if owner != target:
+            continue
+        reflex = PurePosixPath(reflex_path.replace("\\", "/").casefold())
+        with _state.lock:
+            candidates = list(_state.sidecars.get(
+                reflex.as_posix(), ()))
+        preferred = _prefer_archive(candidates, mmb_entry.archive)
+        if preferred:
+            owned.append(preferred[0])
+    unique = {
+        item.asset.name.casefold(): item
+        for item in owned
+    }
+    if len(unique) == 1:
+        return next(iter(unique.values()))
+    if len(unique) > 1:
+        logger.warning(
+            "Multiple graph-referenced MReflex files match %s via %s",
+            mmb_entry.asset.name,
+            source_entry.asset.name,
+        )
+    return None
+
+
+def _auto_graph_referenced_mreflex(mmb_entry, selected_path=None):
+    """Resolve one MReflex across plausible material sources for an MMB."""
+    def resolve_group(candidates):
+        preferred_sources = {}
+        for candidate in candidates:
+            preferred_sources.setdefault(
+                candidate.asset.name.casefold(), candidate)
+        resolved = {}
+        for candidate in preferred_sources.values():
+            try:
+                sidecar = _graph_referenced_mreflex(candidate, mmb_entry)
+            except Exception as error:
+                logger.debug(
+                    "Could not inspect MReflex source %s: %s",
+                    candidate.asset.name,
+                    error,
+                )
+                continue
+            if sidecar is not None:
+                resolved[sidecar.asset.name.casefold()] = sidecar
+        return resolved
+
+    selected_key = (selected_path or _MATERIAL_SOURCE_AUTO).casefold()
+    if selected_key != _MATERIAL_SOURCE_AUTO.casefold():
+        with _state.lock:
+            if selected_key.endswith(".mgraphobject"):
+                candidates = list(_state.graphs.get(selected_key, ()))
+            elif selected_key.endswith(".mcompoundnode"):
+                candidates = list(_state.compounds.get(selected_key, ()))
+            else:
+                candidates = []
+        candidates = _prefer_archive(candidates, mmb_entry.archive)
+        groups = [candidates]
+    else:
+        groups = []
+        graph_groups = {}
+        for name_score, affinity, candidate in (
+            _ranked_material_graph_candidates(mmb_entry)
+        ):
+            if name_score < 2:
+                continue
+            graph_groups.setdefault(
+                (name_score, affinity), []).append(candidate)
+        groups.extend(graph_groups.values())
+
+    for candidates in groups:
+        resolved = resolve_group(candidates)
+        if len(resolved) == 1:
+            return next(iter(resolved.values()))
+        if len(resolved) > 1:
+            logger.warning(
+                "Multiple material-source MReflex files match %s",
+                mmb_entry.asset.name,
+            )
+            return None
+    return None
+
+
 def _direct_material_source_references(data):
     """Return normalized MMB references stored directly in one BV2 source."""
     return {path.casefold() for path in mgraph.referenced_meshes(data)}
@@ -1935,6 +2052,7 @@ def _process_mmb_entry(
     import_materials,
     extracted_directory,
     material_source_path=None,
+    material_source_entry=None,
 ):
     """Extract, parse, and optionally import one indexed MMB."""
     settings = context.scene.SWOMT
@@ -1956,20 +2074,55 @@ def _process_mmb_entry(
                 entry, destination=temporary_path
             )
 
-        sidecar = _matching_sidecar(entry) if load_as_asset else None
-        if sidecar is not None:
-            mcloth_path = os.path.splitext(mmb_path)[0] + ".mcloth"
+        sidecars = (
+            (".mcloth", "mcloth"),
+            (".mreflex", "mreflex"),
+        ) if load_as_asset else ()
+        indirect_reflex_path = None
+        for extension, label in sidecars:
+            sidecar = _matching_sidecar(entry, extension)
+            indirect = False
+            if (
+                sidecar is None
+                and extension == ".mreflex"
+            ):
+                try:
+                    if material_source_entry is not None:
+                        sidecar = _graph_referenced_mreflex(
+                            material_source_entry, entry)
+                    else:
+                        sidecar = _auto_graph_referenced_mreflex(
+                            entry, selected_path=material_source_path)
+                    indirect = sidecar is not None
+                except Exception as error:
+                    logger.warning(
+                        "Could not inspect graph-referenced MReflex for %s: %s",
+                        entry.asset.name,
+                        error,
+                    )
+            if sidecar is None:
+                continue
+            if indirect:
+                sidecar_path = os.path.join(
+                    os.path.dirname(mmb_path),
+                    PurePosixPath(sidecar.asset.name).name,
+                )
+            else:
+                sidecar_path = os.path.splitext(mmb_path)[0] + extension
             try:
-                _extract_to_cache(sidecar, destination=mcloth_path)
+                _extract_to_cache(sidecar, destination=sidecar_path)
+                if indirect:
+                    indirect_reflex_path = sidecar_path
             except Exception as error:
                 logger.warning(
-                    "Could not extract paired mcloth for %s: %s",
+                    "Could not extract paired %s for %s: %s",
+                    label,
                     entry.asset.name,
                     error,
                 )
                 operator.report(
                     {"WARNING"},
-                    f"MMB loaded, but paired mcloth extraction failed: {error}",
+                    f"MMB loaded, but paired {label} extraction failed: {error}",
                 )
 
         try:
@@ -1986,6 +2139,14 @@ def _process_mmb_entry(
             settings.AssetPath = mmb_path
             if addon_state.asset is None:
                 raise ValueError(f"The extracted MMB could not be loaded: {entry.asset.name}")
+            if indirect_reflex_path:
+                from ..settings import _load_mreflex_into_settings
+                _load_mreflex_into_settings(
+                    settings,
+                    mmb_path,
+                    addon_state.asset,
+                    reflex_path=indirect_reflex_path,
+                )
             return {"FINISHED"}, extracted, None
 
         from .io import _import_all_lods
@@ -1994,6 +2155,14 @@ def _process_mmb_entry(
             settings.AssetPath = mmb_path
             if addon_state.asset is None:
                 raise ValueError(f"The extracted MMB could not be loaded: {entry.asset.name}")
+            if indirect_reflex_path:
+                from ..settings import _load_mreflex_into_settings
+                _load_mreflex_into_settings(
+                    settings,
+                    mmb_path,
+                    addon_state.asset,
+                    reflex_path=indirect_reflex_path,
+                )
             imported_asset = addon_state.asset
             result = _import_all_lods(context, 0)
         else:
@@ -2139,7 +2308,7 @@ class ClearSDFIndexCache(bpy.types.Operator):
     bl_idname = "object.clear_sdf_index_cache"
     bl_label = "Clear SDF Index Cache"
     bl_description = (
-        "Delete cached MMB, mcloth, material-graph, compound-node, shader, and texture indexes; "
+        "Delete cached MMB, mcloth, mreflex, material-graph, compound-node, shader, and texture indexes; "
         "extracted asset files are preserved"
     )
 
@@ -2396,6 +2565,7 @@ class ImportSDFMMB(bpy.types.Operator):
                     import_materials=settings.sdf_import_materials,
                     extracted_directory=settings.sdf_extracted_directory,
                     material_source_path=material_source_path,
+                    material_source_entry=source_entry,
                 )
                 if "FINISHED" not in result:
                     failures.append(target.asset.name)

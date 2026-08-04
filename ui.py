@@ -25,6 +25,21 @@ class SDFArchiveFilterPopover(bpy.types.Panel):
         layout.prop(settings, "sdf_show_dlc3", text="DLC3")
 
 
+class MReflexNodeList(bpy.types.UIList):
+    """Compact list of structurally parsed MReflex dangle nodes."""
+
+    bl_idname = "SWOMT_UL_mreflex_nodes"
+
+    def draw_item(
+            self, context, layout, data, item, icon, active_data,
+            active_property, index):
+        if item.bone_name:
+            layout.label(text=item.bone_name, icon="BONE_DATA")
+        else:
+            layout.label(
+                text=f"Node {item.node_id} (unmatched)", icon="QUESTION")
+
+
 class SWOMTPanel(bpy.types.Panel):
     """Creates a Panel in the Scene Properties window"""
     bl_label = "AFoP Mesh Tool | Version {}.{}.{}".format(*bl_info["version"])
@@ -242,6 +257,76 @@ class SWOMTPanel(bpy.types.Panel):
                 )
                 if SWOMT.banshee_pattern_status:
                     pattern_box.label(text=SWOMT.banshee_pattern_status, icon="INFO")
+
+            reflex_box = layout.box()
+            reflex_header = reflex_box.row(align=True)
+            reflex_header.prop(
+                SWOMT,
+                "reflex_expanded",
+                text="",
+                icon='TRIA_DOWN' if SWOMT.reflex_expanded else 'TRIA_RIGHT',
+                emboss=False,
+            )
+            reflex_header.label(text="Dangle Physics (Experimental)", icon="PHYSICS")
+            if SWOMT.reflex_expanded:
+                path_row = reflex_box.row(align=True)
+                path_row.prop(SWOMT, "ReflexPath", text="MReflex")
+                path_row.operator(
+                    "object.browse_mreflex_file", text="", icon="FILE_FOLDER")
+                if SWOMT.reflex_status:
+                    status_icon = (
+                        "ERROR" if "failed" in SWOMT.reflex_status.lower()
+                        else "INFO"
+                    )
+                    reflex_box.label(
+                        text=SWOMT.reflex_status, icon=status_icon)
+                if SWOMT.reflex_nodes:
+                    reflex_box.template_list(
+                        "SWOMT_UL_mreflex_nodes",
+                        "",
+                        SWOMT,
+                        "reflex_nodes",
+                        SWOMT,
+                        "reflex_node_index",
+                        rows=5,
+                    )
+                    active_index = min(
+                        SWOMT.reflex_node_index,
+                        len(SWOMT.reflex_nodes) - 1,
+                    )
+                    node = SWOMT.reflex_nodes[active_index]
+                    node_box = reflex_box.box()
+                    if node.bone_name:
+                        node_box.label(
+                            text=f"Bone: {node.bone_name}", icon="BONE_DATA")
+                    else:
+                        node_box.label(
+                            text="Bone match is ambiguous or unavailable",
+                            icon="QUESTION",
+                        )
+                    node_box.label(
+                        text=(
+                            f"Record {node.record_index}  "
+                            f"Node {node.node_id}  Parent {node.parent_id}"
+                        )
+                    )
+                    node_box.prop(node, "gravity")
+                    node_box.prop(node, "weight")
+                    node_box.prop(node, "spring")
+                    node_box.prop(node, "damping")
+                    limits = node_box.column(align=True)
+                    limits.label(text="Angular Limits")
+                    limits.prop(node, "limit_1")
+                    limits.prop(node, "limit_2")
+                    limits.prop(node, "limit_3")
+                    limits.prop(node, "limit_4")
+                actions = reflex_box.row(align=True)
+                actions.operator(
+                    "object.reload_mreflex", text="Reload", icon="FILE_REFRESH")
+                save = actions.row(align=True)
+                save.enabled = bool(SWOMT.reflex_nodes)
+                save.operator(
+                    "object.save_mreflex", text="Save MReflex", icon="EXPORT")
             layout.separator()
             layout.label(text="Import", icon='IMPORT')
             imp_row = layout.row(align=True)
@@ -367,4 +452,4 @@ class SWOMTPanel(bpy.types.Panel):
                                 if is_added:
                                     slot_row.enabled = False
 
-CLASSES = (SDFArchiveFilterPopover, SWOMTPanel)
+CLASSES = (SDFArchiveFilterPopover, MReflexNodeList, SWOMTPanel)
