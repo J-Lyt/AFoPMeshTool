@@ -1412,8 +1412,8 @@ class BlenderMeshExporter:
         """
         Encode pairs to uint8, then fix the integer sum to exactly 255.
         Applies one-unit adjustments iteratively, always picking the entry
-        with the largest rounding error that can actually absorb the step
-        without clamping.
+        whose rounding error most benefits the required direction, without
+        clamping.
         """
         encoded = [(s, int(round(w * 255))) for s, w in sw]
         diff = 255 - sum(e for _, e in encoded)
@@ -1428,7 +1428,7 @@ class BlenderMeshExporter:
                     continue
                 if step == -1 and e <= 0:
                     continue
-                err = abs((sw[i][1] * 255) - e)
+                err = ((sw[i][1] * 255) - e) * step
                 if err > best_err:
                     best_err = err
                     best_idx = i
@@ -1443,8 +1443,8 @@ class BlenderMeshExporter:
         """
         Encode pairs to uint16, then fix the integer sum to exactly 32767.
         Applies one-unit adjustments iteratively, always picking the entry
-        with the largest rounding error that can actually absorb the step
-        without clamping.
+        whose rounding error most benefits the required direction, without
+        clamping.
         """
         encoded = [(s, int(round(w * 32767))) for s, w in sw]
         diff = 32767 - sum(e for _, e in encoded)
@@ -1459,7 +1459,7 @@ class BlenderMeshExporter:
                     continue
                 if step == -1 and e <= 0:
                     continue
-                err = abs((sw[i][1] * 32767) - e)
+                err = ((sw[i][1] * 32767) - e) * step
                 if err > best_err:
                     best_err = err
                     best_idx = i
