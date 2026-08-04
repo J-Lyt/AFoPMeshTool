@@ -714,6 +714,14 @@ class SWOMTSettings(bpy.types.PropertyGroup):
         subtype='DISTANCE',
         description="Vertices added to a '_CLOTH_RENDER' mesh inherit cloth behavior from the nearest original vertex within this distance.",
     )
+    force_cloth_recook: bpy.props.BoolProperty(
+        name="Force Recook",
+        default=False,
+        description=(
+            "Force every mcloth stream to receive a geometry-neutral "
+            "SIM-section byte change, invalidating cached cloth mappings"
+        ),
+    )
     export_uvs: bpy.props.BoolProperty(
         name="Export UVs",
         description=(

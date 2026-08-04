@@ -720,6 +720,7 @@ class BlenderMeshExporter:
             lod.exported_sim_reused = set()
             lod.exported_sim_moved = set()
             lod.exported_sim_valid_tris = None
+            lod.exported_sim_rebuilt = set()
             lod.exported_sim_grown = False
             if _is_cloth_render or _is_cloth_sim:
                 _orig_vc_file = unpack('<I', file_data[lod.start_offset:lod.start_offset + 4])[0]
@@ -751,7 +752,8 @@ class BlenderMeshExporter:
                         # once and leave the reused-slot constraints stale.
                         _orphans = [s for s in range(_orig_vc_file) if s not in _claimed]
                         if len(_extras) <= len(_orphans):
-                            _free_flags = _sim_free_slot_flags(_orig_vc_file)
+                            _free_flags = _sim_free_slot_flags(
+                                _orig_vc_file, mesh.name)
                             _orphans.sort(
                                 key=lambda s: (not _free_flags[s])
                                 if _free_flags else 0)
@@ -913,6 +915,29 @@ class BlenderMeshExporter:
                                 _new_tris.append(_sv)
                     _written_tris = set()
                     _appended_face_bytes = bytearray()
+                    if lod.exported_sim_grown:
+                        # Growth appends replacement faces, so unmatched
+                        # original face slots would otherwise remain live and
+                        # overlap the edited topology. Preserve the slot/count
+                        # contract but make those obsolete slots genuinely
+                        # inert. Record their boundary vertices so mcloth can
+                        # replace stale constraints nearby.
+                        _deleted_slots = sorted(
+                            t for tl in _orig_tri_slots.values() for t in tl)
+                        for _t in _deleted_slots:
+                            _tv = [unpack(_ifmt, _orig_face_bytes[
+                                (_t*3+_j)*_isz:(_t*3+_j+1)*_isz])[0]
+                                for _j in range(3)]
+                            lod.exported_sim_rebuilt.update(_tv)
+                            _orig_face_bytes[
+                                _t * 3 * _isz:(_t + 1) * 3 * _isz] = (
+                                pack(_ifmt, _tv[0]) * 3)
+                        if _deleted_slots:
+                            logger.info(
+                                "%s: inactivated %d replaced SIM triangle "
+                                "slot(s); recooking %d boundary vertices",
+                                mesh.name, len(_deleted_slots),
+                                len(lod.exported_sim_rebuilt))
                     if _new_tris:
                         if lod.exported_sim_grown:
                             _base_t = _orig_ic // 3
