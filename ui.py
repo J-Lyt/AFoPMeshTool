@@ -363,6 +363,7 @@ class SWOMTPanel(bpy.types.Panel):
                      icon_only=True, emboss=False)
             row.label(text="Export Options")
             if SWOMT.export_options_expanded:
+                box.prop(SWOMT, "limit_total_vertex_groups")
                 box.prop(SWOMT, "compute_normals_on_export")
                 for prop_name in ("export_normals", "export_weights", "export_uvs"):
                     prop_row = box.row()

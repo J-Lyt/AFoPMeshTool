@@ -1434,6 +1434,20 @@ class BlenderMeshExporter:
         return [(s, w * inv) for s, w in sw]
 
     @staticmethod
+    def max_weights_for_mesh(mesh, source_obj=None):
+        """Safe influence limit: source usage capped by declared capacity."""
+        capacity = mesh.influence_capacity()
+        if source_obj is None and mesh.lods:
+            lod0 = mesh.lods[0]
+            source_obj = BME.find_object_by_name(
+                lod0.blender_obj_name or f"{mesh.name}_LOD0")
+        if source_obj is not None:
+            source_limit = source_obj.get("mmb_source_influence_limit")
+            if isinstance(source_limit, int) and source_limit > 0:
+                return min(capacity, source_limit)
+        return capacity
+
+    @staticmethod
     def encode_weights_u8(sw):
         """
         Encode pairs to uint8, then fix the integer sum to exactly 255.
@@ -1705,6 +1719,9 @@ class BlenderMeshExporter:
 
                 if raw_weights:
                     capacity = influence_capacity if weight_elements else 1
+                    if (weight_elements and
+                            bpy.context.scene.SWOMT.limit_total_vertex_groups):
+                        capacity = BME.max_weights_for_mesh(mesh, obj)
                     normalized = BME.normalize_weights(raw_weights, capacity)
                     if weight_scale == 255:
                         encoded_pairs = BME.encode_weights_u8(normalized)

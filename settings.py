@@ -674,6 +674,11 @@ class SWOMTSettings(bpy.types.PropertyGroup):
     )
     mesh_expanded: bpy.props.BoolVectorProperty(size=32, default=tuple([False]*32))
     bone_slots_expanded: bpy.props.BoolVectorProperty(size=32, default=tuple([False]*32))
+    limit_total_vertex_groups: bpy.props.BoolProperty(
+        name="Limit Total Vertex Groups",
+        default=True,
+        description="Limit Number of Weights per Vertex to the source LOD's limit by removing the lowest weights",
+    )
     compute_normals_on_export: bpy.props.BoolProperty(
         name="Compute Normals on Export",
         default=False,
