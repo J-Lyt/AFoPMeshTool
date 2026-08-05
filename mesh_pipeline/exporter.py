@@ -1285,7 +1285,8 @@ class BlenderMeshExporter:
                     for mesh_index, lod_index in sorted(meshlet_regeneration))
                 raise ValueError(
                     f"Meshlet regeneration failed for {names}; export was "
-                    f"cancelled to avoid stale secondary geometry: {error}") from error
+                    f"cancelled to avoid stale secondary geometry: {error}."
+                    f"Try to export using an unmodified mmb file.") from error
 
         # Chained Export All passes can read and replace the same _MOD path.
         # Write a sibling first so Windows never has to truncate the current

@@ -75,7 +75,7 @@ class ReloadMReflex(bpy.types.Operator):
 
 
 class SaveMReflex(bpy.types.Operator):
-    """Save edited kind-10 values to a protected MReflex output."""
+    """Save edited values to a _MOD MReflex output."""
 
     bl_idname = "object.save_mreflex"
     bl_label = "Save Dangle Physics"

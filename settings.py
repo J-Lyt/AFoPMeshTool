@@ -463,8 +463,7 @@ class MReflexNodeSettings(bpy.types.PropertyGroup):
         name="Force Response",
         description=(
             "How strongly wind and other external forces move the node.\n"
-            "Zero prevents dynamic movement; one gives maximum response.\n"
-            "Stored in the raw field previously labelled Weight"
+            "Zero prevents dynamic movement; one gives maximum response"
         ),
         precision=4,
         soft_min=0.0,
