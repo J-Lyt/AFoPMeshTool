@@ -35,7 +35,8 @@ Default game and extraction folders can be set in the add-on preferences.
 
 1. Expand **Load from Game Files**.
 2. Select the AFoP game root folder. e.g. `"...\Ubisoft\AFOP"`
-3. Wait for the archive index to load.
+3. Wait for the archive index to load. Cached indices load automatically only
+   while this section is expanded.
 4. Select which asset types to search. **MMB** is enabled by default;
    **MGraph** and **MCompoundNode** are optional.
 5. Select which archives are include when searching. **Rogue**, **DLC1**, **DLC2**, and

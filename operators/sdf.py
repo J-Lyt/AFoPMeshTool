@@ -662,21 +662,26 @@ def _start_archive_load(root, allow_rebuild):
     return True
 
 
+def _expanded_sdf_settings():
+    """Return settings for an expanded game-files panel, if one exists."""
+    for scene in bpy.data.scenes:
+        settings = getattr(scene, "SWOMT", None)
+        if settings is not None and settings.sdf_browser_expanded:
+            return settings
+    return None
+
+
 def _cached_auto_load_timer():
-    """Load current SDF metadata on startup only when every TOC cache is valid."""
+    """Load current cached SDF metadata only while its panel is expanded."""
+    settings = _expanded_sdf_settings()
+    if settings is None:
+        return None
     with _state.lock:
         if _state.phase in {"loading", "ready"}:
             return None
-    found_directory = False
-    for scene in bpy.data.scenes:
-        settings = getattr(scene, "SWOMT", None)
-        if settings is None:
-            continue
-        if settings.sdf_game_directory:
-            found_directory = True
-            _start_archive_load(settings.sdf_game_directory, allow_rebuild=False)
-        break
-    if not found_directory:
+    if settings.sdf_game_directory:
+        _start_archive_load(settings.sdf_game_directory, allow_rebuild=False)
+    else:
         with _state.lock:
             if _state.phase == "idle":
                 _state.status = "Select the AFOP game root folder (e.g. '...\\Ubisoft\\AFOP')"
@@ -684,7 +689,7 @@ def _cached_auto_load_timer():
 
 
 def schedule_cached_auto_load(reset=False):
-    """Schedule a non-rebuilding cached load after registration or file load."""
+    """Schedule a cache-only load when the game-files panel is expanded."""
     if reset:
         with _state.lock:
             _state.generation += 1
@@ -706,6 +711,10 @@ def schedule_cached_auto_load(reset=False):
                 settings.sdf_assets.clear()
                 settings.sdf_asset_index = -1
                 settings.sdf_search_result_status = ""
+    if _expanded_sdf_settings() is None:
+        if bpy.app.timers.is_registered(_cached_auto_load_timer):
+            bpy.app.timers.unregister(_cached_auto_load_timer)
+        return
     if not bpy.app.timers.is_registered(_cached_auto_load_timer):
         bpy.app.timers.register(_cached_auto_load_timer, first_interval=0.25)
 

@@ -537,6 +537,17 @@ def _banshee_pattern_items(self, context):
     return pattern_enum_items(self, context)
 
 
+def _on_sdf_browser_expanded_update(self, context):
+    """Load current cached SDF metadata when the game-files panel is opened."""
+    if not self.sdf_browser_expanded:
+        return
+    try:
+        from .operators import sdf as operators_sdf
+        operators_sdf.schedule_cached_auto_load()
+    except Exception as error:
+        logger.warning("Could not schedule cached SDF auto-load: %s", error)
+
+
 class SWOMTSettings(bpy.types.PropertyGroup):
     AssetPath: bpy.props.StringProperty(
         name="Path of the currently loaded asset",
@@ -566,6 +577,7 @@ class SWOMTSettings(bpy.types.PropertyGroup):
     sdf_browser_expanded: bpy.props.BoolProperty(
         name="Load from Game Files",
         default=False,
+        update=_on_sdf_browser_expanded_update,
     )
     sdf_game_directory: bpy.props.StringProperty(
         name="Game Directory",
