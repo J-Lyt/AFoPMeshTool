@@ -258,6 +258,11 @@ class SWOMTPanel(bpy.types.Panel):
                 if SWOMT.banshee_pattern_status:
                     pattern_box.label(text=SWOMT.banshee_pattern_status, icon="INFO")
 
+            cloth_path_row = layout.row(align=True)
+            cloth_path_row.prop(SWOMT, "MClothPath", text="MCloth File")
+            cloth_path_row.operator(
+                "object.browse_mcloth_file", text="", icon="FILE_FOLDER")
+
             reflex_box = layout.box()
             reflex_header = reflex_box.row(align=True)
             reflex_header.prop(

@@ -28,13 +28,22 @@ except ImportError:
         mcloth = None
         logger.warning("mcloth.py is unavailable; cloth export is disabled: %s", error)
 
+
+def _source_mcloth_path(settings):
+    """Selected source mcloth, falling back to the MMB's paired sidecar."""
+    selected = settings.MClothPath.strip()
+    if selected:
+        return bpy.path.abspath(selected)
+    return mcloth.source_path(bpy.path.abspath(settings.AssetPath)) if mcloth else None
+
+
 def _sim_free_slot_flags(orig_vc, sim_name=None):
     """[bool]*orig_vc: True where the source .mcloth marks the sim vert FREE
     (simulating). Used to hand reused slots to new verts free-first. None when
     the mcloth is unavailable."""
     try:
-        src = mcloth.source_path(bpy.context.scene.SWOMT.AssetPath) if mcloth else None
-        if not src:
+        src = _source_mcloth_path(bpy.context.scene.SWOMT)
+        if not src or not os.path.isfile(src):
             return None
         with open(src, 'rb') as f:
             d = f.read()
@@ -61,12 +70,15 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
         return
     SWOMT = bpy.context.scene.SWOMT
     force_recook = bool(SWOMT.force_cloth_recook)
-    src_path = mcloth.source_path(SWOMT.AssetPath)
-    if src_path is None:
+    src_path = _source_mcloth_path(SWOMT)
+    if not src_path or not os.path.isfile(src_path):
         if operator:
-            operator.report({'WARNING'},
-                "Asset has cloth meshes but no paired .mcloth file was found - "
-                "cloth vertex mapping was NOT updated.")
+            if SWOMT.MClothPath:
+                detail = f"Selected .mcloth file was not found: {src_path}"
+            else:
+                detail = "Asset has cloth meshes but no paired .mcloth file was found"
+            operator.report(
+                {'WARNING'}, f"{detail} - cloth vertex mapping was NOT updated.")
         return
     with open(src_path, 'rb') as f:
         data = f.read()

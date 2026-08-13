@@ -32,6 +32,36 @@ class BrowseMMBFile(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class BrowseMClothFile(bpy.types.Operator):
+    """Select an MCloth paired with the loaded MMB."""
+
+    bl_idname = "object.browse_mcloth_file"
+    bl_label = "Select .mcloth"
+
+    filepath: bpy.props.StringProperty(subtype="FILE_PATH")
+    filter_glob: bpy.props.StringProperty(
+        default="*.mcloth", options={'HIDDEN'})
+
+    @classmethod
+    def poll(cls, context):
+        return addon_state.asset is not None
+
+    def invoke(self, context, event):
+        current = context.scene.SWOMT.MClothPath
+        if current:
+            self.filepath = bpy.path.abspath(current)
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        path = bpy.path.abspath(self.filepath)
+        if not os.path.isfile(path):
+            self.report({'ERROR'}, f"MCloth file does not exist: {path}")
+            return {'CANCELLED'}
+        context.scene.SWOMT.MClothPath = path
+        return {'FINISHED'}
+
+
 class BrowseExportDirectory(bpy.types.Operator):
     """Select where MMB, MCloth, and MReflex files are exported."""
 
@@ -417,6 +447,7 @@ class ExportAllLODs(bpy.types.Operator):
         return {'FINISHED'}
 
 CLASSES = (
-    BrowseMMBFile, BrowseExportDirectory, LoadMMB, ImportLOD, ExportLOD, ImportAllLOD0s,
-    ImportAllLOD1s, ImportAllLOD2s, ImportAllLOD3s, ExportAllLODs,
+    BrowseMMBFile, BrowseMClothFile, BrowseExportDirectory, LoadMMB, ImportLOD,
+    ExportLOD, ImportAllLOD0s, ImportAllLOD1s, ImportAllLOD2s, ImportAllLOD3s,
+    ExportAllLODs,
 )

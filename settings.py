@@ -8,6 +8,7 @@ import bpy
 from . import addon_state
 from .mesh_pipeline.files import _strip_mod_suffix, get_merged_mmb
 from .log import logger, set_debug
+from .formats.mcloth import source_path as paired_mcloth_path
 from .formats.mmb import SkeletalMeshAsset
 from .formats.mreflex import (
     BoneCandidate,
@@ -217,6 +218,13 @@ def _on_load_post(filepath, *args, **kwargs):
                         sk_mesh.name = full_stem
                     addon_state.asset = sk_mesh
                 _check_removed_meshes_mmb(sk_mesh, path)
+                cloth_path = scene.SWOMT.get("MClothPath", "")
+                resolved_cloth_path = (
+                    bpy.path.abspath(cloth_path) if cloth_path else "")
+                if (not resolved_cloth_path
+                        or not os.path.isfile(resolved_cloth_path)):
+                    scene.SWOMT["MClothPath"] = (
+                        paired_mcloth_path(path) or "")
                 _load_mreflex_into_settings(scene.SWOMT, path, sk_mesh)
                 logger.info("Loaded %s from %s", sk_mesh.name, path)
             except Exception as e:
@@ -251,6 +259,7 @@ def _auto_load_mmb(self, context):
     path = bpy.path.abspath(self.AssetPath) if self.AssetPath else ""
     old_asset = addon_state.asset
     self["banshee_pattern_status"] = ""
+    self["MClothPath"] = (paired_mcloth_path(path) or "") if path else ""
     self.reflex_nodes.clear()
     self["ReflexPath"] = ""
     self["reflex_status"] = ""
@@ -552,6 +561,10 @@ class SWOMTSettings(bpy.types.PropertyGroup):
     AssetPath: bpy.props.StringProperty(
         name="Path of the currently loaded asset",
         update=_auto_load_mmb,
+    )
+    MClothPath: bpy.props.StringProperty(
+        name="MCloth File",
+        description="Cloth simulation file used when exporting the loaded MMB",
     )
     ExportPath: bpy.props.StringProperty(
         name="Folder where MMB, MCloth, and MReflex files are exported",
