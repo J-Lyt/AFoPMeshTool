@@ -11,6 +11,7 @@ import bpy
 from .. import addon_state
 from ..log import logger
 from ..formats.mmb import SkeletalMeshAsset
+from .files import source_setting_path
 
 try:
     from ..formats import mcloth
@@ -31,10 +32,13 @@ except ImportError:
 
 def _source_mcloth_path(settings):
     """Selected source mcloth, falling back to the MMB's paired sidecar."""
-    selected = settings.MClothPath.strip()
+    selected = source_setting_path(
+        settings, "MClothPath", "SourceMClothPath").strip()
     if selected:
         return bpy.path.abspath(selected)
-    return mcloth.source_path(bpy.path.abspath(settings.AssetPath)) if mcloth else None
+    mmb_path = source_setting_path(
+        settings, "AssetPath", "SourceAssetPath")
+    return mcloth.source_path(bpy.path.abspath(mmb_path)) if mcloth else None
 
 
 def _sim_free_slot_flags(orig_vc, sim_name=None):
@@ -178,7 +182,9 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
     # follows the cage there, so their rows stay vanilla.
     _src_bytes = _src_asset = None
     try:
-        with open(SWOMT.AssetPath, 'rb') as _sf:
+        _source_mmb = source_setting_path(
+            SWOMT, "AssetPath", "SourceAssetPath")
+        with open(bpy.path.abspath(_source_mmb), 'rb') as _sf:
             _src_bytes = _sf.read()
         _src_asset = SkeletalMeshAsset()
         _src_asset.parse(io.BytesIO(_src_bytes))
@@ -235,9 +241,9 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
             # they are cached against the old fabric and ignored in-game).
             # The render rows themselves stay VANILLA: the render follows the
             # reshaped cage via its stored coefficients. The moved-slot set is
-            # recorded during _write_mod_file (the source bytes are intact
-            # there - the exported mmb may overwrite the source in a chained
-            # _MOD export, so a post-hoc position compare would see nothing).
+            # recorded during _write_mod_file while the exact source/export
+            # slot mapping is available; a post-hoc compare can lose that
+            # slot-level provenance.
             _moved = (getattr(_mem.lods[0], 'exported_sim_moved', set())
                       if _mem else set())
             sim_moved_slots[_sm.name] = set(_moved)
@@ -1201,3 +1207,4 @@ def _export_mcloth_for_asset(out_mmb_path, operator=None):
             detail += f"; quad tables grown: {len(grown_quad_tables)}"
         operator.report({'INFO'},
             f"Cloth mapping updated -> {os.path.basename(out_path)} ({detail})")
+    return out_path

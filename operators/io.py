@@ -8,7 +8,11 @@ import bpy
 from .. import addon_state
 from ..mesh_pipeline.cloth import _export_mcloth_for_asset
 from ..mesh_pipeline.exporter import BME
-from ..mesh_pipeline.files import _mod_file_output, get_merged_mmb
+from ..mesh_pipeline.files import (
+    _mod_file_output,
+    get_merged_mmb,
+    source_setting_path,
+)
 from ..mesh_pipeline.importer import BMI
 from ..formats.mmb import SkeletalMeshAsset
 
@@ -28,8 +32,80 @@ class BrowseMMBFile(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
     def execute(self, context):
-        context.scene.SWOMT.AssetPath = self.filepath
+        settings = context.scene.SWOMT
+        path = bpy.path.abspath(self.filepath)
+        # Using the normal browser starts a new source family.  Direct dict
+        # writes avoid an intermediate reload against the previous MMB.
+        settings["SourceAssetPath"] = path
+        settings["SourceMClothPath"] = ""
+        settings["SourceReflexPath"] = ""
+        settings.AssetPath = path
         return {'FINISHED'}
+
+
+class _BrowseSourceFileMixin:
+    """Shared behavior for extension-specific retained-source pickers."""
+
+    source_property = ""
+    source_extension = ""
+
+    def invoke(self, context, event):
+        current = getattr(context.scene.SWOMT, self.source_property, "")
+        if current:
+            self.filepath = bpy.path.abspath(current)
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        path = bpy.path.abspath(self.filepath)
+        if os.path.splitext(path)[1].lower() != self.source_extension:
+            self.report(
+                {'ERROR'},
+                f"Source file must be a {self.source_extension} file: {path}")
+            return {'CANCELLED'}
+        if not os.path.isfile(path):
+            self.report({'ERROR'}, f"Source file does not exist: {path}")
+            return {'CANCELLED'}
+        setattr(context.scene.SWOMT, self.source_property, path)
+        return {'FINISHED'}
+
+
+class BrowseSourceMMBFile(_BrowseSourceFileMixin, bpy.types.Operator):
+    """Select an optional retained MMB source for repeatable exports."""
+
+    bl_idname = "object.browse_source_mmb_file"
+    bl_label = "Select Source .mmb"
+
+    source_property = "SourceAssetPath"
+    source_extension = ".mmb"
+    filepath: bpy.props.StringProperty(subtype="FILE_PATH")
+    filter_glob: bpy.props.StringProperty(default="*.mmb", options={'HIDDEN'})
+
+
+class BrowseSourceMClothFile(_BrowseSourceFileMixin, bpy.types.Operator):
+    """Select an optional retained MCloth source for repeatable exports."""
+
+    bl_idname = "object.browse_source_mcloth_file"
+    bl_label = "Select Source .mcloth"
+
+    source_property = "SourceMClothPath"
+    source_extension = ".mcloth"
+    filepath: bpy.props.StringProperty(subtype="FILE_PATH")
+    filter_glob: bpy.props.StringProperty(
+        default="*.mcloth", options={'HIDDEN'})
+
+
+class BrowseSourceMReflexFile(_BrowseSourceFileMixin, bpy.types.Operator):
+    """Select an optional retained MReflex source for repeatable exports."""
+
+    bl_idname = "object.browse_source_mreflex_file"
+    bl_label = "Select Source .mreflex"
+
+    source_property = "SourceReflexPath"
+    source_extension = ".mreflex"
+    filepath: bpy.props.StringProperty(subtype="FILE_PATH")
+    filter_glob: bpy.props.StringProperty(
+        default="*.mreflex", options={'HIDDEN'})
 
 
 class BrowseMClothFile(bpy.types.Operator):
@@ -58,7 +134,9 @@ class BrowseMClothFile(bpy.types.Operator):
         if not os.path.isfile(path):
             self.report({'ERROR'}, f"MCloth file does not exist: {path}")
             return {'CANCELLED'}
-        context.scene.SWOMT.MClothPath = path
+        settings = context.scene.SWOMT
+        settings.MClothPath = path
+        settings.SourceMClothPath = path
         return {'FINISHED'}
 
 
@@ -84,12 +162,18 @@ class BrowseExportDirectory(bpy.types.Operator):
 
 def _export_mod_path(settings):
     """Return the protected output filename inside the selected export folder."""
-    src_path = bpy.path.abspath(settings.AssetPath)
+    src_path = bpy.path.abspath(source_setting_path(
+        settings, "AssetPath", "SourceAssetPath"))
     export_dir = bpy.path.abspath(settings.ExportPath) if settings.ExportPath else os.path.dirname(src_path)
     if not export_dir or not os.path.isdir(export_dir):
         raise FileNotFoundError(f"Export folder does not exist: {export_dir or '(empty)'}")
-    destination = os.path.join(export_dir, os.path.basename(src_path))
-    return _mod_file_output(destination, overwrite=settings.overwrite_existing)
+    displayed_path = bpy.path.abspath(settings.AssetPath) if settings.AssetPath else src_path
+    destination = os.path.join(export_dir, os.path.basename(displayed_path))
+    output = _mod_file_output(
+        destination, overwrite=settings.overwrite_existing)
+    if os.path.normcase(os.path.abspath(output)) == os.path.normcase(src_path):
+        output = _mod_file_output(destination, overwrite=False)
+    return output
 
 
 class LoadMMB(bpy.types.Operator):
@@ -99,10 +183,12 @@ class LoadMMB(bpy.types.Operator):
 
     def execute(self,context):
         SWOMT = context.scene.SWOMT
-        with open(SWOMT.AssetPath, 'rb') as file:
+        source_path = bpy.path.abspath(source_setting_path(
+            SWOMT, "AssetPath", "SourceAssetPath"))
+        with open(source_path, 'rb') as file:
             sk_mesh = SkeletalMeshAsset()
             sk_mesh.parse(file)
-            sk_mesh.name = Path(SWOMT.AssetPath).stem
+            sk_mesh.name = Path(source_path).stem
             addon_state.asset = sk_mesh
 
         return {'FINISHED'}
@@ -124,7 +210,9 @@ class ImportLOD(bpy.types.Operator):
         mesh = sk_mesh.meshes[self.mesh_index]
         lod = mesh.lods[self.lod_index]
         SWOMT = context.scene.SWOMT
-        merged_mmb = get_merged_mmb(SWOMT["AssetPath"])
+        source_path = bpy.path.abspath(source_setting_path(
+            SWOMT, "AssetPath", "SourceAssetPath"))
+        merged_mmb = get_merged_mmb(source_path)
         obj = BMI.import_mesh(merged_mmb,
                               skeletal_mesh=sk_mesh,
                               mesh=mesh,
@@ -158,7 +246,8 @@ class ExportLOD(bpy.types.Operator):
                         break
 
         SWOMT = context.scene.SWOMT
-        src_path = SWOMT.AssetPath
+        src_path = bpy.path.abspath(source_setting_path(
+            SWOMT, "AssetPath", "SourceAssetPath"))
         try:
             mod_file = _export_mod_path(SWOMT)
         except OSError as error:
@@ -181,6 +270,7 @@ class ExportLOD(bpy.types.Operator):
             BME._write_mod_file(
                 edited_lod_index_per_mesh={self.mesh_index: self.lod_index},
                 out_path=mod_file,
+                src_path=src_path,
             )
         except Exception as e:
             if tri_obj:
@@ -215,7 +305,7 @@ class ExportLOD(bpy.types.Operator):
             return {'CANCELLED'}
 
         # Rewrite the paired .mcloth (if any) so the cloth vertex mapping matches this export
-        _export_mcloth_for_asset(mod_file, operator=self)
+        cloth_output = _export_mcloth_for_asset(mod_file, operator=self)
 
         # Apply staged file rename
         if addon_state.asset.pending_file_rename_new:
@@ -229,9 +319,14 @@ class ExportLOD(bpy.types.Operator):
                 self.report({'ERROR'}, f"Failed to rename mod file: {e}")
                 return {'FINISHED'}
             SWOMT.AssetPath = new_file
+            renamed_cloth = os.path.splitext(new_file)[0] + '.mcloth'
+            if cloth_output and os.path.isfile(renamed_cloth):
+                SWOMT.MClothPath = renamed_cloth
             self.report({'INFO'}, f"Exported -> {os.path.basename(new_file)}")
         else:
             SWOMT.AssetPath = mod_file
+            if cloth_output and os.path.isfile(cloth_output):
+                SWOMT.MClothPath = cloth_output
 
         return {'FINISHED'}
 
@@ -239,7 +334,8 @@ def _import_all_lods(context, lod_n, skeletal_mesh=None, asset_path=None):
     """Shared import logic, optionally using an MMB without loading it as the current asset."""
     sk_mesh = skeletal_mesh if skeletal_mesh is not None else addon_state.asset
     SWOMT = context.scene.SWOMT
-    source_path = asset_path if asset_path is not None else SWOMT["AssetPath"]
+    source_path = asset_path if asset_path is not None else source_setting_path(
+        SWOMT, "AssetPath", "SourceAssetPath")
     merged_mmb = get_merged_mmb(source_path)
     is_new_armature = bpy.data.objects.find(sk_mesh.name) == -1
     armature = BMI.find_or_create_skeleton(sk_mesh)
@@ -325,7 +421,8 @@ class ExportAllLODs(bpy.types.Operator):
                         break
 
         SWOMT = context.scene.SWOMT
-        src_path = SWOMT.AssetPath
+        src_path = bpy.path.abspath(source_setting_path(
+            SWOMT, "AssetPath", "SourceAssetPath"))
         try:
             mod_file = _export_mod_path(SWOMT)
         except OSError as error:
@@ -351,7 +448,7 @@ class ExportAllLODs(bpy.types.Operator):
         # it so every LOD level accumulates on top of the previous one.
         exported_any = False
         exported_mesh_indices = set()
-        current_src = None  # None -> _write_mod_file reads SWOMT.AssetPath
+        current_src = src_path
         try:
             for lod_n in reversed(range(4)):
                 edited = {}
@@ -395,7 +492,8 @@ class ExportAllLODs(bpy.types.Operator):
                 try:
                     BME._write_mod_file(
                         edited_lod_index_per_mesh=removed,
-                        out_path=mod_file)
+                        out_path=mod_file,
+                        src_path=src_path)
                     exported_any = True
                     exported_mesh_indices.update(removed)
                 except Exception as e:
@@ -426,7 +524,7 @@ class ExportAllLODs(bpy.types.Operator):
             return {'CANCELLED'}
 
         # Rewrite the paired .mcloth (if any) so the cloth vertex mapping matches this export
-        _export_mcloth_for_asset(mod_file, operator=self)
+        cloth_output = _export_mcloth_for_asset(mod_file, operator=self)
 
         # Apply staged file rename
         if addon_state.asset.pending_file_rename_new:
@@ -440,14 +538,20 @@ class ExportAllLODs(bpy.types.Operator):
                 self.report({'ERROR'}, f"Failed to rename mod file: {e}")
                 return {'FINISHED'}
             SWOMT.AssetPath = new_file
+            renamed_cloth = os.path.splitext(new_file)[0] + '.mcloth'
+            if cloth_output and os.path.isfile(renamed_cloth):
+                SWOMT.MClothPath = renamed_cloth
             self.report({'INFO'}, f"Exported -> {os.path.basename(new_file)}")
         else:
             SWOMT.AssetPath = mod_file
+            if cloth_output and os.path.isfile(cloth_output):
+                SWOMT.MClothPath = cloth_output
 
         return {'FINISHED'}
 
 CLASSES = (
-    BrowseMMBFile, BrowseMClothFile, BrowseExportDirectory, LoadMMB, ImportLOD,
-    ExportLOD, ImportAllLOD0s, ImportAllLOD1s, ImportAllLOD2s, ImportAllLOD3s,
-    ExportAllLODs,
+    BrowseMMBFile, BrowseSourceMMBFile, BrowseSourceMClothFile,
+    BrowseSourceMReflexFile, BrowseMClothFile, BrowseExportDirectory, LoadMMB,
+    ImportLOD, ExportLOD, ImportAllLOD0s, ImportAllLOD1s, ImportAllLOD2s,
+    ImportAllLOD3s, ExportAllLODs,
 )

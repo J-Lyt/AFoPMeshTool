@@ -134,6 +134,8 @@ def _load_mreflex_into_settings(settings, mmb_path, sk_mesh, reflex_path=""):
     settings.reflex_node_index = 0
     path = os.path.abspath(reflex_path) if reflex_path else paired_mreflex_path(mmb_path)
     settings["ReflexPath"] = path
+    if path and not settings.get("SourceReflexPath", ""):
+        settings["SourceReflexPath"] = path
     if not path or not os.path.isfile(path):
         settings["reflex_status"] = "No paired .mreflex found"
         return False
@@ -204,8 +206,13 @@ def _on_load_post(filepath, *args, **kwargs):
             path = scene.SWOMT.get("AssetPath", "")
             if not path or not os.path.isfile(path):
                 continue
+            if not scene.SWOMT.get("SourceAssetPath", ""):
+                scene.SWOMT["SourceAssetPath"] = path
+            source_path = bpy.path.abspath(
+                scene.SWOMT.get("SourceAssetPath", "") or path)
+            parse_path = source_path if os.path.isfile(source_path) else path
             try:
-                with open(path, 'rb') as f:
+                with open(parse_path, 'rb') as f:
                     sk_mesh = SkeletalMeshAsset()
                     sk_mesh.parse(f)
                     # AssetPath may be an exported '_MOD'; the armature in this
@@ -217,7 +224,7 @@ def _on_load_post(filepath, *args, **kwargs):
                     else:
                         sk_mesh.name = full_stem
                     addon_state.asset = sk_mesh
-                _check_removed_meshes_mmb(sk_mesh, path)
+                _check_removed_meshes_mmb(sk_mesh, parse_path)
                 cloth_path = scene.SWOMT.get("MClothPath", "")
                 resolved_cloth_path = (
                     bpy.path.abspath(cloth_path) if cloth_path else "")
@@ -225,8 +232,11 @@ def _on_load_post(filepath, *args, **kwargs):
                         or not os.path.isfile(resolved_cloth_path)):
                     scene.SWOMT["MClothPath"] = (
                         paired_mcloth_path(path) or "")
-                _load_mreflex_into_settings(scene.SWOMT, path, sk_mesh)
-                logger.info("Loaded %s from %s", sk_mesh.name, path)
+                if (scene.SWOMT.get("MClothPath", "")
+                        and not scene.SWOMT.get("SourceMClothPath", "")):
+                    scene.SWOMT["SourceMClothPath"] = scene.SWOMT["MClothPath"]
+                _load_mreflex_into_settings(scene.SWOMT, parse_path, sk_mesh)
+                logger.info("Loaded %s from %s", sk_mesh.name, parse_path)
             except Exception as e:
                 logger.warning("Failed to load %s: %s", path, e)
             break
@@ -257,9 +267,17 @@ def _resolve_asset_name(new_path, old_asset):
 
 def _auto_load_mmb(self, context):
     path = bpy.path.abspath(self.AssetPath) if self.AssetPath else ""
+    if path and not self.get("SourceAssetPath", ""):
+        self["SourceAssetPath"] = path
+    retained_source = bpy.path.abspath(
+        self.get("SourceAssetPath", "") or path) if path else ""
     old_asset = addon_state.asset
     self["banshee_pattern_status"] = ""
     self["MClothPath"] = (paired_mcloth_path(path) or "") if path else ""
+    if retained_source and not self.get("SourceMClothPath", ""):
+        source_cloth = paired_mcloth_path(retained_source) or ""
+        if source_cloth:
+            self["SourceMClothPath"] = source_cloth
     self.reflex_nodes.clear()
     self["ReflexPath"] = ""
     self["reflex_status"] = ""
@@ -270,16 +288,17 @@ def _auto_load_mmb(self, context):
     if path:
         self["ExportPath"] = os.path.dirname(os.path.abspath(path))
     try:
-        if not path or not os.path.isfile(path):
+        parse_path = retained_source if os.path.isfile(retained_source) else path
+        if not parse_path or not os.path.isfile(parse_path):
             return
-        new_name = _resolve_asset_name(path, old_asset)
-        with open(path, 'rb') as file:
+        new_name = _resolve_asset_name(parse_path, old_asset)
+        with open(parse_path, 'rb') as file:
             sk_mesh = SkeletalMeshAsset()
             sk_mesh.parse(file)
             sk_mesh.name = new_name
             addon_state.asset = sk_mesh
-        _check_removed_meshes_mmb(sk_mesh, path)
-        _load_mreflex_into_settings(self, path, sk_mesh)
+        _check_removed_meshes_mmb(sk_mesh, parse_path)
+        _load_mreflex_into_settings(self, parse_path, sk_mesh)
     except Exception as e:
         logger.warning("MMB auto-load failed: %s", e)
     finally:
@@ -289,6 +308,44 @@ def _auto_load_mmb(self, context):
             for area in window.screen.areas:
                 if area.type == "PROPERTIES":
                     area.tag_redraw()
+
+
+def _on_source_asset_update(self, context):
+    """Use a selected source MMB as the current file only when it is empty."""
+    if self.SourceAssetPath and not self.AssetPath:
+        self.AssetPath = self.SourceAssetPath
+        return
+    if self.SourceAssetPath and self.AssetPath:
+        current_cloth = self.MClothPath
+        current_reflex = self.ReflexPath
+        _auto_load_mmb(self, context)
+        if current_cloth:
+            self["MClothPath"] = current_cloth
+        if current_reflex:
+            self["ReflexPath"] = current_reflex
+
+
+def _on_source_mcloth_update(self, context):
+    """Use a selected source MCloth as the current file only when it is empty."""
+    if self.SourceMClothPath and not self.MClothPath:
+        self.MClothPath = self.SourceMClothPath
+
+
+def _on_source_reflex_update(self, context):
+    """Use and load a selected source MReflex when the current field is empty."""
+    if not self.SourceReflexPath:
+        return
+    current_path = self.ReflexPath
+    path = bpy.path.abspath(self.SourceReflexPath)
+    if not current_path:
+        self["ReflexPath"] = path
+    if addon_state.asset is not None and os.path.isfile(path):
+        mmb_path = self.SourceAssetPath or self.AssetPath
+        _load_mreflex_into_settings(
+            self, bpy.path.abspath(mmb_path), addon_state.asset,
+            reflex_path=path)
+        if current_path:
+            self["ReflexPath"] = current_path
 
 def _vert_count_changed():
     """Return True if any imported LOD Blender object has a different vert count than the MMB."""
@@ -558,6 +615,29 @@ def _on_sdf_browser_expanded_update(self, context):
 
 
 class SWOMTSettings(bpy.types.PropertyGroup):
+    source_files_expanded: bpy.props.BoolProperty(
+        name="Source Files",
+        description=(
+            "Keep original files as the source for later exports while the "
+            "normal file fields show the latest _MOD outputs"
+        ),
+        default=False,
+    )
+    SourceAssetPath: bpy.props.StringProperty(
+        name="Source MMB File",
+        description="Optional original MMB used as the baseline for every export",
+        update=_on_source_asset_update,
+    )
+    SourceMClothPath: bpy.props.StringProperty(
+        name="Source MCloth File",
+        description="Optional original MCloth used as the baseline for every export",
+        update=_on_source_mcloth_update,
+    )
+    SourceReflexPath: bpy.props.StringProperty(
+        name="Source MReflex File",
+        description="Optional original MReflex used as the baseline for every export",
+        update=_on_source_reflex_update,
+    )
     AssetPath: bpy.props.StringProperty(
         name="Path of the currently loaded asset",
         update=_auto_load_mmb,
@@ -695,7 +775,10 @@ class SWOMTSettings(bpy.types.PropertyGroup):
     overwrite_existing: bpy.props.BoolProperty(
         name="Overwrite existing file",
         default=False,
-        description="Overwrite loaded files instead of creating protected _MOD files",
+        description=(
+            "Replace the existing _MOD export; the original source file is "
+            "never overwritten"
+        ),
     )
     mesh_expanded: bpy.props.BoolVectorProperty(size=32, default=tuple([False]*32))
     bone_slots_expanded: bpy.props.BoolVectorProperty(size=32, default=tuple([False]*32))

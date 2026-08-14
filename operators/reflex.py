@@ -11,6 +11,12 @@ from ..formats.mreflex import (
     rewrite_dangle_nodes,
 )
 from ..settings import _load_mreflex_into_settings
+from ..mesh_pipeline.files import source_setting_path
+
+
+def _source_mmb_path(settings):
+    return bpy.path.abspath(source_setting_path(
+        settings, "AssetPath", "SourceAssetPath"))
 
 
 class BrowseMReflexFile(bpy.types.Operator):
@@ -40,9 +46,10 @@ class BrowseMReflexFile(bpy.types.Operator):
         if not os.path.isfile(path):
             self.report({'ERROR'}, f"MReflex file does not exist: {path}")
             return {'CANCELLED'}
+        settings["SourceReflexPath"] = path
         if not _load_mreflex_into_settings(
                 settings,
-                bpy.path.abspath(settings.AssetPath),
+                _source_mmb_path(settings),
                 addon_state.asset,
                 reflex_path=path):
             self.report({'ERROR'}, settings.reflex_status)
@@ -65,7 +72,7 @@ class ReloadMReflex(bpy.types.Operator):
         selected = bpy.path.abspath(settings.ReflexPath) if settings.ReflexPath else ""
         if not _load_mreflex_into_settings(
                 settings,
-                bpy.path.abspath(settings.AssetPath),
+                _source_mmb_path(settings),
                 addon_state.asset,
                 reflex_path=selected):
             self.report({'ERROR'}, settings.reflex_status)
@@ -91,7 +98,8 @@ class SaveMReflex(bpy.types.Operator):
 
     def execute(self, context):
         settings = context.scene.SWOMT
-        source_path = bpy.path.abspath(settings.ReflexPath)
+        source_path = bpy.path.abspath(source_setting_path(
+            settings, "ReflexPath", "SourceReflexPath"))
         if not os.path.isfile(source_path):
             self.report({'ERROR'}, f"MReflex file does not exist: {source_path}")
             return {'CANCELLED'}
@@ -105,12 +113,17 @@ class SaveMReflex(bpy.types.Operator):
                 f"Export folder does not exist: {export_dir or '(empty)'}")
             return {'CANCELLED'}
 
-        if settings.overwrite_existing:
-            output_path = source_path
-        else:
-            destination = os.path.join(
-                export_dir, os.path.basename(source_path))
-            output_path = mod_output_path(destination)
+        displayed_path = (
+            bpy.path.abspath(settings.ReflexPath)
+            if settings.ReflexPath else source_path
+        )
+        destination = os.path.join(
+            export_dir, os.path.basename(displayed_path))
+        output_path = mod_output_path(
+            destination, overwrite=settings.overwrite_existing)
+        if (os.path.normcase(os.path.abspath(output_path))
+                == os.path.normcase(source_path)):
+            output_path = mod_output_path(destination, overwrite=False)
 
         updates = []
         try:
@@ -145,7 +158,7 @@ class SaveMReflex(bpy.types.Operator):
 
         _load_mreflex_into_settings(
             settings,
-            bpy.path.abspath(settings.AssetPath),
+            _source_mmb_path(settings),
             addon_state.asset,
             reflex_path=output_path,
         )

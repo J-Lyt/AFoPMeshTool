@@ -654,15 +654,15 @@ def paired_mreflex_path(mmb_path):
 def mod_output_path(source_path, overwrite=False):
     """Choose a non-destructive ``_MOD`` path for any MReflex source."""
     source = Path(os.path.abspath(source_path))
-    if overwrite or _MOD_SUFFIX_RE.match(source.stem):
-        return str(source)
-    candidate = source.with_name(source.stem + "_MOD" + source.suffix)
-    if not candidate.exists():
+    match = _MOD_SUFFIX_RE.match(source.stem)
+    base_stem = match.group(1) if match else source.stem
+    candidate = source.with_name(base_stem + "_MOD" + source.suffix)
+    if overwrite or not candidate.exists():
         return str(candidate)
     index = 1
     while True:
         candidate = source.with_name(
-            f"{source.stem}_MOD{index}{source.suffix}")
+            f"{base_stem}_MOD{index}{source.suffix}")
         if not candidate.exists():
             return str(candidate)
         index += 1

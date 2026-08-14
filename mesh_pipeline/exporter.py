@@ -20,6 +20,7 @@ from .blender_utils import (
     triangulate_object,
 )
 from .cloth import _sim_free_slot_flags
+from .files import source_setting_path
 from ..log import logger
 from ..formats import meshlet as meshlet_codec
 from ..formats.mmb import (
@@ -36,6 +37,12 @@ def _bounds_tolerance(*values):
     """Allow one int16 position-quantization step when comparing stock bounds."""
     scale = max((abs(value) for value in values), default=1.0)
     return max(1e-6, scale / 32767.0 + 1e-6)
+
+
+def _source_mmb_path(settings):
+    """Resolve the retained MMB source, or the normal path when unset."""
+    return bpy.path.abspath(source_setting_path(
+        settings, "AssetPath", "SourceAssetPath"))
 
 
 def _expanded_bounds_values(existing, points):
@@ -663,13 +670,14 @@ class BlenderMeshExporter:
         :param edited_lod_index_per_mesh: dict mapping mesh_index -> lod_index to rewrite.
                A value of -1 means copy all LODs verbatim (no Blender mesh needed).
         :param out_path: destination file path to write.
-        :param src_path: file to copy unedited data from. Defaults to SWOMT.AssetPath.
+        :param src_path: file to copy unedited data from. Defaults to the
+               retained Source MMB, or SWOMT.AssetPath when that is unset.
                ExportAllLODs passes the partially-written mod file here so each LOD
                level accumulates on top of the previous one.
         """
         SWOMT = bpy.context.scene.SWOMT
         if src_path is None:
-            src_path = SWOMT.AssetPath
+            src_path = _source_mmb_path(SWOMT)
 
         with open(src_path, 'rb') as src:
             file_data = bytearray(src.read())
@@ -802,7 +810,7 @@ class BlenderMeshExporter:
                     mesh.lods[li].data_size
                     for li in range(lod_index + 1, len(mesh.lods))
                 )
-                with open(SWOMT.AssetPath, 'rb') as orig_src:
+                with open(_source_mmb_path(SWOMT), 'rb') as orig_src:
                     orig_file_data = orig_src.read()
                 orig_data_offset = unpack('<I', orig_file_data[lod.data_offset_file_pos:lod.data_offset_file_pos + 4])[0]
                 file_vob_orig = unpack('<I', orig_file_data[lod.start_offset + lod.lod_field_offset + 16:lod.start_offset + lod.lod_field_offset + 20])[0]
@@ -844,10 +852,9 @@ class BlenderMeshExporter:
                 for _vi, _slot in slot_map.items():
                     _vd_out[_slot * vs:(_slot + 1) * vs] = vd[_vi * vs:(_vi + 1) * vs]
                     _nd_out[_slot * ns:(_slot + 1) * ns] = nd[_vi * ns:(_vi + 1) * ns]
-                # Record sim slots whose POSITION changed vs the source, here
-                # where the source bytes (file_data) are still intact - the
-                # exported mmb may overwrite the source file (chained _MOD
-                # exports), so the mcloth layer can't recompute this afterward.
+                # Record sim slots whose POSITION changed vs the source here,
+                # where the exact source/export slot mapping is still known;
+                # the mcloth layer cannot reconstruct that provenance later.
                 _position_elements = mesh.elements(semantic=0, stream=0)
                 if _is_cloth_sim and len(_position_elements) == 1:
                     _position = _position_elements[0]
@@ -1617,7 +1624,7 @@ class BlenderMeshExporter:
         source_lod = mesh.lods[source_lod_index]
         source_rows = []
         source_count = 0
-        source_path = bpy.context.scene.SWOMT.AssetPath
+        source_path = _source_mmb_path(bpy.context.scene.SWOMT)
         with open(source_path, 'rb') as source_file:
             source_bytes = source_file.read()
         try:
@@ -1878,7 +1885,7 @@ class BlenderMeshExporter:
                 SWOMT = bpy.context.scene.SWOMT
                 # Always read nw and tangent bytes from the original asset file.
                 vert_count_unchanged = len(data.vertices) == lod.vertex_count
-                with open(SWOMT.AssetPath, 'rb') as orig_src:
+                with open(_source_mmb_path(SWOMT), 'rb') as orig_src:
                     orig_file_bytes = orig_src.read()
                 # Higher-LOD data sizes must come from the ORIGINAL file too:
                 # in-memory sizes already reflect earlier passes of a multi-LOD
@@ -2083,7 +2090,7 @@ class BlenderMeshExporter:
                 # normal_type 1: color(4*cc) | normal(12f) | tangent(12f) | sign(4f) | UV(4*uv)
                 SWOMT = bpy.context.scene.SWOMT
                 vert_count_unchanged = len(data.vertices) == lod.vertex_count
-                with open(SWOMT.AssetPath, 'rb') as orig_src:
+                with open(_source_mmb_path(SWOMT), 'rb') as orig_src:
                     orig_file_bytes = orig_src.read()
                 # Higher-LOD data sizes must come from the ORIGINAL file too:
                 # in-memory sizes already reflect earlier passes of a multi-LOD

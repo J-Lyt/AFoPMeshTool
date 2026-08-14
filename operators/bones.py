@@ -10,7 +10,11 @@ from mathutils import Matrix, Vector
 from .. import addon_state
 from ..formats.binary_io import br
 from ..mesh_pipeline.exporter import BME
-from ..mesh_pipeline.files import _mod_file_output, get_merged_mmb
+from ..mesh_pipeline.files import (
+    _mod_file_output,
+    get_merged_mmb,
+    source_setting_path,
+)
 from ..mesh_pipeline.importer import BMI
 from ..log import logger
 from ..formats.mmb import SkeletalMeshAsset
@@ -26,7 +30,8 @@ def _compute_inv_bind_from_skeleton(bone_name):
         return None
 
     SWOMT = bpy.context.scene.SWOMT
-    src_path = SWOMT.AssetPath
+    src_path = bpy.path.abspath(source_setting_path(
+        SWOMT, "AssetPath", "SourceAssetPath"))
     if not os.path.isfile(src_path):
         return None
 
@@ -186,7 +191,8 @@ def _scan_mesh_used_bone_slots(mesh):
     """
     try:
         SWOMT = bpy.context.scene.SWOMT
-        src_path = SWOMT.AssetPath
+        src_path = bpy.path.abspath(source_setting_path(
+            SWOMT, "AssetPath", "SourceAssetPath"))
         used = set()
         with open(src_path, 'rb') as f:
             raw_mesh_file = mesh.extract_mesh_file(f)
@@ -629,7 +635,8 @@ def _do_merge_skeletons(context, operator, src_filepath, donor_bones, mode_label
     orig_idx must be used for all donor-indexing here (not the list's own position as it may be filtered).
     """
     SWOMT = context.scene.SWOMT
-    src_path = SWOMT.AssetPath
+    src_path = bpy.path.abspath(source_setting_path(
+        SWOMT, "AssetPath", "SourceAssetPath"))
 
     # Index map for the host skeleton
     host_names = {b.name: i for i, b in enumerate(addon_state.asset.bones)}
@@ -681,7 +688,12 @@ def _do_merge_skeletons(context, operator, src_filepath, donor_bones, mode_label
     # - Increment bone_count (uint32 at a known offset)
     # - Insert bone_blob immediately after the last existing bone
 
-    mod_file = _mod_file_output(src_path, overwrite=SWOMT.overwrite_existing)
+    output_base = bpy.path.abspath(SWOMT.AssetPath) if SWOMT.AssetPath else src_path
+    mod_file = _mod_file_output(
+        output_base, overwrite=SWOMT.overwrite_existing)
+    if (os.path.normcase(os.path.abspath(mod_file))
+            == os.path.normcase(src_path)):
+        mod_file = _mod_file_output(output_base, overwrite=False)
 
     with open(src_path, 'rb') as f:
         file_data = bytearray(f.read())
@@ -1066,7 +1078,8 @@ class ExportPosedBoneMatrices(bpy.types.Operator):
 
     def execute(self, context):
         SWOMT = context.scene.SWOMT
-        src_path = SWOMT.AssetPath
+        src_path = bpy.path.abspath(source_setting_path(
+            SWOMT, "AssetPath", "SourceAssetPath"))
         arm_obj = bpy.data.objects.get(addon_state.asset.name)
 
         if arm_obj is None or arm_obj.type != 'ARMATURE':
@@ -1100,7 +1113,13 @@ class ExportPosedBoneMatrices(bpy.types.Operator):
         posed_bones = {pb.name for pb in arm_obj.pose.bones if _is_posed(pb)}
 
         # Patch skeleton section in a copy of the file bytes.
-        mod_file = _mod_file_output(src_path, overwrite=SWOMT.overwrite_existing)
+        output_base = (
+            bpy.path.abspath(SWOMT.AssetPath) if SWOMT.AssetPath else src_path)
+        mod_file = _mod_file_output(
+            output_base, overwrite=SWOMT.overwrite_existing)
+        if (os.path.normcase(os.path.abspath(mod_file))
+                == os.path.normcase(src_path)):
+            mod_file = _mod_file_output(output_base, overwrite=False)
 
         with open(src_path, 'rb') as f:
             file_data = bytearray(f.read())

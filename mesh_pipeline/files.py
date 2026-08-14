@@ -8,25 +8,32 @@ def _mod_file_output(src_path: str, overwrite: bool = False) -> str:
     """
     Determine the output file path with overwrite protection.
 
-    - If overwrite is True, return 'src_path' directly (overwrite the loaded file).
-    - If src_path already contains '_MOD' in its stem, return it directly. (overwrite it)
-    - If '<stem>_MOD.mmb' doesn't exist, return it. If it does, increment: '<stem>_MOD1.mmb', '<stem>_MOD2.mmb', etc.
+    ``src_path`` supplies the output filename family; an existing ``_MOD``
+    suffix is normalized first.  When overwrite is enabled the canonical
+    ``_MOD`` file is replaced; otherwise an existing output is protected by
+    incrementing the suffix (``_MOD1``, ``_MOD2``, ...).  Export callers guard
+    a separately retained source path from ever being selected as the output.
     """
-    if overwrite:
-        return src_path
-    stem, _ = os.path.splitext(src_path)
-    # If already a _MOD file, overwrite it
-    if '_MOD' in os.path.basename(stem):
-        return src_path
-    base = stem + "_MOD.mmb"
-    if not os.path.isfile(base):
+    stem, extension = os.path.splitext(src_path)
+    directory, filename_stem = os.path.split(stem)
+    base_stem = _strip_mod_suffix(filename_stem)
+    base = os.path.join(directory, base_stem + "_MOD" + extension)
+    if overwrite or not os.path.isfile(base):
         return base
     i = 1
     while True:
-        candidate = f"{stem}_MOD{i}.mmb"
+        candidate = os.path.join(
+            directory, f"{base_stem}_MOD{i}{extension}")
         if not os.path.isfile(candidate):
             return candidate
         i += 1
+
+
+def source_setting_path(settings, current_name, source_name):
+    """Return an optional retained source path, falling back to the UI path."""
+    source = getattr(settings, source_name, "")
+    return source.strip() if source and source.strip() else getattr(
+        settings, current_name, "")
 
 def CopyFile(read,write,offset,size,buffer_size=500000):
     read.seek(offset)

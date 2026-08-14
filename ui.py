@@ -86,6 +86,30 @@ class SWOMTPanel(bpy.types.Panel):
 
         if updater._update_error or show_up_to_date or update_available:
             layout.separator()
+
+        source_box = layout.box()
+        source_header = source_box.row(align=True)
+        source_header.prop(
+            SWOMT,
+            "source_files_expanded",
+            text="",
+            icon='TRIA_DOWN' if SWOMT.source_files_expanded else 'TRIA_RIGHT',
+            emboss=False,
+        )
+        source_header.label(text="Source Files", icon="FILE")
+        if SWOMT.source_files_expanded:
+            for prop_name, label, browse_operator in (
+                    ("SourceAssetPath", "MMB File",
+                     "object.browse_source_mmb_file"),
+                    ("SourceMClothPath", "MCloth File",
+                     "object.browse_source_mcloth_file"),
+                    ("SourceReflexPath", "MReflex",
+                     "object.browse_source_mreflex_file")):
+                source_row = source_box.row(align=True)
+                source_row.prop(SWOMT, prop_name, text=label)
+                source_row.operator(
+                    browse_operator, text="", icon="FILE_FOLDER")
+
         row = layout.row(align=True)
         row.prop(SWOMT, "AssetPath", text="MMB File")
         row.operator("object.browse_mmb_file", text="", icon="FILE_FOLDER")
