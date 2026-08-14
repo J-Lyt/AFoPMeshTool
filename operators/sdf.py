@@ -2144,8 +2144,15 @@ def _process_mmb_entry(
                 f"The extracted MMB could not be parsed: {entry.asset.name}: {error}"
             ) from error
 
-        if not import_lod0:
+        def load_as_source_asset():
+            """Populate the sole user-facing source family, then load it."""
+            settings["SourceAssetPath"] = mmb_path
+            settings["SourceMClothPath"] = ""
+            settings["SourceReflexPath"] = ""
             settings.AssetPath = mmb_path
+
+        if not import_lod0:
+            load_as_source_asset()
             if addon_state.asset is None:
                 raise ValueError(f"The extracted MMB could not be loaded: {entry.asset.name}")
             if indirect_reflex_path:
@@ -2161,7 +2168,7 @@ def _process_mmb_entry(
         from .io import _import_all_lods
 
         if load_as_asset:
-            settings.AssetPath = mmb_path
+            load_as_source_asset()
             if addon_state.asset is None:
                 raise ValueError(f"The extracted MMB could not be loaded: {entry.asset.name}")
             if indirect_reflex_path:

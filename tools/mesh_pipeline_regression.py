@@ -74,7 +74,17 @@ def main():
                 raise RuntimeError("LOD0 import did not create any Blender meshes")
 
             _require_finished("export", bpy.ops.object.export_all_lods())
-            exported_path = Path(settings.AssetPath)
+            if Path(settings.SourceAssetPath) != source:
+                raise RuntimeError(
+                    "Export replaced the retained MMB source path: "
+                    f"{settings.SourceAssetPath}"
+                )
+            if Path(settings.AssetPath) != source:
+                raise RuntimeError(
+                    "Export changed the legacy MMB mirror instead of retaining "
+                    f"the source: {settings.AssetPath}"
+                )
+            exported_path = Path(directory) / f"{source.stem}_MOD.mmb"
             if not exported_path.is_file() or exported_path.parent != Path(directory):
                 raise RuntimeError(f"Expected a temporary exported MMB, got {exported_path}")
 

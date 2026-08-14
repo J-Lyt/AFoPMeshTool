@@ -311,41 +311,38 @@ def _auto_load_mmb(self, context):
 
 
 def _on_source_asset_update(self, context):
-    """Use a selected source MMB as the current file only when it is empty."""
-    if self.SourceAssetPath and not self.AssetPath:
-        self.AssetPath = self.SourceAssetPath
+    """Mirror the sole user-facing MMB source into the legacy load property."""
+    path = bpy.path.abspath(self.SourceAssetPath) if self.SourceAssetPath else ""
+    current = bpy.path.abspath(self.AssetPath) if self.AssetPath else ""
+    if path != current:
+        self.AssetPath = path
         return
-    if self.SourceAssetPath and self.AssetPath:
-        current_cloth = self.MClothPath
-        current_reflex = self.ReflexPath
+    if path:
         _auto_load_mmb(self, context)
-        if current_cloth:
-            self["MClothPath"] = current_cloth
-        if current_reflex:
-            self["ReflexPath"] = current_reflex
 
 
 def _on_source_mcloth_update(self, context):
-    """Use a selected source MCloth as the current file only when it is empty."""
-    if self.SourceMClothPath and not self.MClothPath:
-        self.MClothPath = self.SourceMClothPath
+    """Mirror the sole user-facing MCloth source into the legacy property."""
+    self["MClothPath"] = (
+        bpy.path.abspath(self.SourceMClothPath)
+        if self.SourceMClothPath else "")
 
 
 def _on_source_reflex_update(self, context):
-    """Use and load a selected source MReflex when the current field is empty."""
+    """Mirror and load the sole user-facing MReflex source."""
     if not self.SourceReflexPath:
+        self["ReflexPath"] = ""
+        self.reflex_nodes.clear()
+        self.reflex_node_index = 0
+        self["reflex_status"] = "No source .mreflex selected"
         return
-    current_path = self.ReflexPath
     path = bpy.path.abspath(self.SourceReflexPath)
-    if not current_path:
-        self["ReflexPath"] = path
+    self["ReflexPath"] = path
     if addon_state.asset is not None and os.path.isfile(path):
         mmb_path = self.SourceAssetPath or self.AssetPath
         _load_mreflex_into_settings(
             self, bpy.path.abspath(mmb_path), addon_state.asset,
             reflex_path=path)
-        if current_path:
-            self["ReflexPath"] = current_path
 
 def _vert_count_changed():
     """Return True if any imported LOD Blender object has a different vert count than the MMB."""
@@ -617,25 +614,22 @@ def _on_sdf_browser_expanded_update(self, context):
 class SWOMTSettings(bpy.types.PropertyGroup):
     source_files_expanded: bpy.props.BoolProperty(
         name="Source Files",
-        description=(
-            "Keep original files as the source for later exports while the "
-            "normal file fields show the latest _MOD outputs"
-        ),
-        default=False,
+        description="Show or hide the source file paths",
+        default=True,
     )
     SourceAssetPath: bpy.props.StringProperty(
         name="Source MMB File",
-        description="Optional original MMB used as the baseline for every export",
+        description="Path of the currently loaded MMB asset",
         update=_on_source_asset_update,
     )
     SourceMClothPath: bpy.props.StringProperty(
         name="Source MCloth File",
-        description="Optional original MCloth used as the baseline for every export",
+        description="Cloth simulation file used when exporting the loaded MMB",
         update=_on_source_mcloth_update,
     )
     SourceReflexPath: bpy.props.StringProperty(
         name="Source MReflex File",
-        description="Optional original MReflex used as the baseline for every export",
+        description="Dangle-bone physics file paired with the loaded MMB",
         update=_on_source_reflex_update,
     )
     AssetPath: bpy.props.StringProperty(

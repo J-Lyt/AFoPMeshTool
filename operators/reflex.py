@@ -162,6 +162,7 @@ class SaveMReflex(bpy.types.Operator):
             addon_state.asset,
             reflex_path=output_path,
         )
+        settings["ReflexPath"] = source_path
         self.report(
             {'INFO'}, f"Saved dangle physics: {os.path.basename(output_path)}")
         return {'FINISHED'}

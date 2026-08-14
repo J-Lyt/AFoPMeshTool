@@ -856,7 +856,6 @@ def _do_merge_skeletons(context, operator, src_filepath, donor_bones, mode_label
             if arm_mod is not None:
                 arm_mod.object = new_arm_obj
 
-    SWOMT.AssetPath = mod_file
     operator.report({'INFO'},
         f"Merged {len(new_bones)} new bone(s) ({mode_label}) from '{os.path.basename(src_filepath)}' "
         f"into '{os.path.basename(mod_file)}'. "
@@ -1259,7 +1258,6 @@ class ExportPosedBoneMatrices(bpy.types.Operator):
         for mesh in addon_state.asset.meshes:
             BME._apply_header_patches(mod_file, mesh, addon_state.asset, operator=self)
 
-        SWOMT.AssetPath = mod_file
         self.report({'INFO'},
             f"Pose exported: {patched_skel} skeleton bone(s) ({len(posed_bones)} posed), "
             f"{patched_slots} inv_bind slot(s) -> {os.path.basename(mod_file)}")

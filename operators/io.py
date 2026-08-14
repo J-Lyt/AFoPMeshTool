@@ -71,7 +71,7 @@ class _BrowseSourceFileMixin:
 
 
 class BrowseSourceMMBFile(_BrowseSourceFileMixin, bpy.types.Operator):
-    """Select an optional retained MMB source for repeatable exports."""
+    """Load a .mmb file."""
 
     bl_idname = "object.browse_source_mmb_file"
     bl_label = "Select Source .mmb"
@@ -83,7 +83,7 @@ class BrowseSourceMMBFile(_BrowseSourceFileMixin, bpy.types.Operator):
 
 
 class BrowseSourceMClothFile(_BrowseSourceFileMixin, bpy.types.Operator):
-    """Select an optional retained MCloth source for repeatable exports."""
+    """Select an MCloth paired with the loaded MMB."""
 
     bl_idname = "object.browse_source_mcloth_file"
     bl_label = "Select Source .mcloth"
@@ -96,7 +96,7 @@ class BrowseSourceMClothFile(_BrowseSourceFileMixin, bpy.types.Operator):
 
 
 class BrowseSourceMReflexFile(_BrowseSourceFileMixin, bpy.types.Operator):
-    """Select an optional retained MReflex source for repeatable exports."""
+    """Select an MReflex paired with the loaded MMB."""
 
     bl_idname = "object.browse_source_mreflex_file"
     bl_label = "Select Source .mreflex"
@@ -174,6 +174,15 @@ def _export_mod_path(settings):
     if os.path.normcase(os.path.abspath(output)) == os.path.normcase(src_path):
         output = _mod_file_output(destination, overwrite=False)
     return output
+
+
+def _reload_source_after_export(context):
+    """Restore source-derived parse metadata without changing source paths."""
+    settings = context.scene.SWOMT
+    export_path = settings.ExportPath
+    from ..settings import _auto_load_mmb
+    _auto_load_mmb(settings, context)
+    settings["ExportPath"] = export_path
 
 
 class LoadMMB(bpy.types.Operator):
@@ -305,7 +314,7 @@ class ExportLOD(bpy.types.Operator):
             return {'CANCELLED'}
 
         # Rewrite the paired .mcloth (if any) so the cloth vertex mapping matches this export
-        cloth_output = _export_mcloth_for_asset(mod_file, operator=self)
+        _export_mcloth_for_asset(mod_file, operator=self)
 
         # Apply staged file rename
         if addon_state.asset.pending_file_rename_new:
@@ -318,15 +327,11 @@ class ExportLOD(bpy.types.Operator):
             except Exception as e:
                 self.report({'ERROR'}, f"Failed to rename mod file: {e}")
                 return {'FINISHED'}
-            SWOMT.AssetPath = new_file
-            renamed_cloth = os.path.splitext(new_file)[0] + '.mcloth'
-            if cloth_output and os.path.isfile(renamed_cloth):
-                SWOMT.MClothPath = renamed_cloth
             self.report({'INFO'}, f"Exported -> {os.path.basename(new_file)}")
         else:
-            SWOMT.AssetPath = mod_file
-            if cloth_output and os.path.isfile(cloth_output):
-                SWOMT.MClothPath = cloth_output
+            self.report({'INFO'}, f"Exported -> {os.path.basename(mod_file)}")
+
+        _reload_source_after_export(context)
 
         return {'FINISHED'}
 
@@ -524,7 +529,7 @@ class ExportAllLODs(bpy.types.Operator):
             return {'CANCELLED'}
 
         # Rewrite the paired .mcloth (if any) so the cloth vertex mapping matches this export
-        cloth_output = _export_mcloth_for_asset(mod_file, operator=self)
+        _export_mcloth_for_asset(mod_file, operator=self)
 
         # Apply staged file rename
         if addon_state.asset.pending_file_rename_new:
@@ -537,15 +542,11 @@ class ExportAllLODs(bpy.types.Operator):
             except Exception as e:
                 self.report({'ERROR'}, f"Failed to rename mod file: {e}")
                 return {'FINISHED'}
-            SWOMT.AssetPath = new_file
-            renamed_cloth = os.path.splitext(new_file)[0] + '.mcloth'
-            if cloth_output and os.path.isfile(renamed_cloth):
-                SWOMT.MClothPath = renamed_cloth
             self.report({'INFO'}, f"Exported -> {os.path.basename(new_file)}")
         else:
-            SWOMT.AssetPath = mod_file
-            if cloth_output and os.path.isfile(cloth_output):
-                SWOMT.MClothPath = cloth_output
+            self.report({'INFO'}, f"Exported -> {os.path.basename(mod_file)}")
+
+        _reload_source_after_export(context)
 
         return {'FINISHED'}
 

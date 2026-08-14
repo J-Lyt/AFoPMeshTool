@@ -99,9 +99,9 @@ class SWOMTPanel(bpy.types.Panel):
         source_header.label(text="Source Files", icon="FILE")
         if SWOMT.source_files_expanded:
             for prop_name, label, browse_operator in (
-                    ("SourceAssetPath", "MMB File",
+                    ("SourceAssetPath", "MMB",
                      "object.browse_source_mmb_file"),
-                    ("SourceMClothPath", "MCloth File",
+                    ("SourceMClothPath", "MCloth",
                      "object.browse_source_mcloth_file"),
                     ("SourceReflexPath", "MReflex",
                      "object.browse_source_mreflex_file")):
@@ -110,9 +110,6 @@ class SWOMTPanel(bpy.types.Panel):
                 source_row.operator(
                     browse_operator, text="", icon="FILE_FOLDER")
 
-        row = layout.row(align=True)
-        row.prop(SWOMT, "AssetPath", text="MMB File")
-        row.operator("object.browse_mmb_file", text="", icon="FILE_FOLDER")
         export_path_row = layout.row(align=True)
         export_path_row.prop(SWOMT, "ExportPath", text="Export Folder")
         export_path_row.operator("object.browse_export_directory", text="", icon="FILE_FOLDER")
@@ -282,11 +279,6 @@ class SWOMTPanel(bpy.types.Panel):
                 if SWOMT.banshee_pattern_status:
                     pattern_box.label(text=SWOMT.banshee_pattern_status, icon="INFO")
 
-            cloth_path_row = layout.row(align=True)
-            cloth_path_row.prop(SWOMT, "MClothPath", text="MCloth File")
-            cloth_path_row.operator(
-                "object.browse_mcloth_file", text="", icon="FILE_FOLDER")
-
             reflex_box = layout.box()
             reflex_header = reflex_box.row(align=True)
             reflex_header.prop(
@@ -298,10 +290,6 @@ class SWOMTPanel(bpy.types.Panel):
             )
             reflex_header.label(text="Dangle Physics (Experimental)", icon="PHYSICS")
             if SWOMT.reflex_expanded:
-                path_row = reflex_box.row(align=True)
-                path_row.prop(SWOMT, "ReflexPath", text="MReflex")
-                path_row.operator(
-                    "object.browse_mreflex_file", text="", icon="FILE_FOLDER")
                 if SWOMT.reflex_status:
                     status_icon = (
                         "ERROR" if "failed" in SWOMT.reflex_status.lower()
