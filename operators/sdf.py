@@ -711,10 +711,6 @@ def schedule_cached_auto_load(reset=False):
                 settings.sdf_assets.clear()
                 settings.sdf_asset_index = -1
                 settings.sdf_search_result_status = ""
-    if _expanded_sdf_settings() is None:
-        if bpy.app.timers.is_registered(_cached_auto_load_timer):
-            bpy.app.timers.unregister(_cached_auto_load_timer)
-        return
     if not bpy.app.timers.is_registered(_cached_auto_load_timer):
         bpy.app.timers.register(_cached_auto_load_timer, first_interval=0.25)
 
