@@ -38,6 +38,14 @@ def _bounds_tolerance(*values):
     return max(1e-6, scale / 32767.0 + 1e-6)
 
 
+def _clamp_unorm(value):
+    """Clamp a finite normalized channel to its serialized [0, 1] range."""
+    value = float(value)
+    if not math.isfinite(value):
+        raise ValueError("normalized vertex channel is not finite")
+    return max(0.0, min(1.0, value))
+
+
 def _expanded_bounds_values(existing, points):
     """Return an expanded 12-float bounds block, or None when already covered.
 
@@ -2017,7 +2025,7 @@ class BlenderMeshExporter:
                                 if layer is not None:
                                     vertex_color = bm.verts[v.index][layer]
                                     for c in vertex_color:
-                                        f.write(bp.uint8_norm(c))
+                                        f.write(bp.uint8_norm(_clamp_unorm(c)))
                                 elif orig_colors and src_vi < len(orig_colors):
                                     # Preserve original bytes verbatim
                                     f.write(orig_colors[src_vi][ci * 4:ci * 4 + 4])
@@ -2165,7 +2173,7 @@ class BlenderMeshExporter:
                                 if layer is not None:
                                     vertex_color = bm.verts[v.index][layer]
                                     for c in vertex_color:
-                                        f.write(bp.uint8_norm(c))
+                                        f.write(bp.uint8_norm(_clamp_unorm(c)))
                                 elif orig_colors and src_vi < len(orig_colors):
                                     f.write(orig_colors[src_vi][ci * 4:ci * 4 + 4])
                                 else:
