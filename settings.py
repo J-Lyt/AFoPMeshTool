@@ -1,6 +1,9 @@
 """Runtime asset loading and scene property definitions."""
 
+import json
+import math
 import os
+from contextlib import contextmanager
 from pathlib import Path
 
 import bpy
@@ -22,6 +25,328 @@ from .formats.mreflex import (
 
 _sdf_search_generation = 0
 _SDF_SEARCH_DELAY = 0.35
+_STAGED_STATE_VERSION = 1
+_staged_state_suspend_depth = 0
+
+
+@contextmanager
+def _suspend_staged_state_updates():
+    """Prevent RNA assignments made while loading/restoring from marking edits."""
+    global _staged_state_suspend_depth
+    _staged_state_suspend_depth += 1
+    try:
+        yield
+    finally:
+        _staged_state_suspend_depth -= 1
+
+
+def _file_identity(path):
+    """Return a stable-enough identity for rejecting state from another source."""
+    if not path:
+        return None
+    resolved = os.path.normcase(os.path.realpath(bpy.path.abspath(path)))
+    try:
+        stat = os.stat(resolved)
+    except OSError:
+        return None
+    return {
+        "path": resolved,
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
+def _source_identity(settings, sk_mesh=None, mmb_path=""):
+    """Describe the retained MMB and its parsed layout."""
+    sk_mesh = sk_mesh or addon_state.asset
+    path = mmb_path or settings.get("SourceAssetPath", "") or settings.get("AssetPath", "")
+    identity = _file_identity(path)
+    if identity is None or sk_mesh is None:
+        return None
+    identity.update({
+        "format_version": int(sk_mesh.version),
+        "bone_count": len(sk_mesh.bones),
+        "mesh_count": len(sk_mesh.meshes),
+    })
+    return identity
+
+
+def _matrix_values(value):
+    """Return a JSON-safe 4x4 matrix row, or None for malformed state."""
+    try:
+        values = [float(component) for component in value]
+    except (TypeError, ValueError):
+        return None
+    if len(values) != 16 or not all(math.isfinite(component) for component in values):
+        return None
+    return values
+
+
+def _read_staged_state(settings):
+    raw = settings.get("staged_state_json", "")
+    if not raw:
+        return None
+    try:
+        state = json.loads(raw)
+    except (TypeError, ValueError) as error:
+        logger.warning("Discarding invalid staged .blend state: %s", error)
+        settings["staged_state_json"] = ""
+        return None
+    if not isinstance(state, dict) or state.get("version") != _STAGED_STATE_VERSION:
+        logger.warning("Ignoring unsupported staged .blend state version")
+        return None
+    return state
+
+
+def _reflex_source_path(settings):
+    path = settings.get("SourceReflexPath", "") or settings.get("ReflexPath", "")
+    return bpy.path.abspath(path) if path else ""
+
+
+def save_staged_state(settings=None):
+    """Serialize export-time edits into the scene so the .blend owns them."""
+    if _staged_state_suspend_depth or addon_state.asset is None:
+        return False
+    settings = settings or getattr(bpy.context.scene, "SWOMT", None)
+    if settings is None:
+        return False
+    source = _source_identity(settings)
+    if source is None:
+        logger.warning("Could not persist staged state without a valid source MMB")
+        return False
+
+    state = {"version": _STAGED_STATE_VERSION, "source": source}
+    asset = addon_state.asset
+    if asset.pending_file_rename_old or asset.pending_file_rename_new:
+        state["file_rename"] = {
+            "old": asset.pending_file_rename_old,
+            "new": asset.pending_file_rename_new,
+        }
+
+    mesh_states = []
+    for mesh in asset.meshes:
+        if not (mesh.pending_bone_remaps or mesh.pending_bone_additions
+                or mesh.pending_rename_new or mesh.removed_in_session):
+            continue
+        remaps = []
+        for slot, (bone_index, matrix) in sorted(mesh.pending_bone_remaps.items()):
+            values = _matrix_values(matrix)
+            if values is not None:
+                remaps.append({
+                    "slot": int(slot),
+                    "bone_index": int(bone_index),
+                    "matrix": values,
+                })
+        additions = []
+        for bone_index, matrix in mesh.pending_bone_additions:
+            values = _matrix_values(matrix)
+            if values is not None:
+                additions.append({
+                    "bone_index": int(bone_index),
+                    "matrix": values,
+                })
+        mesh_states.append({
+            "index": int(mesh.index),
+            "rename": mesh.pending_rename_new,
+            "removed": bool(mesh.removed_in_session),
+            "bone_remaps": remaps,
+            "bone_additions": additions,
+            "lod_objects": [lod.blender_obj_name for lod in mesh.lods],
+        })
+    if mesh_states:
+        state["meshes"] = mesh_states
+
+    if getattr(settings, "reflex_edits_staged", False):
+        reflex_identity = _file_identity(_reflex_source_path(settings))
+        if reflex_identity is not None:
+            state["reflex"] = {
+                "source": reflex_identity,
+                "nodes": [{
+                    "record_index": int(item.record_index),
+                    "node_id": item.node_id,
+                    "gravity": float(item.gravity),
+                    "weight": float(item.weight),
+                    "spring": float(item.spring),
+                    "damping": float(item.damping),
+                    "limits": [
+                        float(item.limit_1), float(item.limit_2),
+                        float(item.limit_3), float(item.limit_4),
+                    ],
+                } for item in settings.reflex_nodes],
+            }
+
+    if len(state) == 2:
+        settings["staged_state_json"] = ""
+        return True
+    settings["staged_state_json"] = json.dumps(
+        state, sort_keys=True, separators=(",", ":"))
+    return True
+
+
+def _restore_reflex_state(settings, state):
+    reflex_state = state.get("reflex")
+    if not isinstance(reflex_state, dict):
+        settings.reflex_edits_staged = False
+        return False
+    if reflex_state.get("source") != _file_identity(_reflex_source_path(settings)):
+        logger.warning("Ignoring staged MReflex edits for a different source file")
+        settings.reflex_edits_staged = False
+        return False
+
+    saved_nodes = {}
+    for node in reflex_state.get("nodes", []):
+        try:
+            key = (int(node["record_index"]), str(node["node_id"]).upper())
+        except (KeyError, TypeError, ValueError):
+            continue
+        saved_nodes[key] = node
+
+    restored = 0
+    with _suspend_staged_state_updates():
+        for item in settings.reflex_nodes:
+            node = saved_nodes.get((int(item.record_index), item.node_id.upper()))
+            if node is None:
+                continue
+            try:
+                limits = [float(value) for value in node["limits"]]
+                values = [
+                    float(node["gravity"]), float(node["weight"]),
+                    float(node["spring"]), float(node["damping"]), *limits,
+                ]
+                if len(limits) != 4 or not all(math.isfinite(value) for value in values):
+                    continue
+                item.gravity, item.weight, item.spring, item.damping = values[:4]
+                item.limit_1, item.limit_2, item.limit_3, item.limit_4 = limits
+                restored += 1
+            except (KeyError, TypeError, ValueError):
+                continue
+        settings.reflex_edits_staged = restored > 0
+    if restored:
+        logger.info("Restored %d staged MReflex node edit(s) from the .blend", restored)
+    return restored > 0
+
+
+def restore_staged_reflex(settings):
+    """Restore only the MReflex portion after its source rows are reloaded."""
+    state = _read_staged_state(settings)
+    return _restore_reflex_state(settings, state) if state is not None else False
+
+
+def clear_staged_reflex(settings):
+    """Discard saved MReflex edits while retaining any staged MMB operations."""
+    state = _read_staged_state(settings)
+    settings.reflex_edits_staged = False
+    if state is None or "reflex" not in state:
+        return
+    state.pop("reflex", None)
+    if len(state) == 2:
+        settings["staged_state_json"] = ""
+    else:
+        settings["staged_state_json"] = json.dumps(
+            state, sort_keys=True, separators=(",", ":"))
+
+
+def restore_staged_state(settings, sk_mesh, mmb_path=""):
+    """Reapply saved export instructions to a freshly parsed source asset."""
+    state = _read_staged_state(settings)
+    if state is None:
+        settings.reflex_edits_staged = False
+        return False
+    if state.get("source") != _source_identity(settings, sk_mesh, mmb_path):
+        logger.warning("Ignoring staged .blend changes for a different source MMB")
+        settings.reflex_edits_staged = False
+        return False
+
+    file_rename = state.get("file_rename", {})
+    if isinstance(file_rename, dict):
+        old_name = file_rename.get("old", "")
+        new_name = file_rename.get("new", "")
+        if old_name and new_name and len(old_name) == len(new_name):
+            sk_mesh.pending_file_rename_old = old_name
+            sk_mesh.pending_file_rename_new = new_name
+
+    restored_meshes = 0
+    for mesh_state in state.get("meshes", []):
+        try:
+            mesh = sk_mesh.meshes[int(mesh_state["index"])]
+        except (IndexError, KeyError, TypeError, ValueError):
+            continue
+
+        base_bones = list(mesh.mesh_bones.items())
+        remaps = {}
+        for remap in mesh_state.get("bone_remaps", []):
+            try:
+                slot = int(remap["slot"])
+                bone_index = int(remap["bone_index"])
+                matrix = _matrix_values(remap["matrix"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if (matrix is None or slot < 0 or slot >= len(base_bones)
+                    or bone_index < 0 or bone_index >= len(sk_mesh.bones)):
+                continue
+            remaps[slot] = (bone_index, tuple(matrix))
+
+        current_bones = {}
+        for slot, (bone_index, matrix) in enumerate(base_bones):
+            restored_bone, restored_matrix = remaps.get(
+                slot, (bone_index, matrix))
+            current_bones[restored_bone] = restored_matrix
+        additions = []
+        for addition in mesh_state.get("bone_additions", []):
+            try:
+                bone_index = int(addition["bone_index"])
+                matrix = _matrix_values(addition["matrix"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if (matrix is None or bone_index < 0 or bone_index >= len(sk_mesh.bones)
+                    or bone_index in current_bones):
+                continue
+            matrix = tuple(matrix)
+            additions.append((bone_index, matrix))
+            current_bones[bone_index] = matrix
+        mesh.pending_bone_remaps = remaps
+        mesh.pending_bone_additions = additions
+        mesh.mesh_bones = current_bones
+        mesh.removed_in_session = bool(mesh_state.get("removed", False))
+
+        rename = mesh_state.get("rename", "")
+        if (isinstance(rename, str) and rename
+                and len(rename.encode("utf-8")) <= mesh.name_length):
+            mesh.pending_rename_new = rename
+            mesh.name = rename
+
+        for lod, object_name in zip(mesh.lods, mesh_state.get("lod_objects", [])):
+            if isinstance(object_name, str) and object_name in bpy.data.objects:
+                lod.blender_obj_name = object_name
+        restored_meshes += 1
+
+    reflex_restored = _restore_reflex_state(settings, state)
+    if restored_meshes or file_rename:
+        logger.info("Restored staged MMB changes from the .blend")
+    return bool(restored_meshes or file_rename or reflex_restored)
+
+
+def _on_reflex_value_update(self, context):
+    if _staged_state_suspend_depth:
+        return
+    scene = getattr(context, "scene", None) if context is not None else None
+    settings = getattr(scene, "SWOMT", None) if scene is not None else None
+    if settings is None:
+        return
+    settings.reflex_edits_staged = True
+    save_staged_state(settings)
+
+
+@bpy.app.handlers.persistent
+def _on_save_pre(filepath, *args, **kwargs):
+    """Capture any remaining runtime-only edits immediately before a .blend save."""
+    try:
+        scene = bpy.context.scene
+        settings = getattr(scene, "SWOMT", None) if scene is not None else None
+        if settings is not None:
+            save_staged_state(settings)
+    except Exception as error:
+        logger.exception("Could not save staged export changes: %s", error)
 
 
 def _on_debug_logging_update(self, context):
@@ -132,6 +457,7 @@ def _load_mreflex_into_settings(settings, mmb_path, sk_mesh, reflex_path=""):
     """Load a paired MReflex and conservatively label its kind-10 nodes."""
     settings.reflex_nodes.clear()
     settings.reflex_node_index = 0
+    settings.reflex_edits_staged = False
     path = os.path.abspath(reflex_path) if reflex_path else paired_mreflex_path(mmb_path)
     settings["ReflexPath"] = path
     if path and not settings.get("SourceReflexPath", ""):
@@ -163,25 +489,26 @@ def _load_mreflex_into_settings(settings, mmb_path, sk_mesh, reflex_path=""):
             matches = match_dangle_nodes(
                 nodes, bones, weighted, anchors=anchors)
 
-        for node in nodes:
-            item = settings.reflex_nodes.add()
-            item.record_index = node.record_index
-            item.node_id = f"{node.node_id:08X}"
-            item.parent_id = f"{node.parent_id:08X}"
-            match = matches.get(node.record_index)
-            if match is not None:
-                item.bone_name = match.bone_name
-                item.match_status = "MATCHED"
-                item.match_error = match.error
-            else:
-                item.bone_name = ""
-                item.match_status = "UNMATCHED"
-                item.match_error = -1.0
-            item.gravity = node.gravity
-            item.weight = node.weight
-            item.spring = node.spring
-            item.damping = node.damping
-            item.limit_1, item.limit_2, item.limit_3, item.limit_4 = node.limits
+        with _suspend_staged_state_updates():
+            for node in nodes:
+                item = settings.reflex_nodes.add()
+                item.record_index = node.record_index
+                item.node_id = f"{node.node_id:08X}"
+                item.parent_id = f"{node.parent_id:08X}"
+                match = matches.get(node.record_index)
+                if match is not None:
+                    item.bone_name = match.bone_name
+                    item.match_status = "MATCHED"
+                    item.match_error = match.error
+                else:
+                    item.bone_name = ""
+                    item.match_status = "UNMATCHED"
+                    item.match_error = -1.0
+                item.gravity = node.gravity
+                item.weight = node.weight
+                item.spring = node.spring
+                item.damping = node.damping
+                item.limit_1, item.limit_2, item.limit_3, item.limit_4 = node.limits
 
         if not nodes:
             settings["reflex_status"] = (
@@ -199,7 +526,7 @@ def _load_mreflex_into_settings(settings, mmb_path, sk_mesh, reflex_path=""):
 
 @bpy.app.handlers.persistent
 def _on_load_post(filepath, *args, **kwargs):
-    """Resets the asset when a .blend file is loaded, then re-loads it from the AssetPath if the file still exists."""
+    """Reparse retained sources and restore staged state when a .blend loads."""
     addon_state.asset = None
     try:
         for scene in bpy.data.scenes:
@@ -235,7 +562,13 @@ def _on_load_post(filepath, *args, **kwargs):
                 if (scene.SWOMT.get("MClothPath", "")
                         and not scene.SWOMT.get("SourceMClothPath", "")):
                     scene.SWOMT["SourceMClothPath"] = scene.SWOMT["MClothPath"]
-                _load_mreflex_into_settings(scene.SWOMT, parse_path, sk_mesh)
+                reflex_source = scene.SWOMT.get("SourceReflexPath", "")
+                _load_mreflex_into_settings(
+                    scene.SWOMT, parse_path, sk_mesh,
+                    reflex_path=(bpy.path.abspath(reflex_source)
+                                 if reflex_source else ""),
+                )
+                restore_staged_state(scene.SWOMT, sk_mesh, parse_path)
                 logger.info("Loaded %s from %s", sk_mesh.name, parse_path)
             except Exception as e:
                 logger.warning("Failed to load %s: %s", path, e)
@@ -298,7 +631,13 @@ def _auto_load_mmb(self, context):
             sk_mesh.name = new_name
             addon_state.asset = sk_mesh
         _check_removed_meshes_mmb(sk_mesh, parse_path)
-        _load_mreflex_into_settings(self, parse_path, sk_mesh)
+        reflex_source = self.get("SourceReflexPath", "")
+        _load_mreflex_into_settings(
+            self, parse_path, sk_mesh,
+            reflex_path=(bpy.path.abspath(reflex_source)
+                         if reflex_source else ""),
+        )
+        restore_staged_state(self, sk_mesh, parse_path)
     except Exception as e:
         logger.warning("MMB auto-load failed: %s", e)
     finally:
@@ -343,6 +682,7 @@ def _on_source_reflex_update(self, context):
         _load_mreflex_into_settings(
             self, bpy.path.abspath(mmb_path), addon_state.asset,
             reflex_path=path)
+        restore_staged_reflex(self)
 
 def _vert_count_changed():
     """Return True if any imported LOD Blender object has a different vert count than the MMB."""
@@ -521,6 +861,7 @@ class MReflexNodeSettings(bpy.types.PropertyGroup):
         precision=4,
         soft_min=0.0,
         soft_max=98.0,
+        update=_on_reflex_value_update,
     )
     weight: bpy.props.FloatProperty(
         name="Force Response",
@@ -531,6 +872,7 @@ class MReflexNodeSettings(bpy.types.PropertyGroup):
         precision=4,
         soft_min=0.0,
         soft_max=1.0,
+        update=_on_reflex_value_update,
     )
     spring: bpy.props.FloatProperty(
         name="Stiffness",
@@ -542,6 +884,7 @@ class MReflexNodeSettings(bpy.types.PropertyGroup):
         precision=5,
         soft_min=0.0,
         soft_max=10.0,
+        update=_on_reflex_value_update,
     )
     damping: bpy.props.FloatProperty(
         name="Motion Retention",
@@ -553,15 +896,20 @@ class MReflexNodeSettings(bpy.types.PropertyGroup):
         precision=5,
         soft_min=0.0,
         soft_max=1.0,
+        update=_on_reflex_value_update,
     )
     limit_1: bpy.props.FloatProperty(
-        name="Limit 1", subtype='ANGLE', precision=2)
+        name="Limit 1", subtype='ANGLE', precision=2,
+        update=_on_reflex_value_update)
     limit_2: bpy.props.FloatProperty(
-        name="Limit 2", subtype='ANGLE', precision=2)
+        name="Limit 2", subtype='ANGLE', precision=2,
+        update=_on_reflex_value_update)
     limit_3: bpy.props.FloatProperty(
-        name="Limit 3", subtype='ANGLE', precision=2)
+        name="Limit 3", subtype='ANGLE', precision=2,
+        update=_on_reflex_value_update)
     limit_4: bpy.props.FloatProperty(
-        name="Limit 4", subtype='ANGLE', precision=2)
+        name="Limit 4", subtype='ANGLE', precision=2,
+        update=_on_reflex_value_update)
 
 
 def _get_sdf_game_directory(self):
@@ -612,6 +960,10 @@ def _on_sdf_browser_expanded_update(self, context):
 
 
 class SWOMTSettings(bpy.types.PropertyGroup):
+    staged_state_json: bpy.props.StringProperty(
+        options={'HIDDEN'},
+        description="Versioned export changes saved inside this .blend",
+    )
     source_files_expanded: bpy.props.BoolProperty(
         name="Source Files",
         description="Show or hide the source file paths",
@@ -653,6 +1005,8 @@ class SWOMTSettings(bpy.types.PropertyGroup):
         type=MReflexNodeSettings,
         options={'SKIP_SAVE'},
     )
+    reflex_edits_staged: bpy.props.BoolProperty(
+        default=False, options={'HIDDEN', 'SKIP_SAVE'})
     reflex_node_index: bpy.props.IntProperty(
         default=0, min=0, options={'SKIP_SAVE'})
     reflex_status: bpy.props.StringProperty(

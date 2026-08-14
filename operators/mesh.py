@@ -4,6 +4,7 @@ import bpy
 
 from .. import addon_state
 from ..mesh_pipeline.exporter import BME
+from ..settings import save_staged_state
 
 def _max_weights_for_mesh(mesh, lod0_obj=None):
     """Use the same source/declaration limit as weight export."""
@@ -196,6 +197,7 @@ class RemoveMesh(bpy.types.Operator):
             if obj is not None:
                 bpy.data.objects.remove(obj, do_unlink=True)
 
+        save_staged_state(context.scene.SWOMT)
         self.report(
             {'INFO'},
             f"'{mesh.name}' ({len(mesh.lods)} LOD(s)) will be exported "
@@ -228,6 +230,7 @@ class RevertMesh(bpy.types.Operator):
                 bpy.data.objects.remove(obj, do_unlink=True)
 
         mesh.removed_in_session = False
+        save_staged_state(context.scene.SWOMT)
         self.report(
             {'INFO'},
             f"Cancelled removal of '{mesh.name}' ({len(mesh.lods)} LOD(s)).")
@@ -391,6 +394,7 @@ class RenameMesh(bpy.types.Operator):
                     obj.data.name = new_obj_name
                 lod.blender_obj_name = obj.name  # use obj.name in case Blender de-duped it
 
+        save_staged_state(context.scene.SWOMT)
         return {'FINISHED'}
 
 class ComputeNormals(bpy.types.Operator):

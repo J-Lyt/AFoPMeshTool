@@ -8,6 +8,7 @@ from pathlib import Path
 import bpy
 
 from .. import addon_state
+from ..settings import save_staged_state
 
 class SelectMGraphObject(bpy.types.Operator):
     """Select the MGraphObject file and patch the mesh name inside it"""
@@ -122,6 +123,7 @@ class RenameMMBFile(bpy.types.Operator):
         # The _MOD copy is renamed on next export.
         addon_state.asset.pending_file_rename_old = old_stem
         addon_state.asset.pending_file_rename_new = new_stem
+        save_staged_state(SWOMT)
 
         # Stash for the mgraphobject file-reference patch (applied immediately)
         context.scene['_mmb_file_old_stem'] = old_stem

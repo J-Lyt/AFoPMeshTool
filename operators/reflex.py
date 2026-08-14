@@ -10,7 +10,11 @@ from ..formats.mreflex import (
     mod_output_path,
     rewrite_dangle_nodes,
 )
-from ..settings import _load_mreflex_into_settings
+from ..settings import (
+    _load_mreflex_into_settings,
+    clear_staged_reflex,
+    restore_staged_reflex,
+)
 from ..mesh_pipeline.files import source_setting_path
 
 
@@ -46,6 +50,7 @@ class BrowseMReflexFile(bpy.types.Operator):
         if not os.path.isfile(path):
             self.report({'ERROR'}, f"MReflex file does not exist: {path}")
             return {'CANCELLED'}
+        clear_staged_reflex(settings)
         settings["SourceReflexPath"] = path
         if not _load_mreflex_into_settings(
                 settings,
@@ -70,6 +75,7 @@ class ReloadMReflex(bpy.types.Operator):
     def execute(self, context):
         settings = context.scene.SWOMT
         selected = bpy.path.abspath(settings.ReflexPath) if settings.ReflexPath else ""
+        clear_staged_reflex(settings)
         if not _load_mreflex_into_settings(
                 settings,
                 _source_mmb_path(settings),
@@ -163,6 +169,7 @@ class SaveMReflex(bpy.types.Operator):
             reflex_path=output_path,
         )
         settings["ReflexPath"] = source_path
+        restore_staged_reflex(settings)
         self.report(
             {'INFO'}, f"Saved dangle physics: {os.path.basename(output_path)}")
         return {'FINISHED'}

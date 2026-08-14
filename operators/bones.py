@@ -18,6 +18,7 @@ from ..mesh_pipeline.files import (
 from ..mesh_pipeline.importer import BMI
 from ..log import logger
 from ..formats.mmb import SkeletalMeshAsset
+from ..settings import save_staged_state
 
 def _compute_inv_bind_from_skeleton(bone_name):
     """
@@ -406,6 +407,7 @@ class RemapMeshBone(bpy.types.Operator):
                     vg.name = new_name
 
         source = "skeleton" if self.use_auto else "donor MMB"
+        save_staged_state(context.scene.SWOMT)
         self.report({'INFO'}, f"Slot {self.slot_index}: '{old_name}' to '{new_name}' via {source} (will patch on export)")
         return {'FINISHED'}
 
@@ -516,6 +518,7 @@ class AddMeshBone(bpy.types.Operator):
                 obj.vertex_groups.new(name=new_name)
 
         source = "skeleton" if self.use_auto else "donor MMB"
+        save_staged_state(context.scene.SWOMT)
         if status == 'reused':
             self.report({'INFO'},
                 f"'{new_name}' staged via {source}, reusing unused slot {info} (will patch on export)")
@@ -1044,6 +1047,7 @@ class AddBonesFromVertexGroups(bpy.types.Operator):
                 reused_slots.append((vg_name, info))
 
         if added:
+            save_staged_state(context.scene.SWOMT)
             msg = f"Added {len(added)} bone slot(s): {', '.join(added)}"
             if reused_slots:
                 msg += f". {len(reused_slots)} reused an existing unused slot"

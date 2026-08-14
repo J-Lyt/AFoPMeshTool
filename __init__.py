@@ -3,7 +3,7 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, KickingWriter, SaintBaron",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 127),
+    "version": (0, 1, 128),
     "blender": (5, 0, 0),
     "description": "Import and Export meshes from AFoP .mmb files.",
     "category": "Import-Export",
@@ -217,6 +217,8 @@ def register():
     bpy.types.Scene.SWOMT = bpy.props.PointerProperty(type=settings.SWOMTSettings)
     if settings._on_load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(settings._on_load_post)
+    if settings._on_save_pre not in bpy.app.handlers.save_pre:
+        bpy.app.handlers.save_pre.append(settings._on_save_pre)
     settings.apply_debug_logging_preference()
     operators_sdf.schedule_cached_auto_load()
     updater.start_update_check()
@@ -224,6 +226,8 @@ def register():
 
 def unregister():
     operators_sdf.shutdown()
+    if settings._on_save_pre in bpy.app.handlers.save_pre:
+        bpy.app.handlers.save_pre.remove(settings._on_save_pre)
     if settings._on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(settings._on_load_post)
     if hasattr(bpy.types.Scene, "SWOMT"):
