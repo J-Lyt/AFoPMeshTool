@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 import bpy
+from bpy_extras.io_utils import ImportHelper
 
 from .. import addon_state
 from ..mesh_pipeline.cloth import _export_mcloth_for_asset
@@ -359,6 +360,97 @@ def _import_all_lods(context, lod_n, skeletal_mesh=None, asset_path=None):
         BMI.rotate_model(last_obj, armature)
     return {'FINISHED'}
 
+
+class ImportMMBFile(bpy.types.Operator, ImportHelper):
+    """Import a MMB file."""
+
+    bl_idname = "import_scene.afop_mmb"
+    bl_label = "Import MMB"
+    bl_options = {'UNDO'}
+
+    filename_ext = ".mmb"
+    filter_glob: bpy.props.StringProperty(
+        default="*.mmb", options={'HIDDEN'})
+    import_lods: bpy.props.BoolProperty(
+        name="Import all LODs",
+        description="Import all available LODs in addition to LOD0",
+        default=False,
+    )
+
+    def draw(self, context):
+        # File-browser options are presented by MMB_PT_import_include.
+        pass
+
+    def execute(self, context):
+        source_path = bpy.path.abspath(self.filepath)
+        if os.path.splitext(source_path)[1].lower() != ".mmb":
+            self.report({'ERROR'}, "Please select an .mmb file.")
+            return {'CANCELLED'}
+        if not os.path.isfile(source_path):
+            self.report({'ERROR'}, f"MMB file does not exist: {source_path}")
+            return {'CANCELLED'}
+
+        try:
+            with open(source_path, 'rb') as file:
+                imported_asset = SkeletalMeshAsset()
+                imported_asset.parse(file)
+            imported_asset.name = Path(source_path).stem
+
+            lod_indices = [0]
+            if self.import_lods:
+                max_lod_count = max(
+                    (len(mesh.lods) for mesh in imported_asset.meshes),
+                    default=0,
+                )
+                lod_indices.extend(range(1, max_lod_count))
+            for lod_index in lod_indices:
+                _import_all_lods(
+                    context,
+                    lod_index,
+                    skeletal_mesh=imported_asset,
+                    asset_path=source_path,
+                )
+        except Exception as error:
+            self.report({'ERROR'}, f"Could not import MMB: {error}")
+            return {'CANCELLED'}
+
+        lod_label = "all available LODs" if self.import_lods else "LOD0"
+        self.report(
+            {'INFO'},
+            f"Imported {lod_label} from {os.path.basename(source_path)}",
+        )
+        return {'FINISHED'}
+
+
+class MMB_PT_import_include(bpy.types.Panel):
+    """Include options for the File > Import MMB file browser."""
+
+    bl_space_type = 'FILE_BROWSER'
+    bl_region_type = 'TOOL_PROPS'
+    bl_label = "Include"
+    bl_parent_id = "FILE_PT_operator"
+
+    @classmethod
+    def poll(cls, context):
+        operator = context.space_data.active_operator
+        return (
+            operator is not None
+            and operator.bl_idname == "IMPORT_SCENE_OT_afop_mmb"
+        )
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        layout.prop(context.space_data.active_operator, "import_lods")
+
+
+def menu_func_import(self, context):
+    self.layout.operator(
+        ImportMMBFile.bl_idname,
+        text="MMB (.mmb)",
+    )
+
 class ImportAllLOD0s(bpy.types.Operator):
     """Imports LOD0 for every mesh in the .mmb"""
     bl_idname = 'object.import_all_lod0s'
@@ -553,6 +645,7 @@ class ExportAllLODs(bpy.types.Operator):
 CLASSES = (
     BrowseMMBFile, BrowseSourceMMBFile, BrowseSourceMClothFile,
     BrowseSourceMReflexFile, BrowseMClothFile, BrowseExportDirectory, LoadMMB,
-    ImportLOD, ExportLOD, ImportAllLOD0s, ImportAllLOD1s, ImportAllLOD2s,
-    ImportAllLOD3s, ExportAllLODs,
+    ImportLOD, ExportLOD, ImportMMBFile, MMB_PT_import_include,
+    ImportAllLOD0s, ImportAllLOD1s, ImportAllLOD2s, ImportAllLOD3s,
+    ExportAllLODs,
 )

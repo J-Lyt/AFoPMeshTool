@@ -3,7 +3,7 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, KickingWriter, SaintBaron",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 128),
+    "version": (0, 1, 129),
     "blender": (5, 0, 0),
     "description": "Import and Export meshes from AFoP .mmb files.",
     "category": "Import-Export",
@@ -170,6 +170,8 @@ classes = (
     operators_io.ImportAllLOD1s,
     operators_io.ImportAllLOD2s,
     operators_io.ImportAllLOD3s,
+    operators_io.ImportMMBFile,
+    operators_io.MMB_PT_import_include,
     operators_io.ExportAllLODs,
     operators_sdf.SDFMMBImportChoice,
     operators_sdf.SDFMMBChoiceList,
@@ -214,6 +216,7 @@ classes = (
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
+    bpy.types.TOPBAR_MT_file_import.append(operators_io.menu_func_import)
     bpy.types.Scene.SWOMT = bpy.props.PointerProperty(type=settings.SWOMTSettings)
     if settings._on_load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(settings._on_load_post)
@@ -226,6 +229,7 @@ def register():
 
 def unregister():
     operators_sdf.shutdown()
+    bpy.types.TOPBAR_MT_file_import.remove(operators_io.menu_func_import)
     if settings._on_save_pre in bpy.app.handlers.save_pre:
         bpy.app.handlers.save_pre.remove(settings._on_save_pre)
     if settings._on_load_post in bpy.app.handlers.load_post:
