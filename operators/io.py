@@ -295,6 +295,14 @@ class ExportLOD(bpy.types.Operator):
                 if export_data != original_data:
                     bpy.data.meshes.remove(export_data)
 
+        # Insert staged skeleton records first so every mesh-header offset is
+        # refreshed before bone-slot, rename, and removal patches use it.
+        try:
+            BME.apply_skeleton_additions(mod_file, addon_state.asset)
+        except Exception as e:
+            self.report({'ERROR'}, f"Skeleton merge export failed: {e}")
+            return {'CANCELLED'}
+
         # Apply header-level patches for every mesh
         for mesh in addon_state.asset.meshes:
             BME._apply_header_patches(mod_file, mesh, addon_state.asset, operator=self)
@@ -585,6 +593,9 @@ class ExportAllLODs(bpy.types.Operator):
                 mesh.index: -1 for mesh in addon_state.asset.meshes
                 if mesh.removed_in_session
             }
+            if (not removed and addon_state.asset.pending_skeleton_additions
+                    and addon_state.asset.meshes):
+                removed = {addon_state.asset.meshes[0].index: -1}
             if removed:
                 try:
                     BME._write_mod_file(
@@ -599,6 +610,14 @@ class ExportAllLODs(bpy.types.Operator):
 
         if not exported_any:
             self.report({'WARNING'}, "No LOD objects found in scene to export.")
+            return {'CANCELLED'}
+
+        # Insert staged skeleton records first so the refreshed layout is used
+        # by every later header patch.
+        try:
+            BME.apply_skeleton_additions(mod_file, addon_state.asset)
+        except Exception as e:
+            self.report({'ERROR'}, f"Skeleton merge export failed: {e}")
             return {'CANCELLED'}
 
         # Apply header-level patches once after all LODs are written

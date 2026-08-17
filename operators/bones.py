@@ -22,69 +22,46 @@ from ..settings import save_staged_state
 
 def _compute_inv_bind_from_skeleton(bone_name):
     """
-    Compute the inverse bind matrix for a bone from the currently loaded skeleton.
+    Compute inverse bind from the complete runtime skeleton.
+
+    The runtime skeleton includes export-staged Merge Skeleton additions that
+    intentionally do not exist in the retained source MMB yet.
     """
-    if addon_state.asset is None:
+    asset = addon_state.asset
+    if asset is None:
         return None
-    bone_idx = next((i for i, b in enumerate(addon_state.asset.bones) if b.name == bone_name), None)
+    bone_idx = next(
+        (index for index, bone in enumerate(asset.bones)
+         if bone.name == bone_name),
+        None,
+    )
     if bone_idx is None:
         return None
 
-    SWOMT = bpy.context.scene.SWOMT
-    src_path = bpy.path.abspath(source_setting_path(
-        SWOMT, "AssetPath", "SourceAssetPath"))
-    if not os.path.isfile(src_path):
-        return None
-
     try:
-        with open(src_path, 'rb') as f:
-            data = f.read()
+        file_world_cache = {}
+        visiting = set()
 
-        pos = 0
-        version = data[3]
-        pos += 8
-        if version >= 15:
-            pos += 4
-        bone_count = unpack('<I', data[pos:pos+4])[0]
-        pos += 4
-
-        # Read all file_local matrices and parent indices
-        file_locals = []
-        parents = []
-        for i in range(bone_count):
-            nlen = unpack('<H', data[pos:pos+2])[0]; pos += 2
-            pos += nlen  # skip name
-            raw = unpack('<16f', data[pos:pos+64]); pos += 64
-            parent_idx = unpack('<H', data[pos:pos+2])[0]; pos += 2
-            m = Matrix([
-                [raw[0], raw[4], raw[8],  raw[12]],
-                [raw[1], raw[5], raw[9],  raw[13]],
-                [raw[2], raw[6], raw[10], raw[14]],
-                [raw[3], raw[7], raw[11], raw[15]],
-            ])
-            file_locals.append(m)
-            parents.append(parent_idx)
-
-        # Get file_world for target bone
-        file_world_cache = [None] * bone_count
-        def get_fw(i):
-            if file_world_cache[i] is not None:
-                return file_world_cache[i]
-            if parents[i] == 65535:
-                file_world_cache[i] = file_locals[i]
+        def get_file_world(index):
+            cached = file_world_cache.get(index)
+            if cached is not None:
+                return cached
+            if not 0 <= index < len(asset.bones) or index in visiting:
+                raise ValueError("Invalid skeleton parent hierarchy")
+            visiting.add(index)
+            bone = asset.bones[index]
+            parent_index = int(bone.parent_index)
+            if parent_index == 65535:
+                file_world = bone.matrix.copy()
             else:
-                file_world_cache[i] = get_fw(parents[i]) @ file_locals[i]
-            return file_world_cache[i]
+                file_world = get_file_world(parent_index) @ bone.matrix
+            visiting.remove(index)
+            file_world_cache[index] = file_world
+            return file_world
 
-        fw = get_fw(bone_idx)
-        try:
-            inv_bind = fw.inverted()
-        except ValueError:
-            return None
-
+        inv_bind = get_file_world(bone_idx).inverted()
         return tuple(inv_bind[r][c] for c in range(4) for r in range(4))
-
-    except Exception:
+    except (AttributeError, IndexError, TypeError, ValueError):
         return None
 
 
@@ -638,8 +615,6 @@ def _do_merge_skeletons(context, operator, src_filepath, donor_bones, mode_label
     orig_idx must be used for all donor-indexing here (not the list's own position as it may be filtered).
     """
     SWOMT = context.scene.SWOMT
-    src_path = bpy.path.abspath(source_setting_path(
-        SWOMT, "AssetPath", "SourceAssetPath"))
 
     # Index map for the host skeleton
     host_names = {b.name: i for i, b in enumerate(addon_state.asset.bones)}
@@ -669,163 +644,17 @@ def _do_merge_skeletons(context, operator, src_filepath, donor_bones, mode_label
     for ni, (orig_idx, name, mat_raw, matrix, pidx) in enumerate(new_bones):
         donor_to_combined[orig_idx] = new_start + ni
 
-    # Build bone data
-    bone_blob = bytearray()
-    for orig_idx, name, mat_raw, matrix, pidx in new_bones:
-        # Name
-        name_bytes = name.encode('ascii', errors='replace')
-        bone_blob += pack('<H', len(name_bytes))
-        bone_blob += name_bytes
-        # Matrix - write the original raw bytes verbatim.
-        # mat_raw is the 16 floats exactly as they appear in the donor file,
-        # which is already in the correct column-first file format that br.matrix_4x4 reads.
-        bone_blob += pack('<16f', *mat_raw)
-        # Parent index - remap donor index to combined skeleton index
+    # Store the final combined parent indices and exact donor matrix floats.
+    # Export starts from the retained source and inserts these records later.
+    for orig_idx, name, mat_raw, _matrix, pidx in new_bones:
         if pidx == 65535:
             combined_pidx = 65535
         else:
             combined_pidx = donor_to_combined.get(pidx, 65535)
-        bone_blob += pack('<H', combined_pidx)
+        addon_state.asset.stage_skeleton_bone(
+            name, mat_raw, combined_pidx)
 
-    # Patch the .mmb file:
-    # - Increment bone_count (uint32 at a known offset)
-    # - Insert bone_blob immediately after the last existing bone
-
-    output_base = bpy.path.abspath(SWOMT.AssetPath) if SWOMT.AssetPath else src_path
-    mod_file = _mod_file_output(
-        output_base, overwrite=SWOMT.overwrite_existing)
-    if (os.path.normcase(os.path.abspath(mod_file))
-            == os.path.normcase(src_path)):
-        mod_file = _mod_file_output(output_base, overwrite=False)
-
-    with open(src_path, 'rb') as f:
-        file_data = bytearray(f.read())
-
-    version = file_data[3]
-    skel_count_offset = 8
-    if version >= 15:
-        skel_count_offset += 4
-
-    old_bone_count = unpack('<I', file_data[skel_count_offset:skel_count_offset+4])[0]
-    new_bone_count = old_bone_count + len(new_bones)
-    file_data[skel_count_offset:skel_count_offset+4] = pack('<I', new_bone_count)
-
-    # Walk past existing bones to find the insertion point (start of mesh section)
-    pos = skel_count_offset + 4
-    for _ in range(old_bone_count):
-        nlen = unpack('<H', file_data[pos:pos+2])[0]; pos += 2
-        pos += nlen + 64 + 2 # name + matrix + parent_idx
-
-    # pos is now at uint32 mesh_count - insert bone_blob here
-    insert_at = pos
-    file_data[insert_at:insert_at] = bone_blob
-
-    inserted = len(bone_blob)
-
-    # Update asset.size header field (bytes 4..8) - it covers the header section.
-    # Skeleton is always in the header, so bump it.
-    old_asset_size = unpack('<I', file_data[4:8])[0]
-    file_data[4:8] = pack('<I', old_asset_size + inserted)
-
-    # All data_offset fields in all mesh LODs must be incremented by `inserted`
-    # because the skeleton has grown (it lives before the mesh data in the header).
-    # We need to patch these fields in the file_data we are building.
-    # We do NOT have the in-memory asset offsets updated yet, so we must re-walk
-    # the mesh section in the modified file_data to find and patch them.
-    #
-    # Patch: scan mesh table starting after the new bone data.
-    mesh_pos = insert_at + inserted # points to uint32 mesh_count
-    mesh_count_val = unpack('<I', file_data[mesh_pos:mesh_pos+4])[0]
-    mp = mesh_pos + 4
-
-    for mi_scan in range(mesh_count_val):
-        nlen = unpack('<H', file_data[mp:mp+2])[0]; mp += 2
-        mp += nlen # mesh name
-        mp += 48 + 1 # matrix + flag
-        # version-specific x_count skip
-        if version == 11:
-            mp += 1 # skip x_count (uint8 in v11 too but parsed differently)
-            x_count = unpack('<H', file_data[mp:mp+2])[0]; mp += 2
-            mp += 4 * x_count
-        else:
-            x_count = file_data[mp]; mp += 1
-            mp += 1 + 4 * x_count
-        u_count = unpack('<H', file_data[mp:mp+2])[0]; mp += 2
-        for _ in range(u_count):
-            mp += 64 # matrix
-            mp += 2 # skeleton index
-        # Pre-LOD bytes
-        if u_count > 0 and version not in (11, 12):
-            mp += 1 if version == 13 else 2 # root_bone_index
-            lod_info_type = file_data[mp]; mp += 1
-        else:
-            if version in (11, 12, 13):
-                lod_info_type = 0
-            else:
-                lod_info_type = file_data[mp]; mp += 1
-        lod_count_scan = file_data[mp]; mp += 1
-        mp += 4 # unknown 4 bytes
-        lod_field_size = 40 if version == 11 else 36
-        for li_scan in range(lod_count_scan):
-            lod_start = mp
-            # data_offset field is at byte offset 24 within the 36-byte LOD header
-            # (or 28 in v11 due to the extra uint32)
-            lod_fo = 4 if version == 11 else 0 # lod_field_offset
-            do_field = lod_start + 4 + lod_fo + 20 # start+vc(4)+lod_fo+ic(4)+sa(4)+voa(4)+vob(4)
-            old_do = unpack('<I', file_data[do_field:do_field+4])[0]
-            file_data[do_field:do_field+4] = pack('<I', old_do + inserted)
-            # Shift the second-section absolute offset (field [5], data_offset field + 32;
-            # see Mesh.parse) too.
-            if lod_info_type == 2:
-                sp = do_field + 32
-                sec2_val = unpack('<I', file_data[sp:sp+4])[0]
-                if sec2_val > 0:
-                    file_data[sp:sp+4] = pack('<I', sec2_val + inserted)
-            # Also update the in-memory lod.data_offset_file_pos value - we patch the file
-            # positions here, and will sync asset afterwards.
-            mp += lod_field_size
-            if lod_info_type == 2:
-                mp += 28
-        # Tail section - skip to next mesh
-        uv_count_scan = file_data[mp]; mp += 1
-        mp += 4 * uv_count_scan
-        if version == 11:
-            pass # no color_count in v11
-        elif version in (16, 17):
-            cc = file_data[mp]; mp += 1
-            mp += 4 * cc + 4
-            count_c = file_data[mp]; mp += 1
-            mp += 4 * count_c
-        else:
-            mp += 4 # unk
-            cc = file_data[mp]; mp += 1
-            mp += 4 * cc
-        mp += 4 # vs + ns (uint16 each)
-        mp += 20 if version == 17 else 16 # post-stride skip
-
-    # Write the patched file
-    with open(mod_file, 'wb') as f:
-        f.write(file_data)
-
-    # Update in-memory asset.bones so the rest of the session works correctly
-    for orig_idx, name, mat_raw, matrix, pidx in new_bones:
-        if pidx == 65535:
-            combined_pidx = 65535
-        else:
-            combined_pidx = donor_to_combined.get(pidx, 65535)
-        new_b = SkeletalMeshAsset.Bone.__new__(SkeletalMeshAsset.Bone)
-        new_b.name = name
-        new_b.matrix = matrix
-        new_b.parent_index = combined_pidx
-        addon_state.asset.bones.append(new_b)
-    addon_state.asset.bone_count = len(addon_state.asset.bones)
-
-    # Sync lod.data_offset values in memory (they were bumped in the file)
-    for m_mem in addon_state.asset.meshes:
-        for lod_mem in m_mem.lods:
-            lod_mem.data_offset += inserted
-            lod_mem.data_offset_file_pos += inserted
-            lod_mem.start_offset += inserted
+    save_staged_state(SWOMT)
 
     # Rebuild the Blender armature from the merged skeleton
     arm_obj = bpy.data.objects.get(addon_state.asset.name)
@@ -860,9 +689,9 @@ def _do_merge_skeletons(context, operator, src_filepath, donor_bones, mode_label
                 arm_mod.object = new_arm_obj
 
     operator.report({'INFO'},
-        f"Merged {len(new_bones)} new bone(s) ({mode_label}) from '{os.path.basename(src_filepath)}' "
-        f"into '{os.path.basename(mod_file)}'. "
-        f"Skeleton now has {len(addon_state.asset.bones)} bones.")
+        f"Staged {len(new_bones)} new skeleton bone(s) ({mode_label}) from "
+        f"'{os.path.basename(src_filepath)}'. Skeleton now has "
+        f"{len(addon_state.asset.bones)} bones; the merge will be applied on export.")
     return {'FINISHED'}
 
 def _all_donor_bones_field_text():
@@ -946,8 +775,8 @@ class MergeSkeletonsPickBones(bpy.types.Operator):
 class MergeSkeletons(bpy.types.Operator):
     """Merge bones from a donor .mmb skeleton into the currently-loaded asset skeleton."""
 
-    # New donor bones are appended to the skeleton (via a _MOD copy) and to asset.bones
-    # in memory. The armature is rebuilt so Add/Remap Bone can reference them immediately.
+    # New donor bones are staged in the .blend and appended to asset.bones in
+    # memory. The armature is rebuilt so Add/Remap Bone can reference them immediately.
 
     bl_idname = "object.merge_skeletons"
     bl_label = "Merge Skeleton"
@@ -1020,6 +849,7 @@ class AddBonesFromVertexGroups(bpy.types.Operator):
         skipped_no_bone = []
         skipped_already = []
         skipped_full = []
+        skipped_inv_bind = []
         # All bones here target the same mesh, so the used-slots scan only runs once.
         used_slots_cache = {}
 
@@ -1034,6 +864,7 @@ class AddBonesFromVertexGroups(bpy.types.Operator):
 
             inv_bind = _compute_inv_bind_from_skeleton(vg_name)
             if inv_bind is None:
+                skipped_inv_bind.append(vg_name)
                 self.report({'WARNING'}, f"Could not compute inv_bind for '{vg_name}' - skipping.")
                 continue
 
@@ -1051,16 +882,18 @@ class AddBonesFromVertexGroups(bpy.types.Operator):
             msg = f"Added {len(added)} bone slot(s): {', '.join(added)}"
             if reused_slots:
                 msg += f". {len(reused_slots)} reused an existing unused slot"
+            if skipped_inv_bind:
+                msg += f". {len(skipped_inv_bind)} skipped due to inverse-bind errors"
             self.report({'INFO'}, msg)
-        elif skipped_already and not skipped_no_bone and not skipped_full:
+        elif len(skipped_already) == len(vg_names):
             self.report({'INFO'}, "All vertex groups are already in the bone table.")
         else:
-            missing = [n for n in sorted(vg_names) if n not in skel_name_to_idx]
             self.report({'WARNING'},
                 f"No new slots added. "
                 f"{len(skipped_already)} already present, "
                 f"{len(skipped_full)} blocked (mesh's bone slots are full and have no "
                 f"unused slot to reuse), "
+                f"{len(skipped_inv_bind)} inverse-bind failures, "
                 f"{len(skipped_no_bone)} not in skeleton: {', '.join(skipped_no_bone[:5])}"
                 + (" ..." if len(skipped_no_bone) > 5 else ""))
 
@@ -1114,6 +947,9 @@ class ExportPosedBoneMatrices(bpy.types.Operator):
             return False
 
         posed_bones = {pb.name for pb in arm_obj.pose.bones if _is_posed(pb)}
+        if not posed_bones:
+            self.report({'WARNING'}, "No bones were updated. Was the armature posed?")
+            return {'CANCELLED'}
 
         # Patch skeleton section in a copy of the file bytes.
         output_base = (
@@ -1125,6 +961,15 @@ class ExportPosedBoneMatrices(bpy.types.Operator):
             mod_file = _mod_file_output(output_base, overwrite=False)
 
         with open(src_path, 'rb') as f:
+            source_data = f.read()
+        with open(mod_file, 'wb') as f:
+            f.write(source_data)
+        try:
+            BME.apply_skeleton_additions(mod_file, addon_state.asset)
+        except Exception as error:
+            self.report({'ERROR'}, f"Skeleton merge export failed: {error}")
+            return {'CANCELLED'}
+        with open(mod_file, 'rb') as f:
             file_data = bytearray(f.read())
 
         patched_skel = 0
@@ -1261,6 +1106,13 @@ class ExportPosedBoneMatrices(bpy.types.Operator):
         # _apply_header_patches writes bone remaps directly into the file on disk.
         for mesh in addon_state.asset.meshes:
             BME._apply_header_patches(mod_file, mesh, addon_state.asset, operator=self)
+
+        # Header patching mutates/clears runtime pending slot data. Reparse the
+        # retained source and restore the saved staged state for later exports.
+        export_path = SWOMT.ExportPath
+        from ..settings import _auto_load_mmb
+        _auto_load_mmb(SWOMT, context)
+        SWOMT["ExportPath"] = export_path
 
         self.report({'INFO'},
             f"Pose exported: {patched_skel} skeleton bone(s) ({len(posed_bones)} posed), "

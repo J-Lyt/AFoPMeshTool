@@ -63,9 +63,14 @@ def _source_identity(settings, sk_mesh=None, mmb_path=""):
     identity = _file_identity(path)
     if identity is None or sk_mesh is None:
         return None
+    source_bone_count = getattr(sk_mesh, "source_bone_count", None)
+    if source_bone_count is None:
+        source_bone_count = (
+            len(sk_mesh.bones)
+            - len(getattr(sk_mesh, "pending_skeleton_additions", ())))
     identity.update({
         "format_version": int(sk_mesh.version),
-        "bone_count": len(sk_mesh.bones),
+        "bone_count": int(source_bone_count),
         "mesh_count": len(sk_mesh.meshes),
     })
     return identity
@@ -122,6 +127,18 @@ def save_staged_state(settings=None):
             "old": asset.pending_file_rename_old,
             "new": asset.pending_file_rename_new,
         }
+
+    skeleton_additions = []
+    for name, matrix_raw, parent_index in asset.pending_skeleton_additions:
+        values = _matrix_values(matrix_raw)
+        if values is not None:
+            skeleton_additions.append({
+                "name": name,
+                "matrix_raw": values,
+                "parent_index": int(parent_index),
+            })
+    if skeleton_additions:
+        state["skeleton_additions"] = skeleton_additions
 
     mesh_states = []
     for mesh in asset.meshes:
@@ -257,6 +274,40 @@ def restore_staged_state(settings, sk_mesh, mmb_path=""):
         settings.reflex_edits_staged = False
         return False
 
+    restored_skeleton = 0
+    saved_skeleton = state.get("skeleton_additions", [])
+    if isinstance(saved_skeleton, list) and saved_skeleton:
+        additions = []
+        names = {bone.name for bone in sk_mesh.bones}
+        valid = True
+        for addition in saved_skeleton:
+            try:
+                name = str(addition["name"])
+                matrix_raw = _matrix_values(addition["matrix_raw"])
+                parent_index = int(addition["parent_index"])
+            except (KeyError, TypeError, ValueError):
+                valid = False
+                break
+            if (not name or name in names or matrix_raw is None
+                    or (parent_index != 65535
+                        and not 0 <= parent_index
+                        < len(sk_mesh.bones) + len(additions))):
+                valid = False
+                break
+            names.add(name)
+            additions.append((name, matrix_raw, parent_index))
+        if valid:
+            try:
+                for name, matrix_raw, parent_index in additions:
+                    sk_mesh.stage_skeleton_bone(
+                        name, matrix_raw, parent_index)
+                    restored_skeleton += 1
+            except ValueError as error:
+                logger.warning("Could not restore staged skeleton merge: %s", error)
+                restored_skeleton = 0
+        else:
+            logger.warning("Ignoring invalid staged skeleton merge data")
+
     file_rename = state.get("file_rename", {})
     if isinstance(file_rename, dict):
         old_name = file_rename.get("old", "")
@@ -321,9 +372,14 @@ def restore_staged_state(settings, sk_mesh, mmb_path=""):
         restored_meshes += 1
 
     reflex_restored = _restore_reflex_state(settings, state)
+    if restored_skeleton:
+        logger.info(
+            "Restored %d staged skeleton bone(s) from the .blend",
+            restored_skeleton)
     if restored_meshes or file_rename:
         logger.info("Restored staged MMB changes from the .blend")
-    return bool(restored_meshes or file_rename or reflex_restored)
+    return bool(restored_skeleton or restored_meshes
+                or file_rename or reflex_restored)
 
 
 def _on_reflex_value_update(self, context):

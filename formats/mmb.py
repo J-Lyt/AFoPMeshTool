@@ -3,7 +3,7 @@
 import io
 from struct import pack, unpack
 
-from mathutils import Vector
+from mathutils import Matrix, Vector
 
 from .binary_io import bp, br
 from ..mesh_pipeline.files import CopyFile
@@ -848,7 +848,9 @@ class SkeletalMeshAsset(Asset):
         super().__init__()
         self.name = ""
         self.bone_count = 0
+        self.source_bone_count = None
         self.bones = []
+        self.pending_skeleton_additions = []
         self.mesh_count = 0
         self.meshes = []
         self.pending_file_rename_old = ""  # staged file rename — applied on next export
@@ -858,6 +860,7 @@ class SkeletalMeshAsset(Asset):
         if self.version not in (11, 12, 13, 14, 15, 16, 17):
             raise Exception(f'Unsupported .mmb version: {self.version}. Supported versions: 11, 12, 13, 14, 15, 16, 17.')
         self.bone_count = br.uint32(f)
+        self.source_bone_count = self.bone_count
         for b in range(self.bone_count):
             self.bones.append(self.Bone(f))
         self.mesh_count = br.uint32(f)
@@ -865,3 +868,28 @@ class SkeletalMeshAsset(Asset):
             mesh = self.Mesh(self, index=m)
             mesh.parse(f)
             self.meshes.append(mesh)
+
+    def stage_skeleton_bone(self, name, matrix_raw, parent_index):
+        """Append one export-staged bone to the runtime skeleton."""
+        raw = tuple(float(value) for value in matrix_raw)
+        if len(raw) != 16:
+            raise ValueError("A staged skeleton bone matrix must contain 16 floats")
+        parent_index = int(parent_index)
+        if parent_index != 65535 and not 0 <= parent_index < len(self.bones):
+            raise ValueError(f"Invalid staged skeleton parent index {parent_index}")
+        if any(bone.name == name for bone in self.bones):
+            raise ValueError(f"Skeleton bone '{name}' already exists")
+
+        bone = self.Bone.__new__(self.Bone)
+        bone.name = str(name)
+        bone.matrix = Matrix([
+            [raw[0], raw[4], raw[8], raw[12]],
+            [raw[1], raw[5], raw[9], raw[13]],
+            [raw[2], raw[6], raw[10], raw[14]],
+            [raw[3], raw[7], raw[11], raw[15]],
+        ])
+        bone.parent_index = parent_index
+        self.bones.append(bone)
+        self.bone_count = len(self.bones)
+        self.pending_skeleton_additions.append((bone.name, raw, parent_index))
+        return bone

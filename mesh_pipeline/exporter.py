@@ -228,6 +228,68 @@ def _sync_asset_layout(parsed_asset):
                 setattr(old_lod, attr, getattr(new_lod, attr))
 
 
+def _append_skeleton_bones_data(file_data, parsed_asset, additions):
+    """Insert staged skeleton records and shift every absolute LOD offset."""
+    if not additions:
+        return bytes(file_data)
+
+    source = bytes(file_data)
+    version = parsed_asset.version
+    count_offset = 8 + (4 if version >= 15 else 0)
+    old_bone_count = unpack(
+        '<I', source[count_offset:count_offset + 4])[0]
+    if old_bone_count != parsed_asset.bone_count:
+        raise ValueError("Parsed skeleton count does not match the MMB header")
+
+    insert_at = count_offset + 4
+    for _ in range(old_bone_count):
+        name_length = unpack('<H', source[insert_at:insert_at + 2])[0]
+        insert_at += 2 + name_length + 64 + 2
+
+    bone_blob = bytearray()
+    total_bones = old_bone_count + len(additions)
+    existing_names = {bone.name for bone in parsed_asset.bones}
+    for addition_index, (name, matrix_raw, parent_index) in enumerate(additions):
+        name = str(name)
+        name_bytes = name.encode('ascii', errors='replace')
+        matrix_raw = tuple(float(value) for value in matrix_raw)
+        parent_index = int(parent_index)
+        available_bones = old_bone_count + addition_index
+        if not name or name in existing_names or len(name_bytes) > 0xFFFF:
+            raise ValueError(f"Invalid staged skeleton bone name '{name}'")
+        if len(matrix_raw) != 16:
+            raise ValueError(f"Staged skeleton bone '{name}' has an invalid matrix")
+        if (parent_index != 65535
+                and not 0 <= parent_index < available_bones):
+            raise ValueError(
+                f"Staged skeleton bone '{name}' has invalid parent {parent_index}")
+        existing_names.add(name)
+        bone_blob += pack('<H', len(name_bytes))
+        bone_blob += name_bytes
+        bone_blob += pack('<16f', *matrix_raw)
+        bone_blob += pack('<H', parent_index)
+
+    inserted = len(bone_blob)
+    out = bytearray(source)
+    out[insert_at:insert_at] = bone_blob
+    out[count_offset:count_offset + 4] = pack('<I', total_bones)
+    out[4:8] = pack('<I', parsed_asset.size + inserted)
+
+    for mesh in parsed_asset.meshes:
+        for lod in mesh.lods:
+            field_pos = lod.data_offset_file_pos + inserted
+            out[field_pos:field_pos + 4] = pack(
+                '<I', lod.data_offset + inserted)
+            if mesh.lod_info_type == 2:
+                secondary_pos = field_pos + 32
+                secondary_offset = unpack(
+                    '<I', out[secondary_pos:secondary_pos + 4])[0]
+                if secondary_offset > 0:
+                    out[secondary_pos:secondary_pos + 4] = pack(
+                        '<I', secondary_offset + inserted)
+    return bytes(out)
+
+
 def _regenerate_meshlet_data(file_data, lod_keys):
     """Rebuild changed secondary sections from the finalized primary buffers."""
     if not lod_keys:
@@ -1310,6 +1372,53 @@ class BlenderMeshExporter:
                     os.remove(temporary_path)
             except OSError:
                 pass
+
+
+    @staticmethod
+    def apply_skeleton_additions(file_path: str, skeletal_mesh: SkeletalMeshAsset):
+        """Apply the staged skeleton merge to a completed source-based export."""
+        additions = list(skeletal_mesh.pending_skeleton_additions)
+        if not additions:
+            return 0
+
+        with open(file_path, 'rb') as stream:
+            original = stream.read()
+        parsed = SkeletalMeshAsset()
+        parsed.parse(io.BytesIO(original))
+        source_bone_count = getattr(skeletal_mesh, 'source_bone_count', None)
+        if source_bone_count is None:
+            source_bone_count = len(skeletal_mesh.bones) - len(additions)
+        if parsed.bone_count != source_bone_count:
+            raise ValueError(
+                "Skeleton staging expected the retained source bone count "
+                f"{source_bone_count}, found {parsed.bone_count}")
+
+        updated = _append_skeleton_bones_data(original, parsed, additions)
+        validated = SkeletalMeshAsset()
+        validated.parse(io.BytesIO(updated))
+        expected_names = [name for name, _matrix, _parent in additions]
+        appended = validated.bones[source_bone_count:]
+        if (validated.bone_count != source_bone_count + len(additions)
+                or [bone.name for bone in appended] != expected_names):
+            raise ValueError("Staged skeleton merge failed validation")
+        for bone, (_name, _matrix, parent_index) in zip(appended, additions):
+            if bone.parent_index != parent_index:
+                raise ValueError(
+                    f"Staged skeleton parent for '{bone.name}' failed validation")
+
+        temporary_path = file_path + '.skeleton_tmp'
+        try:
+            with open(temporary_path, 'wb') as stream:
+                stream.write(updated)
+            os.replace(temporary_path, file_path)
+        finally:
+            try:
+                if os.path.exists(temporary_path):
+                    os.remove(temporary_path)
+            except OSError:
+                pass
+        _sync_asset_layout(validated)
+        return len(additions)
 
 
     @staticmethod
