@@ -9,7 +9,7 @@ from struct import pack, unpack
 import bmesh
 import bpy
 import numpy as np
-from mathutils import Vector
+from mathutils import Matrix, Vector
 
 from .. import addon_state
 from ..formats.binary_io import bp
@@ -1419,6 +1419,205 @@ class BlenderMeshExporter:
                 pass
         _sync_asset_layout(validated)
         return len(additions)
+
+
+    @staticmethod
+    def apply_pose_as_rest(file_path: str, armature_object, epsilon=1e-4):
+        """Encode the current Blender pose as the MMB's new rest state.
+
+        MMB skinning stores an inverse-bind matrix in every mesh bone slot.  The
+        game can continue to evaluate the original runtime skeleton even after
+        the serialized rest skeleton has been edited, so simply replacing a
+        slot with ``posed_world.inverted()`` applies the edit backwards.  Solve
+        the skinning equation instead::
+
+            source_world @ compensated_inverse_bind
+                = posed_world @ source_inverse_bind
+
+        This records the posed skeleton for future imports while making the
+        existing runtime skeleton produce the same forward deformation.  Mesh
+        vertex positions are deliberately not baked or rewritten here.
+        """
+        if armature_object is None or armature_object.type != 'ARMATURE':
+            raise ValueError("The loaded asset's armature was not found")
+
+        pose_bones = {bone.name: bone for bone in armature_object.pose.bones}
+        affected_names = {
+            bone.name for bone in armature_object.pose.bones
+            if any(
+                abs(bone.matrix[row][column]
+                    - bone.bone.matrix_local[row][column]) > epsilon
+                for row in range(4) for column in range(4))
+        }
+        if not affected_names:
+            return 0, 0, 0
+
+        with open(file_path, 'rb') as stream:
+            original = stream.read()
+        parsed = SkeletalMeshAsset()
+        parsed.parse(io.BytesIO(original))
+        bone_names = [bone.name for bone in parsed.bones]
+        bone_name_to_index = {
+            name: index for index, name in enumerate(bone_names)}
+        affected_names.intersection_update(bone_name_to_index)
+        if not affected_names:
+            return 0, 0, 0
+
+        # Locate each serialized 64-byte local skeleton matrix.
+        position = 8 + (4 if parsed.version >= 15 else 0)
+        serialized_count = unpack(
+            '<I', original[position:position + 4])[0]
+        position += 4
+        if serialized_count != parsed.bone_count:
+            raise ValueError("Parsed skeleton count does not match the MMB header")
+        matrix_offsets = []
+        serialized_names = []
+        for _index in range(serialized_count):
+            name_length = unpack(
+                '<H', original[position:position + 2])[0]
+            position += 2
+            name = original[position:position + name_length].decode(
+                'ascii', errors='replace')
+            position += name_length
+            serialized_names.append(name)
+            matrix_offsets.append(position)
+            position += 64 + 2
+        if serialized_names != bone_names:
+            raise ValueError("Serialized skeleton order failed validation")
+
+        original_world = {}
+        resolving = set()
+
+        def source_world(index):
+            if index in original_world:
+                return original_world[index]
+            if not 0 <= index < len(parsed.bones) or index in resolving:
+                raise ValueError("Invalid skeleton parent hierarchy")
+            resolving.add(index)
+            bone = parsed.bones[index]
+            if bone.parent_index == 65535:
+                world = bone.matrix.copy()
+            else:
+                world = source_world(bone.parent_index) @ bone.matrix
+            resolving.remove(index)
+            original_world[index] = world
+            return world
+
+        for bone_index in range(len(parsed.bones)):
+            source_world(bone_index)
+
+        # Blender's imported rest matrices are reconstructed through EditBone,
+        # which does not retain every component of the reflected MMB matrix.
+        # Convert the pose *delta* and apply it to the exact source MMB world
+        # matrix instead of treating pose_bone.matrix as a fresh file matrix.
+        reflect_x = Matrix.Scale(-1.0, 4, Vector((1.0, 0.0, 0.0)))
+        desired_world = {}
+        for bone_index, bone_name in enumerate(bone_names):
+            pose_bone = pose_bones.get(bone_name)
+            if pose_bone is None:
+                desired_world[bone_name] = original_world[bone_index]
+            else:
+                try:
+                    blender_delta = (
+                        pose_bone.matrix
+                        @ pose_bone.bone.matrix_local.inverted())
+                except ValueError as error:
+                    raise ValueError(
+                        f"Could not calculate pose delta for '{bone_name}'"
+                    ) from error
+                file_delta = reflect_x @ blender_delta @ reflect_x
+                desired_world[bone_name] = (
+                    file_delta @ original_world[bone_index])
+
+        updated = bytearray(original)
+        patched_skeleton = 0
+        for bone_index, bone_name in enumerate(bone_names):
+            if bone_name not in affected_names:
+                continue
+            bone = parsed.bones[bone_index]
+            if bone.parent_index == 65535:
+                parent_world = Matrix.Identity(4)
+            else:
+                parent_name = bone_names[bone.parent_index]
+                parent_world = desired_world[parent_name]
+            try:
+                new_local = parent_world.inverted() @ desired_world[bone_name]
+            except ValueError as error:
+                raise ValueError(
+                    f"Could not calculate local pose for '{bone_name}'") from error
+
+            flat = tuple(new_local[row][column]
+                         for column in range(4) for row in range(4))
+            offset = matrix_offsets[bone_index]
+            updated[offset:offset + 64] = pack('<16f', *flat)
+            patched_skeleton += 1
+
+        def matrix_from_bytes(offset):
+            values = unpack('<16f', original[offset:offset + 64])
+            return Matrix(tuple(
+                tuple(values[column * 4 + row] for column in range(4))
+                for row in range(4)))
+
+        # Compensate each existing slot rather than replacing it with the
+        # mathematical inverse of the new rest matrix.  Existing slots may
+        # contain asset-specific corrections, so they are part of the equation.
+        patched_slots = 0
+        for mesh in parsed.meshes:
+            for index_offset in mesh.mesh_bone_file_offsets:
+                skeleton_index = unpack(
+                    '<H', original[index_offset:index_offset + 2])[0]
+                if (skeleton_index >= len(bone_names)
+                        or bone_names[skeleton_index] not in affected_names):
+                    continue
+                bone_name = bone_names[skeleton_index]
+                try:
+                    source_inverse = original_world[skeleton_index].inverted()
+                except ValueError as error:
+                    raise ValueError(
+                        f"Could not invert source bone '{bone_name}'") from error
+                source_inverse_bind = matrix_from_bytes(index_offset - 64)
+                compensated_inverse_bind = (
+                    source_inverse
+                    @ desired_world[bone_name]
+                    @ source_inverse_bind)
+
+                # Validate the defining equation before float32 serialization.
+                source_skin = (
+                    original_world[skeleton_index]
+                    @ compensated_inverse_bind)
+                desired_skin = (
+                    desired_world[bone_name] @ source_inverse_bind)
+                if any(
+                    abs(source_skin[row][column]
+                        - desired_skin[row][column]) > 1e-4
+                    for row in range(4) for column in range(4)
+                ):
+                    raise ValueError(
+                        f"Pose compensation failed for bone slot '{bone_name}'")
+
+                flat = tuple(compensated_inverse_bind[row][column]
+                             for column in range(4) for row in range(4))
+                updated[index_offset - 64:index_offset] = pack('<16f', *flat)
+                patched_slots += 1
+
+        validated = SkeletalMeshAsset()
+        validated.parse(io.BytesIO(updated))
+        if (validated.bone_count != parsed.bone_count
+                or validated.mesh_count != parsed.mesh_count):
+            raise ValueError("Pose export changed the MMB structure")
+
+        temporary_path = file_path + '.pose_tmp'
+        try:
+            with open(temporary_path, 'wb') as stream:
+                stream.write(updated)
+            os.replace(temporary_path, file_path)
+        finally:
+            try:
+                if os.path.exists(temporary_path):
+                    os.remove(temporary_path)
+            except OSError:
+                pass
+        return patched_skeleton, patched_slots, len(affected_names)
 
 
     @staticmethod

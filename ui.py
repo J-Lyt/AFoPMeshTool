@@ -364,12 +364,6 @@ class SWOMTPanel(bpy.types.Panel):
                 for lod_n in range(len(m.lods))
             )
             exp_row.operator("object.export_all_lods", text="Export All LODs")
-            pose_row = layout.row()
-            pose_row.scale_y = 1.2
-            arm_obj = bpy.data.objects.get(addon_state.asset.name) if addon_state.asset else None
-            pose_row.enabled = arm_obj is not None and arm_obj.type == 'ARMATURE'
-            pose_row.operator("object.export_posed_bone_matrices",
-                              text="Export Pose as New Rest Pose", icon="ARMATURE_DATA")
 
             # Export Options collapsible box
             forced = _vert_count_changed()
@@ -381,6 +375,7 @@ class SWOMTPanel(bpy.types.Panel):
             row.label(text="Export Options")
             if SWOMT.export_options_expanded:
                 box.prop(SWOMT, "limit_total_vertex_groups")
+                box.prop(SWOMT, "export_pose_as_rest")
                 box.prop(SWOMT, "compute_normals_on_export")
                 for prop_name in ("export_normals", "export_weights", "export_uvs"):
                     prop_row = box.row()

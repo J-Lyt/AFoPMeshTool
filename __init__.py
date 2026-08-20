@@ -3,7 +3,7 @@ bl_info = {
     "name": "AFoP Mesh Tool",
     "author": "JasperZebra, KickingWriter, SaintBaron",
     "location": "Scene Properties > AFoP Mesh Tool Panel",
-    "version": (0, 1, 131),
+    "version": (0, 1, 138),
     "blender": (5, 0, 0),
     "description": "Import and Export meshes from AFoP .mmb files.",
     "category": "Import-Export",
@@ -207,7 +207,6 @@ classes = (
     operators_files.SelectMGraphObject,
     operators_files.RenameMMBFile,
     operators_files.SelectMGraphObjectFilePatch,
-    operators_bones.ExportPosedBoneMatrices,
     operators_mesh.RemoveMesh,
     operators_mesh.RevertMesh,
 )

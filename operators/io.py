@@ -11,6 +11,7 @@ from ..mesh_pipeline.cloth import _export_mcloth_for_asset
 from ..mesh_pipeline.exporter import BME
 from ..mesh_pipeline.files import (
     _mod_file_output,
+    _strip_mod_suffix,
     get_merged_mmb,
     source_setting_path,
 )
@@ -186,6 +187,74 @@ def _reload_source_after_export(context):
     settings["ExportPath"] = export_path
 
 
+def _apply_pose_export_option(context, mod_file, operator):
+    """Encode the optional armature pose into the exported MMB rest state."""
+    settings = context.scene.SWOMT
+    if not settings.export_pose_as_rest:
+        return True
+    armature = bpy.data.objects.get(addon_state.asset.name)
+    if armature is None or armature.type != 'ARMATURE':
+        # Prefer the armature already driving an imported LOD. This also
+        # handles older .blends whose armature retained an exported _MOD name.
+        for mesh in addon_state.asset.meshes:
+            for lod_index, lod in enumerate(mesh.lods):
+                object_name = (
+                    lod.blender_obj_name
+                    or f"{mesh.name}_LOD{lod_index}")
+                mesh_object = bpy.data.objects.get(object_name)
+                if mesh_object is None:
+                    continue
+                candidates = []
+                if (mesh_object.parent is not None
+                        and mesh_object.parent.type == 'ARMATURE'):
+                    candidates.append(mesh_object.parent)
+                candidates.extend(
+                    modifier.object for modifier in mesh_object.modifiers
+                    if modifier.type == 'ARMATURE'
+                    and modifier.object is not None
+                    and modifier.object.type == 'ARMATURE')
+                if candidates:
+                    armature = candidates[0]
+                    break
+            if armature is not None and armature.type == 'ARMATURE':
+                break
+    if armature is None or armature.type != 'ARMATURE':
+        asset_family = _strip_mod_suffix(addon_state.asset.name)
+        family_matches = [
+            obj for obj in bpy.data.objects
+            if obj.type == 'ARMATURE'
+            and _strip_mod_suffix(obj.name) == asset_family
+        ]
+        if len(family_matches) == 1:
+            armature = family_matches[0]
+    if armature is None or armature.type != 'ARMATURE':
+        operator.report(
+            {'WARNING'},
+            "Export Current Pose is enabled, but the loaded armature was not found; "
+            "geometry was exported without a pose change.",
+        )
+        return True
+    try:
+        skeleton_count, slot_count, posed_count = BME.apply_pose_as_rest(
+            mod_file, armature)
+    except Exception as error:
+        operator.report({'ERROR'}, f"Pose export failed: {error}")
+        return False
+    if posed_count == 0:
+        operator.report(
+            {'WARNING'},
+            "Export Current Pose is enabled, but no bones are posed; "
+            "geometry was exported without a pose change.",
+        )
+    else:
+        operator.report(
+            {'INFO'},
+            f"Applied the current pose to {skeleton_count} MMB skeleton "
+            f"bone(s) and {slot_count} inverse-bind slot(s); geometry was preserved.",
+        )
+    return True
+
+
 class LoadMMB(bpy.types.Operator):
     """Reads data from base .mmb file"""
     bl_idname = "object.load_mmb"
@@ -320,6 +389,9 @@ class ExportLOD(bpy.types.Operator):
             BME.expand_mesh_bounds(mod_file, {self.mesh_index})
         except Exception as e:
             self.report({'ERROR'}, f"mesh bounds update failed: {e}")
+            return {'CANCELLED'}
+
+        if not _apply_pose_export_option(context, mod_file, self):
             return {'CANCELLED'}
 
         # Rewrite the paired .mcloth (if any) so the cloth vertex mapping matches this export
@@ -637,6 +709,9 @@ class ExportAllLODs(bpy.types.Operator):
             BME.expand_mesh_bounds(mod_file, exported_mesh_indices)
         except Exception as e:
             self.report({'ERROR'}, f"mesh bounds update failed: {e}")
+            return {'CANCELLED'}
+
+        if not _apply_pose_export_option(context, mod_file, self):
             return {'CANCELLED'}
 
         # Rewrite the paired .mcloth (if any) so the cloth vertex mapping matches this export

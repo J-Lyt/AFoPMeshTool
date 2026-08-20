@@ -1191,6 +1191,15 @@ class SWOMTSettings(bpy.types.PropertyGroup):
         default=True,
         description="Limit Number of Weights per Vertex to the source LOD's limit by removing the lowest weights",
     )
+    export_pose_as_rest: bpy.props.BoolProperty(
+        name="Export Current Pose as Rest Pose",
+        default=False,
+        description=(
+            "Write the loaded armature's current pose into the exported MMB "
+            "skeleton and compensate its bone slots while keeping the source "
+            "geometry unchanged"
+        ),
+    )
     compute_normals_on_export: bpy.props.BoolProperty(
         name="Compute Normals on Export",
         default=False,

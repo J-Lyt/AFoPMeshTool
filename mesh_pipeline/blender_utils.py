@@ -312,15 +312,33 @@ def triangulate_object(obj, compute_normals=False, split_seams=False):
 
         bake_parent_inverse(obj)
 
-        mod = obj.modifiers.new(name="_tri_export", type='TRIANGULATE')
-        mod.keep_custom_normals = True
-        mod.quad_method = 'BEAUTY'
-        mod.ngon_method = 'BEAUTY'
+        # A current armature pose belongs to the optional skeleton export, not
+        # the geometry buffers. Suppress Armature modifiers while retaining
+        # every other user modifier and triangulation.
+        armature_states = [
+            (modifier, modifier.show_viewport)
+            for modifier in obj.modifiers
+            if modifier.type == 'ARMATURE'
+        ]
+        mod = None
+        try:
+            for armature_modifier, _show_viewport in armature_states:
+                armature_modifier.show_viewport = False
+            mod = obj.modifiers.new(name="_tri_export", type='TRIANGULATE')
+            mod.keep_custom_normals = True
+            mod.quad_method = 'BEAUTY'
+            mod.ngon_method = 'BEAUTY'
 
-        dg = _bpy.context.evaluated_depsgraph_get()
-        eval_obj = obj.evaluated_get(dg)
-        me = _bpy.data.meshes.new_from_object(eval_obj)
-        obj.modifiers.remove(mod)
+            _bpy.context.view_layer.update()
+            dg = _bpy.context.evaluated_depsgraph_get()
+            eval_obj = obj.evaluated_get(dg)
+            me = _bpy.data.meshes.new_from_object(eval_obj)
+        finally:
+            if mod is not None and obj.modifiers.get(mod.name) is not None:
+                obj.modifiers.remove(mod)
+            for armature_modifier, show_viewport in armature_states:
+                armature_modifier.show_viewport = show_viewport
+            _bpy.context.view_layer.update()
     finally:
         # Always restore original_data and clean up temp_data
         obj.data = original_data
