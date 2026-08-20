@@ -1802,17 +1802,28 @@ class BlenderMeshExporter:
         if obj:
             data = obj.data
 
+            # Meshes with no UVs still carry tangent bytes in the normals stream, but
+            # there is no UV basis from which Blender can recompute them; preserve
+            # those source tangents below instead of calling calc_tangents().
+            compute_tangents = mesh.uv_count > 0
+            if compute_tangents and not data.uv_layers:
+                raise ValueError(
+                    f"'{mesh.name}' has {mesh.uv_count} UV map(s) in the source "
+                    "MMB, but the Blender mesh has none; tangent space cannot "
+                    "be computed")
+
             # Save custom split normals before calc_tangents() - it resets loop normals
             # to geometry-derived values, discarding any custom normals on the mesh.
             saved_loop_normals = None
-            if data.has_custom_normals:
+            if compute_tangents and data.has_custom_normals:
                 saved_loop_normals = [l.normal.copy() for l in data.loops]
 
             bm = bmesh.new()
             bm.from_mesh(data)
             bm.verts.ensure_lookup_table()
             bm.faces.ensure_lookup_table()
-            data.loops.data.calc_tangents()
+            if compute_tangents:
+                data.loops.data.calc_tangents()
 
             # Restore custom normals after calc_tangents() reset them
             if saved_loop_normals is not None:
@@ -1869,8 +1880,15 @@ class BlenderMeshExporter:
                         all_uvs[ui][vi] = (u_sum / count, v_sum / count)
 
             for l in data.loops:
-                flip = -1.0 if l.bitangent_sign == -1 else 1.0
-                NTB[l.vertex_index] = (l.normal, l.tangent, flip)
+                if compute_tangents:
+                    flip = -1.0 if l.bitangent_sign == -1 else 1.0
+                    NTB[l.vertex_index] = (l.normal, l.tangent, flip)
+                else:
+                    # Tangent/sign are replaced with the source bytes in both
+                    # normals-stream writers; only the loop normal is written.
+                    NTB[l.vertex_index] = (
+                        l.normal, NTB[l.vertex_index][1],
+                        NTB[l.vertex_index][2])
 
             SWOMT = bpy.context.scene.SWOMT
             export_uvs = SWOMT.export_uvs or len(data.vertices) != lod.vertex_count
@@ -2110,6 +2128,7 @@ class BlenderMeshExporter:
 
                 orig_colors = []
                 orig_uvs    = []
+                orig_tangents = []
                 orig_trailing = []
                 # color(4*cc) | normal(12) | tangent(12) | sign(4) | UV
                 color_count = mesh.color_count if getattr(mesh, 'color_in_normals', True) else 0
@@ -2147,6 +2166,9 @@ class BlenderMeshExporter:
                 trailing_per_vert = ns - written_per_vert
                 for ni in range(orig_vc_src):
                     off = abs_vob_src + ni * ns
+                    tangent_off = off + 4 * color_count + 12
+                    orig_tangents.append(
+                        orig_file_bytes[tangent_off:tangent_off + 16])
                     if color_count > 0:
                         orig_colors.append(orig_file_bytes[off + color_off_in_stride:off + color_off_in_stride + 4 * color_count])
                     if mesh.uv_count > 0:
@@ -2186,10 +2208,19 @@ class BlenderMeshExporter:
                     f.write(bp.float(normal[0] * -1))
                     f.write(bp.float(normal[1]))
                     f.write(bp.float(normal[2]))
-                    f.write(bp.float(tangent[0] * -1))
-                    f.write(bp.float(tangent[1]))
-                    f.write(bp.float(tangent[2]))
-                    f.write(bp.float(v_flip))
+                    if compute_tangents:
+                        f.write(bp.float(tangent[0] * -1))
+                        f.write(bp.float(tangent[1]))
+                        f.write(bp.float(tangent[2]))
+                        f.write(bp.float(v_flip))
+                    elif orig_tangents and src_vi < len(orig_tangents):
+                        f.write(orig_tangents[src_vi])
+                    else:
+                        # Fallback for a malformed/empty source block
+                        f.write(bp.float(tangent[0] * -1))
+                        f.write(bp.float(tangent[1]))
+                        f.write(bp.float(tangent[2]))
+                        f.write(bp.float(v_flip))
 
                     # UVs
                     if mesh.uv_count > 0:
