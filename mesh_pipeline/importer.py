@@ -124,19 +124,19 @@ class BlenderMeshImporter:
             _enc_list = '/'.join(_enc_map.get(i, '?') for i in range(mesh.uv_count))
             logger.debug("UV encoding: %d (%s)", mesh.uv_count, _enc_list)
 
-        # Store per-UV-layer centred flags as mesh attributes so export can
-        # reverse the correct transform without re-detecting from Blender values.
+        # Store every per-UV-layer convention explicitly, including false.
+        # A missing false attribute used to make export re-detect the convention
+        # from Blender-space UV bounds; inferring from Blender-space bounds is
+        # unreliable for wide/tiled UVs and can flip them.
         for uv_index, (centred_u, centred_v) in enumerate(uv_centred_flags):
-            if centred_u:
-                cu_attr = obj_data.attributes.get(f'mmb_uv{uv_index}_centred_u') or \
-                          obj_data.attributes.new(name=f'mmb_uv{uv_index}_centred_u', type='INT', domain='POINT')
-                for vi in range(len(cu_attr.data)):
-                    cu_attr.data[vi].value = 1
-            if centred_v:
-                cv_attr = obj_data.attributes.get(f'mmb_uv{uv_index}_centred_v') or \
-                          obj_data.attributes.new(name=f'mmb_uv{uv_index}_centred_v', type='INT', domain='POINT')
-                for vi in range(len(cv_attr.data)):
-                    cv_attr.data[vi].value = 1
+            cu_attr = obj_data.attributes.get(f'mmb_uv{uv_index}_centred_u') or \
+                      obj_data.attributes.new(name=f'mmb_uv{uv_index}_centred_u', type='INT', domain='POINT')
+            cv_attr = obj_data.attributes.get(f'mmb_uv{uv_index}_centred_v') or \
+                      obj_data.attributes.new(name=f'mmb_uv{uv_index}_centred_v', type='INT', domain='POINT')
+            for vi in range(len(cu_attr.data)):
+                cu_attr.data[vi].value = int(centred_u)
+            for vi in range(len(cv_attr.data)):
+                cv_attr.data[vi].value = int(centred_v)
 
         # Import Colors
         # Written directly to obj_data.attributes (POINT domain, FLOAT_COLOR type) rather

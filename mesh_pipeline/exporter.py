@@ -1837,21 +1837,17 @@ class BlenderMeshExporter:
             uv_centred_u = []
             uv_centred_v = []
             for ui in range(mesh.uv_count):
-                # Prefer attributes
+                # Imported meshes store their uv convention as an explicit 0/1 attribute.
+                # For meshes without this attribute; ordinary flipped V is the safe default
+                # as inferring from Blender-space bounds is unreliable for wide/tiled UVs and can flip them.
                 cu_attr = data.attributes.get(f'mmb_uv{ui}_centred_u')
                 cv_attr = data.attributes.get(f'mmb_uv{ui}_centred_v')
-                if cu_attr is not None:
+                if cu_attr is not None and len(cu_attr.data):
                     uv_centred_u.append(bool(cu_attr.data[0].value))
-                elif ui < len(data.uv_layers):
-                    uv_centred_u.append(False)
                 else:
                     uv_centred_u.append(False)
-                if cv_attr is not None:
+                if cv_attr is not None and len(cv_attr.data):
                     uv_centred_v.append(bool(cv_attr.data[0].value))
-                elif ui < len(data.uv_layers):
-                    v_vals = [data.uv_layers[ui].data[li].uv[1] for li in range(len(data.loops))]
-                    v_min, v_max = min(v_vals), max(v_vals)
-                    uv_centred_v.append(v_min < -0.05 and abs((v_min + v_max) / 2.0 - 0.5) < 0.15)
                 else:
                     uv_centred_v.append(False)
 
